@@ -388,6 +388,18 @@ cast! {
     v: Value => Self::Set(v),
 }
 
+/// Retrieves the value of a state at a specific location in a laid-out document.
+pub fn state_value_at(
+    state: &State,
+    engine: &mut Engine,
+    introspector: Tracked<dyn Introspector + '_>,
+    location: Location,
+) -> SourceResult<Value> {
+    let sequence = sequence(state, engine, introspector)?;
+    let offset = introspector.query_count_before(&state.select(), location);
+    Ok(sequence.get(offset).cloned().unwrap_or_else(|| state.init.clone()))
+}
+
 /// Executes an update of a state.
 #[elem(Construct, Locatable)]
 pub struct StateUpdateElem {

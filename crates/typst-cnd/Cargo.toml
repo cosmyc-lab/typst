@@ -1,0 +1,41 @@
+[package]
+name = "typst-cnd"
+description = "Typst's CND manifest exporter."
+version = "0.1.0"
+rust-version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+readme = { workspace = true }
+
+[dependencies]
+typst = { workspace = true }
+typst-assets = { workspace = true }
+typst-kit = { workspace = true, features = ["embedded-fonts", "scan-fonts", "system-files", "system-packages", "universe-packages", "system-downloader", "datetime"] }
+typst-layout = { workspace = true }
+typst-library = { workspace = true }
+typst-macros = { workspace = true }
+typst-syntax = { workspace = true }
+typst-timing = { workspace = true }
+typst-utils = { workspace = true }
+comemo = { workspace = true }
+ecow = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"
+time = { workspace = true, features = ["formatting", "parsing"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+clap = { workspace = true, features = ["derive"] }
+
+[[bin]]
+name = "typst-cnd"
+path = "src/bin/typst-cnd.rs"
+
+[lints]
+workspace = true

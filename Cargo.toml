@@ -18,6 +18,8 @@ readme = "README.md"
 [workspace.dependencies]
 typst = { path = "crates/typst", version = "0.15.0" }
 typst-bundle = { path = "crates/typst-bundle", version = "0.15.0" }
+hex = "0.4"
+typst-cnd = { path = "crates/typst-cnd", version = "0.1.0" }
 typst-cli = { path = "crates/typst-cli", version = "0.15.0" }
 typst-eval = { path = "crates/typst-eval", version = "0.15.0" }
 typst-html = { path = "crates/typst-html", version = "0.15.0" }
