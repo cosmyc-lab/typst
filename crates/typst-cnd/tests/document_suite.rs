@@ -644,6 +644,57 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
 }
 
 #[test]
+fn inline_code_not_duplicated_in_paragraphs() {
+    let manifest = manifest_for_example("inline_code.typ");
+    let paragraphs = paragraph_texts_in_order(&manifest.nodes);
+
+    for text in &paragraphs {
+        for token in &["typst-cnd", "extract_text", "plain_text", "foo"] {
+            let count = text.matches(token).count();
+            assert!(
+                count <= 1,
+                "inline code token {token:?} appears {count}× in paragraph (expected ≤1): {text:?}"
+            );
+        }
+    }
+
+    let lists = find_lists(&manifest.nodes);
+    assert!(!lists.is_empty(), "inline_code.typ should produce at least one list");
+    for list in lists {
+        for item in &list.items {
+            for token in &["typst-cnd", "cargo test", "inline code"] {
+                let count = item.text.matches(token).count();
+                assert!(
+                    count <= 1,
+                    "inline code token {token:?} appears {count}× in list item (expected ≤1): {:?}",
+                    item.text
+                );
+            }
+        }
+    }
+
+    let mut quote_texts: Vec<String> = Vec::new();
+    fn collect_quote_texts(nodes: &[CndNode], out: &mut Vec<String>) {
+        for node in nodes {
+            match node {
+                CndNode::Quote(q) => out.push(q.text.clone()),
+                CndNode::Heading(h) => collect_quote_texts(&h.children, out),
+                _ => {}
+            }
+        }
+    }
+    collect_quote_texts(&manifest.nodes, &mut quote_texts);
+    assert!(!quote_texts.is_empty(), "inline_code.typ should produce at least one quote");
+    for text in &quote_texts {
+        let count = text.matches("extract_text").count();
+        assert!(
+            count <= 1,
+            "inline code token 'extract_text' appears {count}× in quote (expected ≤1): {text:?}"
+        );
+    }
+}
+
+#[test]
 fn example_files_exist() {
     for name in [
         "minimal.typ",

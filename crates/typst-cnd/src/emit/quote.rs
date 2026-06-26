@@ -6,6 +6,7 @@ use typst_library::model::{Attribution, QuoteElem};
 use typst_library::text::Locale;
 
 use crate::emit::convert::{self, NodeRecord};
+use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
 use crate::manifest::QuoteNode;
 
@@ -16,7 +17,7 @@ pub fn convert(
     styles: StyleChain,
     doc_lang: Option<&str>,
 ) -> typst_library::diag::SourceResult<(QuoteNode, NodeRecord)> {
-    let text: EcoString = quote.body.plain_text();
+    let text: EcoString = extract_text(&quote.body);
     let attribution = quote
         .attribution
         .get_cloned(styles)
@@ -41,7 +42,7 @@ pub fn convert(
 
 fn attribution_text(attribution: &Attribution) -> EcoString {
     match attribution {
-        Attribution::Content(content) => content.plain_text(),
+        Attribution::Content(content) => extract_text(content),
         Attribution::Label(label) => label.resolve().as_str().into(),
     }
 }

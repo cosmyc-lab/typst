@@ -1,5 +1,6 @@
 pub mod code;
 pub mod convert;
+pub mod extract;
 pub mod figure;
 pub mod heading;
 pub mod list;

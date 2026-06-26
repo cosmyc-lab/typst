@@ -5,6 +5,7 @@ use typst_library::model::ParElem;
 use typst_library::text::Locale;
 
 use crate::emit::convert::{self, NodeRecord};
+use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
 use crate::manifest::ParagraphNode;
 
@@ -16,7 +17,7 @@ pub fn convert(
     styles: StyleChain,
     doc_lang: Option<&str>,
 ) -> typst_library::diag::SourceResult<(ParagraphNode, NodeRecord)> {
-    let text = par.body.plain_text().into();
+    let text = extract_text(&par.body).into();
     let lang = doc_lang
         .map(str::to_string)
         .or_else(|| Some(Locale::get_in(styles).rfc_3066().into()));

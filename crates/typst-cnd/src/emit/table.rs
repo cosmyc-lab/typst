@@ -9,6 +9,7 @@ use typst_library::model::{FigureCaption, FigureElem, TableChild, TableElem, Tab
 use typst_syntax::Span;
 
 use crate::emit::convert::{self, NodeRecord};
+use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
 use crate::manifest::{TableCell, TableKind, TableNode};
 
@@ -51,10 +52,7 @@ pub fn is_table_in_figure(introspector: &dyn Introspector, table: &Content) -> b
 }
 
 fn table_fingerprint(table: &Packed<TableElem>) -> EcoString {
-    table
-        .clone()
-        .pack()
-        .plain_text()
+    extract_text(&table.clone().pack())
         .split_whitespace()
         .collect::<Vec<_>>()
         .join("|")
@@ -236,7 +234,7 @@ pub fn cells_from_cell_grid(grid: Option<&CellGrid>) -> Vec<TableCell> {
             rowspan: cell.rowspan.get() as i32,
             colspan: cell.colspan.get() as i32,
             is_header: false,
-            text: cell.body.plain_text().into(),
+            text: extract_text(&cell.body).into(),
         });
     }
     cells

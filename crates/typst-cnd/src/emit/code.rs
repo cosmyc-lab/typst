@@ -5,6 +5,7 @@ use typst_library::introspection::Introspector;
 use typst_library::text::RawElem;
 
 use crate::emit::convert::{self, NodeRecord};
+use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
 use crate::manifest::CodeNode;
 
@@ -15,7 +16,7 @@ pub fn convert(
     styles: StyleChain,
 ) -> typst_library::diag::SourceResult<(CodeNode, NodeRecord)> {
     let block = raw.block.get(styles);
-    let text: EcoString = raw.clone().pack().plain_text();
+    let text: EcoString = extract_text(&raw.clone().pack());
     let lang = raw.lang.get_cloned(styles).map(Into::into);
 
     let id = uuid::Uuid::new_v4();

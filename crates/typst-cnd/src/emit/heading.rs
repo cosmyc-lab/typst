@@ -5,6 +5,7 @@ use typst_library::introspection::Introspector;
 use typst_library::model::HeadingElem;
 
 use crate::emit::convert::{self, HeadingFrame, NodeRecord};
+use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
 use crate::manifest::HeadingNode;
 
@@ -18,7 +19,7 @@ pub fn convert(
 ) -> typst_library::diag::SourceResult<(HeadingNode, NodeRecord)> {
     let level = heading.resolve_level(styles).get() as i32;
     let numbering: EcoString = heading.numbers.clone().unwrap_or_default();
-    let text: EcoString = heading.body.plain_text();
+    let text: EcoString = extract_text(&heading.body);
     let segment = if numbering.is_empty() {
         text.clone()
     } else {

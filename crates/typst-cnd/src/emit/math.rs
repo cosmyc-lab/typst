@@ -8,6 +8,7 @@ use typst_library::model::Refable;
 use typst_syntax::Span;
 
 use crate::emit::convert::{self, NodeRecord};
+use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
 use crate::manifest::MathNode;
 
@@ -20,7 +21,7 @@ pub fn convert(
     let mut equation = equation.clone();
     equation.synthesize(engine, styles)?;
 
-    let text: EcoString = equation.body.plain_text();
+    let text: EcoString = extract_text(&equation.body);
     let block = equation.block.get(styles);
     let numbering: Option<EcoString> = equation.numbering().and_then(|numbering| {
         let location = equation.location()?;
@@ -28,7 +29,7 @@ pub fn convert(
             .counter()
             .display_at(engine, location, styles, numbering, equation.span())
             .ok()
-            .map(|display| display.plain_text())
+            .map(|display| extract_text(&display))
     });
 
     let id = uuid::Uuid::new_v4();

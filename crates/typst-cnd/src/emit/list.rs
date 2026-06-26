@@ -4,6 +4,7 @@ use typst_library::introspection::Introspector;
 use typst_library::model::{EnumElem, EnumItem, ListElem, ListItem};
 
 use crate::emit::convert::{self, NodeRecord};
+use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
 use crate::manifest::{ListItem as CndListItem, ListNode};
 
@@ -69,7 +70,7 @@ fn list_item(item: &Packed<ListItem>, ordered: bool, styles: StyleChain) -> CndL
     };
 
     CndListItem {
-        text: item.body.plain_text().into(),
+        text: extract_text(&item.body).into(),
         number: None,
         children: nested,
     }
@@ -96,7 +97,7 @@ fn enum_item(item: &Packed<EnumItem>, index: usize, styles: StyleChain) -> CndLi
     };
 
     CndListItem {
-        text: item.body.plain_text().into(),
+        text: extract_text(&item.body).into(),
         number,
         children: nested,
     }

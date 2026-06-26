@@ -14,7 +14,7 @@ use typst_library::text::RawElem;
 use typst_syntax::{FileId, Span};
 use uuid::Uuid;
 
-use crate::emit::{code, figure, heading, list, math, paragraph, quote, reading_order, table};
+use crate::emit::{code, extract, figure, heading, list, math, paragraph, quote, reading_order, table};
 use crate::manifest::{CndNode, HeadingNode};
 
 /// Metadata captured for each emitted node.
@@ -296,9 +296,9 @@ fn should_skip_paragraph(
             return true;
         }
     }
-    skip_texts.contains(&normalize_paragraph_key(&par.body.plain_text()))
+    skip_texts.contains(&normalize_paragraph_key(&extract::extract_text(&par.body)))
         || paragraph_text_is_skipped(
-            &normalize_paragraph_key(&par.body.plain_text()),
+            &normalize_paragraph_key(&extract::extract_text(&par.body)),
             skip_texts,
         )
 }
@@ -346,7 +346,7 @@ fn build_skip_paragraph_texts(introspector: &dyn Introspector) -> FxHashSet<Stri
         let Some(quote) = elem.to_packed::<QuoteElem>() else {
             continue;
         };
-        push_text_key(&mut skip, &quote.body.plain_text());
+        push_text_key(&mut skip, &extract::extract_text(&quote.body));
     }
 
     for elem in introspector.query(&ListElem::ELEM.select()) {
@@ -372,7 +372,7 @@ fn build_skip_paragraph_texts(introspector: &dyn Introspector) -> FxHashSet<Stri
             continue;
         };
         if let Some(caption) = figure.caption.get_cloned(StyleChain::default()) {
-            push_text_key(&mut skip, &caption.body.plain_text());
+            push_text_key(&mut skip, &extract::extract_text(&caption.body));
         }
     }
 
@@ -380,7 +380,7 @@ fn build_skip_paragraph_texts(introspector: &dyn Introspector) -> FxHashSet<Stri
 }
 
 fn collect_list_item_texts(item: &Packed<ListItem>, skip: &mut FxHashSet<String>) {
-    push_text_key(skip, &item.body.plain_text());
+    push_text_key(skip, &extract::extract_text(&item.body));
     if let Some(nested) = item.body.query_first_naive(&ListElem::ELEM.select()) {
         if let Some(list) = nested.to_packed::<ListElem>() {
             for child in &list.children {
@@ -391,7 +391,7 @@ fn collect_list_item_texts(item: &Packed<ListItem>, skip: &mut FxHashSet<String>
 }
 
 fn collect_enum_item_texts(item: &Packed<EnumItem>, skip: &mut FxHashSet<String>) {
-    push_text_key(skip, &item.body.plain_text());
+    push_text_key(skip, &extract::extract_text(&item.body));
     if let Some(nested) = item.body.query_first_naive(&EnumElem::ELEM.select()) {
         if let Some(list) = nested.to_packed::<EnumElem>() {
             for child in &list.children {
@@ -721,11 +721,11 @@ pub fn figure_number(
     let display = counter
         .display_at(engine, location, styles, numbering, figure.span())
         .ok()?;
-    let number = display.plain_text();
+    let number = extract::extract_text(&display);
 
     match figure.supplement.get_ref(styles) {
         typst_library::foundations::Smart::Custom(Some(Supplement::Content(supplement))) => {
-            let supplement = supplement.plain_text();
+            let supplement = extract::extract_text(supplement);
             if supplement.is_empty() {
                 Some(number)
             } else {
@@ -737,5 +737,5 @@ pub fn figure_number(
 }
 
 pub fn caption_text(caption: &Packed<FigureCaption>) -> EcoString {
-    caption.body.plain_text()
+    extract::extract_text(&caption.body)
 }
