@@ -1,5 +1,6 @@
 use ecow::EcoString;
 use typst_library::World;
+use typst_library::WorldExt;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Packed, StyleChain, Synthesize};
 use typst_library::introspection::Introspector;
@@ -47,7 +48,7 @@ pub fn convert(
 
 fn raw_typst_from_span(engine: &Engine, span: Span) -> Option<String> {
     let id = span.id()?;
-    let range = span.range()?;
+    let range = engine.world.range(span)?;
     let source = engine.world.source(id).ok()?;
     let text = source.text();
     let start = range.start.min(text.len());

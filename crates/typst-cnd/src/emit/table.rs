@@ -1,6 +1,7 @@
 use ecow::EcoString;
 use typst_library::engine::Engine;
 use typst_library::World;
+use typst_library::WorldExt;
 use typst_library::foundations::{Content, Label, NativeElement, Packed, StyleChain, Synthesize};
 use typst_library::introspection::Introspector;
 use typst_library::layout::GridElem;
@@ -242,7 +243,7 @@ pub fn cells_from_cell_grid(grid: Option<&CellGrid>) -> Vec<TableCell> {
 
 fn raw_typst_from_span(engine: &Engine, span: Span) -> Option<String> {
     let id = span.id()?;
-    let range = span.range()?;
+    let range = engine.world.range(span)?;
     let source = engine.world.source(id).ok()?;
     let text = source.text();
     let start = range.start.min(text.len());
