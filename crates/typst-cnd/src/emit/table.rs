@@ -131,6 +131,7 @@ pub fn from_figure_grid(
 
     let mut node = TableNode::new(id, location);
     node.kind = TableKind::Grid;
+    node.content_kind = content_kind_from_metadata(&record.state_metadata);
     node.caption = caption;
     node.fig_number = fig_number;
     node.cells = cells;
@@ -172,12 +173,26 @@ pub fn convert(
         .or_else(|| raw_typst_from_span(engine, table.span()));
 
     let mut node = TableNode::new(id, location);
+    node.content_kind = content_kind_from_metadata(&record.state_metadata);
     node.caption = caption.map(Into::into);
     node.fig_number = fig_number.map(Into::into);
     node.cells = cells;
     node.raw_typst = raw_typst;
 
     Ok((node, record))
+}
+
+/// Promote a `content_kind` hint from the generic `cnd.metadata` state bag
+/// (already captured on every node's `state_metadata`, see
+/// `emit/convert.rs`'s `make_record`/`apply_metadata`) into the table's own
+/// typed field — the one `cnd.core.node_text`'s "auto"/"inline" rendering
+/// actually reads. Only a string value is accepted; anything else (wrong
+/// type, or simply absent) leaves the hint unset rather than guessing.
+fn content_kind_from_metadata(metadata: &std::collections::HashMap<String, serde_json::Value>) -> Option<String> {
+    match metadata.get("content_kind") {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
 }
 
 fn count_header_rows(table: &Packed<TableElem>) -> i32 {

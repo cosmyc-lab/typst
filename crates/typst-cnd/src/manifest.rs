@@ -200,6 +200,13 @@ pub struct TableNode {
     pub base: NodeBase,
     #[serde(default, skip_serializing_if = "is_table_kind")]
     pub kind: TableKind,
+    /// "data" | "content" hint for text rendering (cnd-sdk's
+    /// `cnd.core.node_text` "inline"/"auto" modes) — set from a
+    /// `content_kind:` argument on the Typst-side table wrapper, threaded
+    /// through the generic `cnd.metadata` state (see `emit/table.rs`'s
+    /// `content_kind_from_metadata`). `None` when the author never tagged it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -360,6 +367,7 @@ impl TableNode {
         Self {
             base: NodeBase::new(id, location),
             kind: TableKind::Table,
+            content_kind: None,
             caption: None,
             fig_number: None,
             cells: Vec::new(),
