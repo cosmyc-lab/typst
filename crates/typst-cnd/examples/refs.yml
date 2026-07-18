@@ -1,0 +1,17 @@
+smith2024:
+  type: article
+  title: Context-native pipelines
+  author: Smith, Jane
+  date: 2024
+  parent:
+    type: periodical
+    title: Journal of Document Systems
+  serial-number:
+    doi: 10.1000/jods.2024.12
+
+jones2022:
+  type: book
+  title: Foundations of Structured Documents
+  author: Jones, Alan
+  date: 2022
+  publisher: Example Press

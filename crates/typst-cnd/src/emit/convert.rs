@@ -8,8 +8,8 @@ use typst_library::foundations::{Content, Label, NativeElement, Packed, Selector
 use typst_library::introspection::{Introspector, Location, Tag, TagElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteElem, HeadingElem, ListElem, ListItem,
-    ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
+    CitationForm, CiteElem, EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteElem,
+    HeadingElem, ListElem, ListItem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_syntax::{FileId, Span};
@@ -18,6 +18,15 @@ use uuid::Uuid;
 use crate::emit::{code, extract, figure, heading, list, math, paragraph, quote, reading_order, table};
 use crate::manifest::{CndNode, HeadingNode};
 
+/// A citation marker occurring in a node's content, captured for
+/// resolution into a `CiteRef` once the bibliography pool exists.
+#[derive(Debug, Clone)]
+pub struct CiteMarker {
+    pub key: Label,
+    pub form: Option<String>,
+    pub supplement: Option<String>,
+}
+
 /// Metadata captured for each emitted node.
 #[derive(Debug, Clone)]
 pub struct NodeRecord {
@@ -25,8 +34,11 @@ pub struct NodeRecord {
     pub label: Option<Label>,
     pub ref_targets: Vec<Label>,
     /// Locations of footnote markers occurring in this node's content,
-    /// resolved to footnote-pool ids in `pools::resolve_footnote_edges`.
+    /// resolved to footnote-pool ids in `pools::resolve_footnotes`.
     pub footnote_locs: Vec<Location>,
+    /// Citation markers occurring in this node's content, resolved to
+    /// `CiteRef` edges in `pools::resolve_citations`.
+    pub cite_markers: Vec<CiteMarker>,
     pub state_metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
@@ -37,12 +49,19 @@ pub struct ConvertContext {
     pub records: rustc_hash::FxHashMap<Uuid, NodeRecord>,
     pub location_to_id: rustc_hash::FxHashMap<Location, Uuid>,
     pub label_to_id: rustc_hash::FxHashMap<Label, Uuid>,
-    /// Footnote pool (proposal 0004), populated by `pools::build_footnote_pool`.
+    /// Footnote pool (proposal 0004), populated by `pools::resolve_footnotes`.
     pub footnotes: Vec<crate::manifest::Footnote>,
     /// Map from a footnote marker's own location (declaration *or*
     /// re-reference) to its pool-entry id. A node's `footnote_locs` are
     /// resolved through this map; both marker kinds land on the same entry.
     pub footnote_loc_to_id: rustc_hash::FxHashMap<Location, Uuid>,
+    /// Bibliography pool (proposal 0004), populated by
+    /// `pools::resolve_citations`.
+    pub bibliography: Vec<crate::manifest::BibEntry>,
+    /// Map from a bibliography `@key` to its pool-entry id. Also used to
+    /// keep citation keys out of the cross-reference index (a `@key`
+    /// citation is a `RefElem` but resolves in the bibliography, not nodes).
+    pub bib_key_to_id: rustc_hash::FxHashMap<Label, Uuid>,
 }
 
 impl ConvertContext {
@@ -736,6 +755,7 @@ pub fn make_record(
     let mut ref_targets = collect_ref_targets(content);
     ref_targets.dedup_by_key(|label| label.resolve());
     let footnote_locs = collect_footnote_locs(content);
+    let cite_markers = collect_cite_markers(content);
 
     let state_metadata = match location {
         Some(loc) => metadata_at(engine, introspector, loc)?,
@@ -747,8 +767,51 @@ pub fn make_record(
         label,
         ref_targets,
         footnote_locs,
+        cite_markers,
         state_metadata,
     })
+}
+
+/// Collect citation markers occurring in `content`, in reading order.
+///
+/// Like footnotes, citations are pulled from the realized flow but leave a
+/// `TagElem` (`Tag::Start` holding the original `CiteElem`) at the marker
+/// position. `form`/`supplement` read off the element with the default
+/// style chain, exactly as Typst's own bibliography rendering does.
+fn collect_cite_markers(content: &Content) -> Vec<CiteMarker> {
+    let mut markers = Vec::new();
+    let _ = content.traverse(&mut |element| {
+        if let Some(tag) = element.to_packed::<TagElem>() {
+            if let Tag::Start(inner, _) = &tag.tag {
+                if let Some(cite) = inner.to_packed::<CiteElem>() {
+                    let form = citation_form_str(cite.form.get(StyleChain::default()));
+                    let supplement = cite
+                        .supplement
+                        .get_cloned(StyleChain::default())
+                        .map(|c| extract::extract_text(&c).into());
+                    markers.push(CiteMarker { key: cite.key, form, supplement });
+                }
+            }
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    markers
+}
+
+/// Map a Typst citation form to its lowercase schema string. A suppressed
+/// citation (`form: none`) maps to `"none"` (proposal 0004).
+fn citation_form_str(form: Option<CitationForm>) -> Option<String> {
+    Some(
+        match form {
+            None => "none",
+            Some(CitationForm::Normal) => "normal",
+            Some(CitationForm::Prose) => "prose",
+            Some(CitationForm::Full) => "full",
+            Some(CitationForm::Author) => "author",
+            Some(CitationForm::Year) => "year",
+        }
+        .to_string(),
+    )
 }
 
 /// Collect the locations of footnote markers occurring in `content`.

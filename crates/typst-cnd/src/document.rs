@@ -77,15 +77,21 @@ impl Output for CndDocument {
         )?;
         refs::rebuild_label_index(&mut ctx, introspector.as_ref());
         convert::apply_metadata(&mut ctx);
+
+        // Bibliography pool must precede cross-reference resolution so a
+        // `@key` citation (a RefElem) is kept out of the `refs` index.
+        pools::build_bibliography_pool(engine, introspector.as_ref(), &mut ctx)?;
         refs::resolve_refs(&mut ctx, introspector.as_ref(), content);
 
-        // Out-of-tree pools + typed edges (proposal 0004): build the
-        // footnote pool and attach each marker to its node. Markers are
-        // captured per node during conversion as introspection tag
-        // locations, since the realized flow keeps only rendered markers.
+        // Out-of-tree typed edges (proposal 0004): footnote + citation
+        // markers were captured per node during conversion (as introspection
+        // tags, since the realized flow keeps only rendered markers); resolve
+        // them to FootnoteRef/CiteRef edges against the pools.
         pools::resolve_footnotes(engine, introspector.as_ref(), styles, &mut ctx)?;
+        pools::resolve_cite_edges(&mut ctx);
 
         let footnotes = ctx.footnotes.clone();
+        let bibliography = ctx.bibliography.clone();
         let mut nodes = ctx.roots;
         let mut assigner = LocationAssigner::new(introspector.clone(), ctx.records);
         assigner.assign_all(&mut nodes);
@@ -93,7 +99,7 @@ impl Output for CndDocument {
         Ok(Self {
             info,
             nodes,
-            bibliography: Vec::new(),
+            bibliography,
             footnotes,
             introspector,
         })

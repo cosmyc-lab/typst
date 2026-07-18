@@ -875,6 +875,80 @@ fn footnotes_pool_and_edges() {
 }
 
 #[test]
+fn citations_bibliography_pool_and_cite_edges() {
+    let manifest = manifest_for_example("citations.typ");
+
+    // Bibliography pool: two cited works with the curated typed subset.
+    let smith = manifest
+        .bibliography
+        .iter()
+        .find(|b| b.label == "smith2024")
+        .expect("smith2024 bib entry");
+    assert_eq!(smith.type_.as_deref(), Some("article"));
+    assert_eq!(smith.year, Some(2024));
+    assert!(smith.authors.iter().any(|a| a.contains("Smith")));
+    assert_eq!(smith.doi.as_deref(), Some("10.1000/jods.2024.12"));
+    assert!(!smith.rendered.is_empty(), "rendered reference string present");
+    assert!(smith.raw.get("title").is_some(), "raw carries the full source entry");
+
+    assert!(manifest.bibliography.iter().any(|b| b.label == "jones2022"));
+
+    assert_pool_refs_resolve(&manifest);
+
+    // Collect cite edges per paragraph.
+    let mut cites: Vec<Vec<(String, Option<String>, Option<String>)>> = Vec::new();
+    fn walk(nodes: &[CndNode], out: &mut Vec<Vec<(String, Option<String>, Option<String>)>>) {
+        for node in nodes {
+            match node {
+                CndNode::Paragraph(p) => out.push(
+                    p.base
+                        .cites
+                        .iter()
+                        .map(|c| {
+                            (c.label.clone().unwrap_or_default(), c.form.clone(), c.supplement.clone())
+                        })
+                        .collect(),
+                ),
+                CndNode::Heading(h) => walk(&h.children, out),
+                _ => {}
+            }
+        }
+    }
+    walk(&manifest.nodes, &mut cites);
+    let all: Vec<_> = cites.iter().flatten().collect();
+
+    // Supplement, prose form, and suppressed (form: none) citation captured.
+    assert!(
+        all.iter().any(|(k, f, s)| k == "smith2024" && f.as_deref() == Some("normal") && s.as_deref() == Some("p. 104")),
+        "page-specific supplement captured: {all:?}"
+    );
+    assert!(all.iter().any(|(k, f, _)| k == "jones2022" && f.as_deref() == Some("prose")));
+    assert!(all.iter().any(|(k, f, _)| k == "jones2022" && f.as_deref() == Some("none")));
+
+    // A `@key` citation is a RefElem but must not create a cross-reference
+    // edge — citations resolve in the bibliography, not the node tree.
+    fn assert_no_bibkey_refs(nodes: &[CndNode]) {
+        for node in nodes {
+            for reference in &node.base().refs_to {
+                let label = reference.label.as_deref().unwrap_or_default();
+                assert!(
+                    label != "smith2024" && label != "jones2022",
+                    "citation key leaked into refs_to: {label}"
+                );
+            }
+            match node {
+                CndNode::Heading(h) => assert_no_bibkey_refs(&h.children),
+                CndNode::Figure(f) => assert_no_bibkey_refs(&f.children),
+                _ => {}
+            }
+        }
+    }
+    assert_no_bibkey_refs(&manifest.nodes);
+
+    assert_refs_resolve(&manifest.nodes);
+}
+
+#[test]
 fn example_files_exist() {
     for name in [
         "minimal.typ",
@@ -890,6 +964,7 @@ fn example_files_exist() {
         "terms.typ",
         "image_figure.typ",
         "footnotes.typ",
+        "citations.typ",
         "newsletter/main.typ",
     ] {
         assert!(

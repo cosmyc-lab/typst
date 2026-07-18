@@ -38,6 +38,11 @@ pub fn resolve_refs(
 
     for (source_id, record) in &ctx.records {
         for label in &record.ref_targets {
+            // A `@key` citation is a RefElem too, but resolves in the
+            // bibliography pool, not the node tree — keep it out of `refs`.
+            if ctx.bib_key_to_id.contains_key(label) {
+                continue;
+            }
             if let Some(target_id) = resolve_label(label, ctx, introspector) {
                 edges.push((
                     *source_id,
@@ -52,6 +57,9 @@ pub fn resolve_refs(
     let paragraph_ids = paragraph_ids_from_nodes(&ctx.roots);
     let heading_ids = heading_ids_from_nodes(&ctx.roots);
     for (source_kind, index, label) in ref_edges {
+        if ctx.bib_key_to_id.contains_key(&label) {
+            continue;
+        }
         let source_id = match source_kind {
             RefSourceKind::Paragraph => paragraph_ids.get(index).copied(),
             RefSourceKind::Heading => heading_ids.get(index).copied(),
