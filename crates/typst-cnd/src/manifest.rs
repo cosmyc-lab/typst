@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const CND_VERSION: &str = "0.1.0";
+pub const CND_VERSION: &str = "0.2.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +64,7 @@ pub enum CndNode {
     Code(CodeNode),
     Math(MathNode),
     Figure(FigureNode),
+    Image(ImageNode),
     List(ListNode),
 }
 
@@ -81,6 +82,7 @@ impl CndNode {
             Self::Code(n) => &n.base,
             Self::Math(n) => &n.base,
             Self::Figure(n) => &n.base,
+            Self::Image(n) => &n.base,
             Self::List(n) => &n.base,
         }
     }
@@ -94,6 +96,7 @@ impl CndNode {
             Self::Code(n) => &mut n.base,
             Self::Math(n) => &mut n.base,
             Self::Figure(n) => &mut n.base,
+            Self::Image(n) => &mut n.base,
             Self::List(n) => &mut n.base,
         }
     }
@@ -110,9 +113,14 @@ impl CndNode {
         &mut self.base_mut().refs_from
     }
 
+    /// Nodes with their own reading-flow children: headings and figure
+    /// wrappers. A figure's children keep their own `location` — nothing is
+    /// inherited from the wrapper (ADR 0010) — but they still need to be
+    /// reachable for metadata application and location assignment.
     pub fn children_mut(&mut self) -> Option<&mut Vec<CndNode>> {
         match self {
             Self::Heading(n) => Some(&mut n.children),
+            Self::Figure(n) => Some(&mut n.children),
             _ => None,
         }
     }
@@ -207,10 +215,6 @@ pub struct TableNode {
     /// `content_kind_from_metadata`). `None` when the author never tagged it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub caption: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fig_number: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cells: Vec<TableCell>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -257,6 +261,13 @@ pub struct MathNode {
     pub block: bool,
 }
 
+/// Captioned/numbered float wrapper — never a content carrier (ADR 0010).
+///
+/// The wrapped content (image, table, code, …) lives in `children` and
+/// keeps its own node type and `location`. `kind` is the counter/label
+/// selector of the figure ("image", "table", "raw", or an author-custom
+/// kind like "atom") — an open string, never a content discriminator.
+/// An unconvertible body yields `children: []` with `raw_typst` filled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FigureNode {
@@ -268,12 +279,24 @@ pub struct FigureNode {
     pub fig_number: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<CndNode>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub alt: Option<String>,
+    pub raw_typst: Option<String>,
+}
+
+/// Leaf image content. A bare image outside any figure is an `ImageNode`
+/// with no wrapper; a captioned image is an `ImageNode` inside a
+/// `FigureNode`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ImageNode {
+    #[serde(flatten)]
+    pub base: NodeBase,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_typst: Option<String>,
+    pub alt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,8 +391,6 @@ impl TableNode {
             base: NodeBase::new(id, location),
             kind: TableKind::Table,
             content_kind: None,
-            caption: None,
-            fig_number: None,
             cells: Vec::new(),
             raw_typst: None,
         }
@@ -418,9 +439,18 @@ impl FigureNode {
             caption: None,
             fig_number: None,
             kind: None,
-            alt: None,
-            path: None,
+            children: Vec::new(),
             raw_typst: None,
+        }
+    }
+}
+
+impl ImageNode {
+    pub fn new(id: Uuid, location: NodeLocation) -> Self {
+        Self {
+            base: NodeBase::new(id, location),
+            path: None,
+            alt: None,
         }
     }
 }

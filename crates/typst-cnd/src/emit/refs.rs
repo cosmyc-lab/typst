@@ -125,11 +125,12 @@ fn walk_paragraph_ids(nodes: &[CndNode], out: &mut Vec<Uuid>) {
         match node {
             CndNode::Paragraph(n) => out.push(n.base.id),
             CndNode::Heading(n) => walk_paragraph_ids(&n.children, out),
+            CndNode::Figure(n) => walk_paragraph_ids(&n.children, out),
             CndNode::Table(_)
             | CndNode::Quote(_)
             | CndNode::Code(_)
             | CndNode::Math(_)
-            | CndNode::Figure(_)
+            | CndNode::Image(_)
             | CndNode::List(_) => {}
         }
     }
@@ -204,6 +205,7 @@ fn find_labeled_table(ctx: &ConvertContext) -> Option<Uuid> {
                 | CndNode::Quote(_)
                 | CndNode::Code(_)
                 | CndNode::Math(_)
+                | CndNode::Image(_)
                 | CndNode::List(_) => {}
             }
         }
@@ -241,6 +243,7 @@ fn last_paragraph_under_heading(nodes: &[CndNode], heading_id: Uuid) -> Option<U
                 | CndNode::Code(_)
                 | CndNode::Math(_)
                 | CndNode::Figure(_)
+                | CndNode::Image(_)
                 | CndNode::List(_) => {}
             }
         }

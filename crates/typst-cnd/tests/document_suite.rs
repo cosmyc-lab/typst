@@ -56,17 +56,25 @@ fn structured_cross_references() {
     let manifest = manifest_for_example("structured.typ");
     assert!(label_exists(&manifest.nodes, "tab-params-nominaux"));
 
-    let table = find_by_label(&manifest.nodes, "tab-params-nominaux").expect("table");
-    let CndNode::Table(table) = table else {
-        panic!("expected table node");
+    let figure = find_by_label(&manifest.nodes, "tab-params-nominaux").expect("figure");
+    let CndNode::Figure(figure) = figure else {
+        panic!("expected figure node");
     };
     assert_eq!(
-        table.caption.as_deref(),
+        figure.caption.as_deref(),
         Some("Paramètres nominaux de fonctionnement.")
     );
-    assert!(table.fig_number.as_deref().is_some_and(|n| n.contains('1')));
+    assert!(figure.fig_number.as_deref().is_some_and(|n| n.contains('1')));
+    let table = figure
+        .children
+        .iter()
+        .find_map(|c| match c {
+            CndNode::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("table child");
     assert!(table.raw_typst.as_ref().is_some_and(|r| r.contains("table(")));
-    assert!(!table.base.refs_from.is_empty());
+    assert!(!figure.base.refs_from.is_empty());
 
     assert_refs_resolve(&manifest.nodes);
 }
@@ -165,8 +173,8 @@ fn complex_refs_dense_graph() {
     );
 
     let signaux = find_by_label(&manifest.nodes, "tab-signaux").expect("signaux");
-    let CndNode::Table(signaux) = signaux else {
-        panic!("expected table");
+    let CndNode::Figure(signaux) = signaux else {
+        panic!("expected figure");
     };
     assert!(signaux.base.refs_from.len() >= 2);
 
@@ -203,11 +211,9 @@ fn complex_tables_standalone_and_figure_variants() {
     assert!(label_exists(&manifest.nodes, "tab-plages-b"));
 
     let standalone = find_by_label(&manifest.nodes, "tab-config-standalone").expect("standalone");
-    let CndNode::Table(standalone) = standalone else {
-        panic!("expected table");
+    let CndNode::Table(_standalone) = standalone else {
+        panic!("expected bare table (standalone is not figure-wrapped)");
     };
-    assert!(standalone.caption.is_none(), "standalone table has no figure caption");
-    assert!(standalone.fig_number.is_none());
 
     let tables = table_stats(&manifest.nodes);
     assert_eq!(tables.with_caption, 2, "only figure tables have captions");
@@ -216,12 +222,28 @@ fn complex_tables_standalone_and_figure_variants() {
 
     let plages_a = find_by_label(&manifest.nodes, "tab-plages-a").expect("plages a");
     let plages_b = find_by_label(&manifest.nodes, "tab-plages-b").expect("plages b");
-    let CndNode::Table(a) = plages_a else { panic!() };
-    let CndNode::Table(b) = plages_b else { panic!() };
+    let CndNode::Figure(a) = plages_a else { panic!() };
+    let CndNode::Figure(b) = plages_b else { panic!() };
     assert_ne!(a.base.id, b.base.id);
     assert_ne!(a.caption, b.caption);
-    assert!(a.cells.iter().any(|c| c.text.contains("PT-A")));
-    assert!(b.cells.iter().any(|c| c.text.contains("PT-C")));
+    let a_table = a
+        .children
+        .iter()
+        .find_map(|c| match c {
+            CndNode::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("table child a");
+    let b_table = b
+        .children
+        .iter()
+        .find_map(|c| match c {
+            CndNode::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("table child b");
+    assert!(a_table.cells.iter().any(|c| c.text.contains("PT-A")));
+    assert!(b_table.cells.iter().any(|c| c.text.contains("PT-C")));
 
     assert_refs_resolve(&manifest.nodes);
 }
@@ -278,11 +300,19 @@ fn complex_columns_reading_order_flatten() {
         Some("left")
     );
 
-    let table = find_by_label(&manifest.nodes, "tab-bus-col").expect("table");
-    let CndNode::Table(table) = table else {
-        panic!("expected table");
+    let figure = find_by_label(&manifest.nodes, "tab-bus-col").expect("figure");
+    let CndNode::Figure(figure) = figure else {
+        panic!("expected figure");
     };
-    assert!(table.caption.as_ref().is_some_and(|c| c.contains("bus")));
+    assert!(figure.caption.as_ref().is_some_and(|c| c.contains("bus")));
+    let table = figure
+        .children
+        .iter()
+        .find_map(|c| match c {
+            CndNode::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("table child");
     assert_eq!(table.cells.len(), 6);
 
     let page_cols = find_by_label(&manifest.nodes, "ch-page-cols").expect("page cols");
@@ -379,15 +409,25 @@ fn rich_document_node_types() {
     assert!(stats.lists >= 2, "expected bullet and numbered lists");
     assert!(stats.code >= 1, "expected a code block node");
     assert!(stats.math >= 1, "expected a block math node");
-    assert!(stats.figures >= 1, "expected a non-table figure node");
+    // Every captioned float is now a figure wrapper, including the
+    // grid-in-figure — so this counts the image figure plus the grid figure.
+    assert!(stats.figures >= 1, "expected at least one figure node");
     assert!(stats.tables >= 1, "expected a grid-in-figure table node");
 
-    let grid = find_by_label(&manifest.nodes, "rich-grid").expect("grid figure");
-    let CndNode::Table(grid) = grid else {
-        panic!("expected grid table node");
+    let grid_fig = find_by_label(&manifest.nodes, "rich-grid").expect("grid figure");
+    let CndNode::Figure(grid_fig) = grid_fig else {
+        panic!("expected grid figure node");
     };
+    assert!(grid_fig.caption.as_deref().is_some_and(|c| c.contains("grid")));
+    let grid = grid_fig
+        .children
+        .iter()
+        .find_map(|c| match c {
+            CndNode::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("grid table child");
     assert_eq!(grid.kind, typst_cnd::TableKind::Grid);
-    assert!(grid.caption.as_deref().is_some_and(|c| c.contains("grid")));
 
     assert_refs_resolve(&manifest.nodes);
 }
@@ -423,7 +463,9 @@ fn complex_semantic_all_node_types_and_xrefs() {
     assert_eq!(stats.code, 2);
     assert_eq!(stats.math, 2);
     assert_eq!(stats.tables, 3);
-    assert_eq!(stats.figures, 1);
+    // Three figure wrappers: the two captioned tables/grids (tab-signals,
+    // fig-grid-zones) plus the one true non-table figure (fig-diagram).
+    assert_eq!(stats.figures, 3);
     assert_eq!(stats.paragraphs, 8);
 
     for label in [
@@ -447,16 +489,24 @@ fn complex_semantic_all_node_types_and_xrefs() {
     assert_eq!(knuth.attribution.as_deref(), Some("Donald Knuth"));
     assert!(knuth.text.contains("Programs are meant to be read"));
 
-    let grid = find_by_label(&manifest.nodes, "fig-grid-zones").expect("grid");
-    let CndNode::Table(grid) = grid else {
-        panic!("expected grid table node");
+    let grid_fig = find_by_label(&manifest.nodes, "fig-grid-zones").expect("grid");
+    let CndNode::Figure(grid_fig) = grid_fig else {
+        panic!("expected grid figure node");
     };
+    assert!(grid_fig.caption.as_deref().is_some_and(|c| c.contains("Zone layout")));
+    let grid = grid_fig
+        .children
+        .iter()
+        .find_map(|c| match c {
+            CndNode::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("grid table child");
     assert_eq!(grid.kind, TableKind::Grid);
-    assert!(grid.caption.as_deref().is_some_and(|c| c.contains("Zone layout")));
 
     let signals = find_by_label(&manifest.nodes, "tab-signals").expect("signals");
-    let CndNode::Table(signals) = signals else {
-        panic!("expected table");
+    let CndNode::Figure(signals) = signals else {
+        panic!("expected figure");
     };
     assert!(signals.base.refs_from.len() >= 2);
 
@@ -533,10 +583,10 @@ fn complex_semantic_all_node_types_and_xrefs() {
         .children
         .iter()
         .find_map(|n| match n {
-            CndNode::Table(t) if t.caption.is_none() => Some(t),
+            CndNode::Table(t) => Some(t),
             _ => None,
         })
-        .expect("standalone table without caption");
+        .expect("standalone bare table");
     assert!(standalone.cells.iter().any(|c| c.text.contains("complex_semantic")));
 
     assert_refs_resolve(&manifest.nodes);
@@ -608,10 +658,18 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
         "quote body must not duplicate as paragraph"
     );
 
-    let grid = find_by_label(&manifest.nodes, "fig-hc-grid").expect("grid");
-    let CndNode::Table(grid) = grid else {
-        panic!("expected grid table");
+    let grid_fig = find_by_label(&manifest.nodes, "fig-hc-grid").expect("grid");
+    let CndNode::Figure(grid_fig) = grid_fig else {
+        panic!("expected grid figure");
     };
+    let grid = grid_fig
+        .children
+        .iter()
+        .find_map(|c| match c {
+            CndNode::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("grid table child");
     assert_eq!(grid.kind, TableKind::Grid);
 
     let tail = find_by_label(&manifest.nodes, "sec-tail").expect("tail");

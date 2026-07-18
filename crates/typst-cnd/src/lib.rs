@@ -9,4 +9,7 @@ mod metadata;
 pub mod world;
 
 pub use self::document::{CndDocument, cnd_document, manifest_from_document, manifest_to_json};
-pub use self::manifest::{CND_VERSION, CndManifest, CndNode, DocMetadata, ListNode, NodeRef, TableKind};
+pub use self::manifest::{
+    CND_VERSION, CndManifest, CndNode, DocMetadata, FigureNode, ImageNode, ListNode, NodeRef,
+    TableKind, TableNode,
+};

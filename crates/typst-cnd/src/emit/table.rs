@@ -8,11 +8,13 @@ use typst_library::layout::GridElem;
 use typst_library::layout::grid::resolve::{CellGrid, Entry};
 use typst_library::model::{FigureCaption, FigureElem, TableChild, TableElem, TableHeader, TableItem};
 use typst_syntax::Span;
+use uuid::Uuid;
 
 use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::extract_text;
+use crate::emit::figure::figure_kind;
 use crate::location::placeholder_location;
-use crate::manifest::{TableCell, TableKind, TableNode};
+use crate::manifest::{CndNode, FigureNode, TableCell, TableKind, TableNode};
 
 /// Find a table element nested inside realized figure (or other) content.
 pub fn table_in_content(content: &Content) -> Option<Packed<TableElem>> {
@@ -60,7 +62,9 @@ fn table_fingerprint(table: &Packed<TableElem>) -> EcoString {
         .into()
 }
 
-/// Convert a table wrapped in a figure.
+/// Convert a table wrapped in a figure into a `FigureNode` wrapper holding
+/// a `TableNode` child. The caption/number live on the wrapper (ADR 0010);
+/// `TableNode` itself carries no caption.
 pub fn from_figure(
     engine: &mut Engine,
     introspector: &dyn Introspector,
@@ -68,7 +72,7 @@ pub fn from_figure(
     figure: &Packed<FigureElem>,
     table: &Packed<TableElem>,
     styles: StyleChain,
-) -> typst_library::diag::SourceResult<(TableNode, NodeRecord)> {
+) -> typst_library::diag::SourceResult<(FigureNode, Vec<(Uuid, NodeRecord)>)> {
     let mut figure = figure.clone();
     figure.synthesize(engine, styles)?;
 
@@ -83,23 +87,30 @@ pub fn from_figure(
     let fig_number = convert::figure_number(engine, &figure, styles)
         .map(Into::into)
         .or_else(|| figure_number_fallback(introspector, content));
-    let record = convert::make_record(engine, introspector, content)?;
-    let (mut node, _) = convert(
+    let wrapper_record = convert::make_record(engine, introspector, content)?;
+
+    let (table_node, table_record) = convert(
         engine,
         introspector,
         table,
-        caption.clone(),
-        fig_number.clone(),
         styles,
         Some(content.span()),
         content.label(),
     )?;
-    node.caption = caption.map(Into::into);
-    node.fig_number = fig_number.map(Into::into);
-    Ok((node, record))
+    let table_id = table_node.base.id;
+
+    let wrapper_id = Uuid::new_v4();
+    let mut wrapper = FigureNode::new(wrapper_id, placeholder_location());
+    wrapper.caption = caption.map(Into::into);
+    wrapper.fig_number = fig_number.map(Into::into);
+    wrapper.kind = figure_kind(&figure, styles);
+    wrapper.children.push(CndNode::Table(table_node));
+
+    Ok((wrapper, vec![(wrapper_id, wrapper_record), (table_id, table_record)]))
 }
 
-/// Convert a grid wrapped in a figure.
+/// Convert a grid wrapped in a figure into a `FigureNode` wrapper holding a
+/// `TableNode { kind: Grid }` child.
 pub fn from_figure_grid(
     engine: &mut Engine,
     introspector: &dyn Introspector,
@@ -107,7 +118,7 @@ pub fn from_figure_grid(
     figure: &Packed<FigureElem>,
     grid: &Packed<GridElem>,
     styles: StyleChain,
-) -> typst_library::diag::SourceResult<(TableNode, NodeRecord)> {
+) -> typst_library::diag::SourceResult<(FigureNode, Vec<(Uuid, NodeRecord)>)> {
     let mut figure = figure.clone();
     figure.synthesize(engine, styles)?;
 
@@ -118,39 +129,50 @@ pub fn from_figure_grid(
         .map(caption_text)
         .map(Into::into);
     let fig_number = convert::figure_number(engine, &figure, styles).map(Into::into);
-    let record = convert::make_record(engine, introspector, content)?;
+    let wrapper_record = convert::make_record(engine, introspector, content)?;
 
     let mut grid = grid.clone();
     if grid.grid.is_none() {
         grid.synthesize(engine, styles)?;
     }
 
-    let id = uuid::Uuid::new_v4();
-    let location = placeholder_location();
+    let table_id = Uuid::new_v4();
     let cells = cells_from_cell_grid(grid.grid.as_ref().map(|grid| grid.as_ref()));
 
-    let mut node = TableNode::new(id, location);
-    node.kind = TableKind::Grid;
-    node.content_kind = content_kind_from_metadata(&record.state_metadata);
-    node.caption = caption;
-    node.fig_number = fig_number;
-    node.cells = cells;
-    node.raw_typst = raw_typst_for_label(engine, content.label());
+    let mut table_node = TableNode::new(table_id, placeholder_location());
+    table_node.kind = TableKind::Grid;
+    table_node.content_kind = content_kind_from_metadata(&wrapper_record.state_metadata);
+    table_node.cells = cells;
+    table_node.raw_typst = raw_typst_for_label(engine, content.label());
 
-    Ok((node, record))
+    let table_record = NodeRecord {
+        location: content.location(),
+        label: None,
+        ref_targets: Vec::new(),
+        state_metadata: std::collections::HashMap::new(),
+    };
+
+    let wrapper_id = Uuid::new_v4();
+    let mut wrapper = FigureNode::new(wrapper_id, placeholder_location());
+    wrapper.caption = caption;
+    wrapper.fig_number = fig_number;
+    wrapper.kind = figure_kind(&figure, styles);
+    wrapper.children.push(CndNode::Table(table_node));
+
+    Ok((wrapper, vec![(wrapper_id, wrapper_record), (table_id, table_record)]))
 }
 
 fn caption_text(caption: &Packed<FigureCaption>) -> EcoString {
     convert::caption_text(caption)
 }
 
-/// Convert a table element into a CND table node.
+/// Convert a table element into a CND table node. `TableNode` carries no
+/// caption of its own — a captioned table is this node wrapped in a
+/// `FigureNode` by the caller (`from_figure`).
 pub fn convert(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     table: &Packed<TableElem>,
-    caption: Option<EcoString>,
-    fig_number: Option<EcoString>,
     styles: StyleChain,
     source_span: Option<Span>,
     label: Option<Label>,
@@ -174,8 +196,6 @@ pub fn convert(
 
     let mut node = TableNode::new(id, location);
     node.content_kind = content_kind_from_metadata(&record.state_metadata);
-    node.caption = caption.map(Into::into);
-    node.fig_number = fig_number.map(Into::into);
     node.cells = cells;
     node.raw_typst = raw_typst;
 

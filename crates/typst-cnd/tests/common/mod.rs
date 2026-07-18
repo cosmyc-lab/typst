@@ -17,6 +17,7 @@ pub struct NodeStats {
     pub code: usize,
     pub math: usize,
     pub figures: usize,
+    pub images: usize,
     pub lists: usize,
     pub max_heading_level: i32,
     pub pages: HashSet<i32>,
@@ -129,6 +130,14 @@ pub fn walk_nodes(nodes: &[CndNode], stats: &mut NodeStats) {
                 if let Some(label) = &f.base.label {
                     stats.labels.insert(label.clone());
                 }
+                walk_nodes(&f.children, stats);
+            }
+            CndNode::Image(img) => {
+                stats.images += 1;
+                stats.pages.insert(img.base.location.page);
+                if let Some(label) = &img.base.label {
+                    stats.labels.insert(label.clone());
+                }
             }
             CndNode::List(l) => {
                 stats.lists += 1;
@@ -141,18 +150,15 @@ pub fn walk_nodes(nodes: &[CndNode], stats: &mut NodeStats) {
     }
 }
 
+/// Table stats. A captioned table's caption/number/label now live on the
+/// wrapping `FigureNode` (ADR 0010), not on the `TableNode` itself — this
+/// walk attributes them accordingly instead of reading removed fields.
 pub fn table_stats(nodes: &[CndNode]) -> TableStats {
     let mut stats = TableStats::default();
     fn walk(nodes: &[CndNode], stats: &mut TableStats) {
         for node in nodes {
             match node {
                 CndNode::Table(table) => {
-                    if table.caption.as_ref().is_some_and(|c| !c.is_empty()) {
-                        stats.with_caption += 1;
-                    }
-                    if table.fig_number.as_ref().is_some_and(|n| !n.is_empty()) {
-                        stats.with_fig_number += 1;
-                    }
                     if table.raw_typst.as_ref().is_some_and(|r| !r.is_empty()) {
                         stats.with_raw_typst += 1;
                     }
@@ -160,12 +166,33 @@ pub fn table_stats(nodes: &[CndNode]) -> TableStats {
                         stats.with_label += 1;
                     }
                 }
+                CndNode::Figure(figure) => {
+                    let has_caption = figure.caption.as_ref().is_some_and(|c| !c.is_empty());
+                    let has_fig_number =
+                        figure.fig_number.as_ref().is_some_and(|n| !n.is_empty());
+                    for child in &figure.children {
+                        if let CndNode::Table(table) = child {
+                            if has_caption {
+                                stats.with_caption += 1;
+                            }
+                            if has_fig_number {
+                                stats.with_fig_number += 1;
+                            }
+                            if table.raw_typst.as_ref().is_some_and(|r| !r.is_empty()) {
+                                stats.with_raw_typst += 1;
+                            }
+                            if figure.base.label.is_some() {
+                                stats.with_label += 1;
+                            }
+                        }
+                    }
+                }
                 CndNode::Heading(h) => walk(&h.children, stats),
                 CndNode::Paragraph(_)
                 | CndNode::Quote(_)
                 | CndNode::Code(_)
                 | CndNode::Math(_)
-                | CndNode::Figure(_)
+                | CndNode::Image(_)
                 | CndNode::List(_) => {}
             }
         }
@@ -192,6 +219,7 @@ pub fn assert_unique_ids(nodes: &[CndNode]) {
         + stats.code
         + stats.math
         + stats.figures
+        + stats.images
         + stats.lists;
     assert_eq!(
         stats.ids.len(),
@@ -222,14 +250,17 @@ pub fn assert_refs_resolve(nodes: &[CndNode]) {
                 CndNode::Code(c) => (&c.base.refs_to, &c.base.refs_from),
                 CndNode::Math(m) => (&m.base.refs_to, &m.base.refs_from),
                 CndNode::Figure(f) => (&f.base.refs_to, &f.base.refs_from),
+                CndNode::Image(img) => (&img.base.refs_to, &img.base.refs_from),
                 CndNode::List(l) => (&l.base.refs_to, &l.base.refs_from),
             };
             out.insert(
                 node.id(),
                 (node, refs_to.clone(), refs_from.clone()),
             );
-            if let CndNode::Heading(h) = node {
-                walk(&h.children, out);
+            match node {
+                CndNode::Heading(h) => walk(&h.children, out),
+                CndNode::Figure(f) => walk(&f.children, out),
+                _ => {}
             }
         }
     }
@@ -290,6 +321,11 @@ pub fn find_by_label<'a>(nodes: &'a [CndNode], label: &str) -> Option<&'a CndNod
                 return Some(found);
             }
         }
+        if let CndNode::Figure(f) = node {
+            if let Some(found) = find_by_label(&f.children, label) {
+                return Some(found);
+            }
+        }
     }
     None
 }
@@ -322,6 +358,7 @@ pub fn paragraph_texts_in_order(nodes: &[CndNode]) -> Vec<String> {
                 | CndNode::Code(_)
                 | CndNode::Math(_)
                 | CndNode::Figure(_)
+                | CndNode::Image(_)
                 | CndNode::List(_) => {}
             }
         }
@@ -372,7 +409,8 @@ pub fn find_lists(nodes: &[CndNode]) -> Vec<&ListNode> {
                 | CndNode::Quote(_)
                 | CndNode::Code(_)
                 | CndNode::Math(_)
-                | CndNode::Figure(_) => {}
+                | CndNode::Figure(_)
+                | CndNode::Image(_) => {}
             }
         }
     }

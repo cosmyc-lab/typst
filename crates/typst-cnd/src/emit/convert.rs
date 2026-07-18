@@ -563,7 +563,7 @@ fn dispatch(
     } else if let Some(figure) = content.to_packed::<FigureElem>() {
         if let Some(table_content) = table::table_content_in(content) {
             if let Some(table_elem) = table_content.to_packed::<TableElem>() {
-                let (node, record) = table::from_figure(
+                let (node, records) = table::from_figure(
                     engine,
                     introspector,
                     content,
@@ -571,11 +571,13 @@ fn dispatch(
                     table_elem,
                     styles,
                 )?;
-                ctx.register(node.base.id, record);
-                push_node(CndNode::Table(node), ctx, stack);
+                for (id, record) in records {
+                    ctx.register(id, record);
+                }
+                push_node(CndNode::Figure(node), ctx, stack);
             }
         } else if let Some(grid) = table::grid_in_content(content) {
-            let (node, record) = table::from_figure_grid(
+            let (node, records) = table::from_figure_grid(
                 engine,
                 introspector,
                 content,
@@ -583,12 +585,16 @@ fn dispatch(
                 &grid,
                 styles,
             )?;
-            ctx.register(node.base.id, record);
-            push_node(CndNode::Table(node), ctx, stack);
+            for (id, record) in records {
+                ctx.register(id, record);
+            }
+            push_node(CndNode::Figure(node), ctx, stack);
         } else {
-            let (node, record) =
+            let (node, records) =
                 figure::from_figure(engine, introspector, content, figure, styles)?;
-            ctx.register(node.base.id, record);
+            for (id, record) in records {
+                ctx.register(id, record);
+            }
             push_node(CndNode::Figure(node), ctx, stack);
         }
     } else if let Some(table_elem) = content.to_packed::<TableElem>() {
@@ -596,8 +602,6 @@ fn dispatch(
             engine,
             introspector,
             table_elem,
-            None,
-            None,
             styles,
             None,
             content.label(),

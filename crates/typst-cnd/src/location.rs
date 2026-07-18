@@ -60,8 +60,10 @@ fn assign_locations(
             *node.location_mut() = base.clone();
         }
 
-        if let CndNode::Heading(n) = node {
-            assign_locations(&mut n.children, locations);
+        match node {
+            CndNode::Heading(n) => assign_locations(&mut n.children, locations),
+            CndNode::Figure(n) => assign_locations(&mut n.children, locations),
+            _ => {}
         }
     }
 }
