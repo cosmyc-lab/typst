@@ -36,7 +36,7 @@ pub fn convert(
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = equation.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed)?;
+    let record = convert::make_record(engine, introspector, &packed, &[])?;
 
     let mut node = MathNode::new(id, text.into(), location);
     node.block = block;

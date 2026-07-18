@@ -7,12 +7,12 @@
 //! markers (captured as introspection tag locations during conversion) to
 //! `FootnoteRef` edges pointing at the pool.
 //!
-//! Conformance note — text spans: the `text_span` field on
-//! `FootnoteRef`/`CiteRef` (ADR 0013) is a deferred conformance level.
-//! Edges resolve to real pool entries, but `text_span` is always `None`
-//! today; the schema allows null spans. Adding positioned spans requires
-//! threading codepoint offsets through the text extractor and is tracked
-//! as follow-up work.
+//! Text spans (ADR 0013): `FootnoteRef`/`CiteRef` carry the marker's
+//! `[start, end)` codepoint offsets in the node's rendered text, computed
+//! during extraction (see `extract::extract_with_markers`). Spans are
+//! populated for flat-text nodes (paragraph/heading/quote); on other node
+//! types, and for a suppressed `form: "none"` citation, `text_span` is
+//! `None` (the schema allows null spans).
 
 use typst_library::engine::Engine;
 use typst_library::foundations::{NativeElement, StyleChain};
@@ -189,18 +189,27 @@ fn rendered_string(entry: &RenderedEntry) -> String {
 }
 
 /// Resolve every node's citation markers to `CiteRef` edges pointing at the
-/// bibliography pool. A key with no pool entry is dropped silently.
+/// bibliography pool. A key with no pool entry is dropped silently. The
+/// marker's text span is carried through, except for a suppressed
+/// (`form: "none"`) citation, which renders no text and so has no span
+/// (ADR 0013 / proposal 0004).
 pub fn resolve_cite_edges(ctx: &mut ConvertContext) {
     let mut edges: Vec<(Uuid, CiteRef)> = Vec::new();
     for (node_id, record) in &ctx.records {
         for marker in &record.cite_markers {
             if let Some(bib_id) = ctx.bib_key_to_id.get(&marker.key).copied() {
+                let suppressed = marker.form.as_deref() == Some("none");
+                let text_span = if suppressed {
+                    None
+                } else {
+                    marker.span.map(|(s, e)| vec![s, e])
+                };
                 edges.push((
                     *node_id,
                     CiteRef {
                         id: bib_id,
                         label: Some(marker.key.resolve().to_string()),
-                        text_span: None,
+                        text_span,
                         form: marker.form.clone(),
                         supplement: marker.supplement.clone(),
                     },
@@ -212,8 +221,8 @@ pub fn resolve_cite_edges(ctx: &mut ConvertContext) {
     for (node_id, cite) in edges {
         if let Some(node) = find_node_mut(&mut ctx.roots, node_id) {
             let cites = node.cites_mut();
-            // Keep meaningful variants (same work, different supplement/form)
-            // but drop exact duplicates.
+            // Keep meaningful variants (same work, different supplement/form/
+            // position) but drop exact duplicates.
             if !cites.contains(&cite) {
                 cites.push(cite);
             }
@@ -221,8 +230,10 @@ pub fn resolve_cite_edges(ctx: &mut ConvertContext) {
     }
 }
 
-/// Attach a `FootnoteRef` to each node for every footnote marker location
-/// captured in its record. A miss (location not a footnote) is dropped.
+/// Attach a `FootnoteRef` to each node for every footnote marker captured
+/// in its record, carrying the marker's text span. A miss (location not a
+/// footnote) is dropped. Dedup is by the full edge (id + span), so two
+/// markers of the same note in one node become two positioned entries.
 fn resolve_footnote_edges(ctx: &mut ConvertContext) {
     let labels: rustc_hash::FxHashMap<Uuid, String> = ctx
         .footnotes
@@ -230,21 +241,26 @@ fn resolve_footnote_edges(ctx: &mut ConvertContext) {
         .map(|f| (f.id, f.label.clone()))
         .collect();
 
-    let mut edges: Vec<(Uuid, Uuid)> = Vec::new();
+    let mut edges: Vec<(Uuid, Uuid, Option<(i64, i64)>)> = Vec::new();
     for (node_id, record) in &ctx.records {
-        for marker_loc in &record.footnote_locs {
+        for (marker_loc, span) in &record.footnote_locs {
             if let Some(pool_id) = ctx.footnote_loc_to_id.get(marker_loc).copied() {
-                edges.push((*node_id, pool_id));
+                edges.push((*node_id, pool_id, *span));
             }
         }
     }
 
-    for (node_id, pool_id) in edges {
+    for (node_id, pool_id, span) in edges {
         let label = labels.get(&pool_id).cloned();
+        let reference = FootnoteRef {
+            id: pool_id,
+            label,
+            text_span: span.map(|(s, e)| vec![s, e]),
+        };
         if let Some(node) = find_node_mut(&mut ctx.roots, node_id) {
             let footnotes = node.footnotes_mut();
-            if !footnotes.iter().any(|reference| reference.id == pool_id) {
-                footnotes.push(FootnoteRef { id: pool_id, label, text_span: None });
+            if !footnotes.contains(&reference) {
+                footnotes.push(reference);
             }
         }
     }

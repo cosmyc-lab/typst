@@ -17,7 +17,7 @@ pub fn from_list(
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = list.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed)?;
+    let record = convert::make_record(engine, introspector, &packed, &[])?;
 
     let mut node = ListNode::new(id, location);
     node.ordered = false;
@@ -40,7 +40,7 @@ pub fn from_enum(
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = enum_.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed)?;
+    let record = convert::make_record(engine, introspector, &packed, &[])?;
 
     let mut node = ListNode::new(id, location);
     node.ordered = true;
@@ -67,7 +67,7 @@ pub fn from_terms(
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = terms.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed)?;
+    let record = convert::make_record(engine, introspector, &packed, &[])?;
 
     let mut node = TermsNode::new(id, location);
     node.tight = terms.tight.get(styles);

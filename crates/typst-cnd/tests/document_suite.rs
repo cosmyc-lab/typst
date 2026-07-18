@@ -2,9 +2,10 @@ mod common;
 
 use common::{
     all_example_files, assert_json_roundtrip, assert_manifest_contract, assert_pool_refs_resolve,
-    assert_refs_resolve, assert_tag_sequence, assert_unique_ids, compile_example, example_path,
-    find_by_label, find_lists, heading_texts, incoming_count, label_exists, manifest_for_example,
-    paragraph_texts_in_order, table_stats, tags_under_heading, walk_nodes, NodeStats,
+    assert_refs_resolve, assert_tag_sequence, assert_unique_ids, codepoint_slice, compile_example,
+    example_path, find_by_label, find_lists, heading_texts, incoming_count, label_exists,
+    manifest_for_example, paragraph_texts_in_order, table_stats, tags_under_heading, walk_nodes,
+    NodeStats,
 };
 use typst_cnd::{CndNode, TableKind};
 
@@ -874,6 +875,42 @@ fn footnotes_pool_and_edges() {
     );
     assert!(edges.iter().any(|e| e == &vec!["1".to_string()]));
 
+    // Text spans (ADR 0013): a footnote marker renders its ordinal digit
+    // into the node text, so its span is 1 code point wide over that digit.
+    fn footnote_spans(nodes: &[CndNode], out: &mut Vec<(String, String, Option<Vec<i64>>)>) {
+        for node in nodes {
+            match node {
+                CndNode::Paragraph(p) => {
+                    for reference in &p.base.footnotes {
+                        out.push((
+                            p.text.clone(),
+                            reference.label.clone().unwrap_or_default(),
+                            reference.text_span.clone(),
+                        ));
+                    }
+                }
+                CndNode::Heading(h) => footnote_spans(&h.children, out),
+                _ => {}
+            }
+        }
+    }
+    let mut spans = Vec::new();
+    footnote_spans(&manifest.nodes, &mut spans);
+    for (text, label, span) in &spans {
+        let span = span.as_ref().expect("footnote in a paragraph carries a text span");
+        assert_eq!(span[1] - span[0], 1, "footnote marker span is 1 code point wide");
+        assert_eq!(
+            &codepoint_slice(text, span),
+            label,
+            "the footnote span covers its rendered ordinal digit"
+        );
+    }
+    // The re-referenced note 3 appears with a span in two distinct nodes.
+    assert!(
+        spans.iter().filter(|(_, label, _)| label == "3").count() >= 2,
+        "note 3 is positioned in both the declaring and re-referencing paragraphs"
+    );
+
     assert_refs_resolve(&manifest.nodes);
 }
 
@@ -928,6 +965,41 @@ fn citations_bibliography_pool_and_cite_edges() {
     assert!(all.iter().any(|(k, f, _)| k == "jones2022" && f.as_deref() == Some("prose")));
     assert!(all.iter().any(|(k, f, _)| k == "jones2022" && f.as_deref() == Some("none")));
 
+    // Text spans (ADR 0013): the rendered citation marker slices out of the
+    // node text; a suppressed (form: none) citation has no marker, no span.
+    let mut spans: Vec<(String, String, Option<String>, Option<Vec<i64>>)> = Vec::new();
+    fn cite_spans(nodes: &[CndNode], out: &mut Vec<(String, String, Option<String>, Option<Vec<i64>>)>) {
+        for node in nodes {
+            match node {
+                CndNode::Paragraph(p) => {
+                    for cite in &p.base.cites {
+                        out.push((
+                            p.text.clone(),
+                            cite.label.clone().unwrap_or_default(),
+                            cite.form.clone(),
+                            cite.text_span.clone(),
+                        ));
+                    }
+                }
+                CndNode::Heading(h) => cite_spans(&h.children, out),
+                _ => {}
+            }
+        }
+    }
+    cite_spans(&manifest.nodes, &mut spans);
+    assert!(
+        spans.iter().any(|(text, k, f, sp)| k == "smith2024"
+            && f.as_deref() == Some("normal")
+            && sp.as_ref().is_some_and(|s| codepoint_slice(text, s) == "[1]")),
+        "the normal smith2024 citation's text_span slices to \"[1]\": {spans:?}"
+    );
+    assert!(
+        spans
+            .iter()
+            .any(|(_, k, f, sp)| k == "jones2022" && f.as_deref() == Some("none") && sp.is_none()),
+        "a suppressed (form: none) citation has a null text_span"
+    );
+
     // A `@key` citation is a RefElem but must not create a cross-reference
     // edge — citations resolve in the bibliography, not the node tree.
     fn assert_no_bibkey_refs(nodes: &[CndNode]) {
@@ -952,6 +1024,80 @@ fn citations_bibliography_pool_and_cite_edges() {
 }
 
 #[test]
+fn ref_text_spans_are_codepoint_offsets() {
+    let manifest = manifest_for_example("complex_refs.typ");
+
+    // Collect (node text, ref label, span) for every positioned ref.
+    let mut spans: Vec<(String, String, Vec<i64>)> = Vec::new();
+    fn walk(nodes: &[CndNode], out: &mut Vec<(String, String, Vec<i64>)>) {
+        for node in nodes {
+            if let CndNode::Paragraph(p) = node {
+                for reference in &p.base.refs {
+                    if let Some(span) = &reference.text_span {
+                        out.push((
+                            p.text.clone(),
+                            reference.label.clone().unwrap_or_default(),
+                            span.clone(),
+                        ));
+                    }
+                }
+            }
+            if let CndNode::Heading(h) = node {
+                walk(&h.children, out);
+            }
+        }
+    }
+    walk(&manifest.nodes, &mut spans);
+    assert!(!spans.is_empty(), "cross-reference markers should carry text spans");
+
+    // Every span slices to the rendered reference text, and the `\u{a0}`
+    // inside "Chapitre 11" / "Tableau 1" is the codepoint-vs-byte canary: a
+    // byte offset would land mid-character here.
+    let mut saw_chapitre_11 = false;
+    for (text, label, span) in &spans {
+        let slice = codepoint_slice(text, span);
+        assert!(
+            slice.contains('\u{a0}'),
+            "ref {label} span {span:?} slices to a numbered reference: {slice:?}"
+        );
+        if label == "sec-detail" && slice == "Chapitre\u{a0}11" {
+            saw_chapitre_11 = true;
+        }
+    }
+    assert!(
+        saw_chapitre_11,
+        "expected a ref rendering \"Chapitre\\u{{a0}}11\" (11 code points, 12 bytes): {spans:?}"
+    );
+
+    assert_refs_resolve(&manifest.nodes);
+}
+
+#[test]
+fn markers_in_non_flat_nodes_do_not_leak_or_span() {
+    let manifest = manifest_for_example("nonflat_markers.typ");
+
+    // The footnote still enters the pool even though it sits in a list item.
+    assert_eq!(manifest.footnotes.len(), 1);
+    assert!(manifest.footnotes[0].text.contains("inside a list item"));
+
+    // Leak guard: the footnote body must not bleed into the list item text
+    // (the item body is text-extracted unrealized; ADR 0013 leak fix).
+    let lists = find_lists(&manifest.nodes);
+    let list = lists.first().expect("a bullet list");
+    let carrier = list
+        .items
+        .iter()
+        .find(|item| item.text.contains("carrying a footnote"))
+        .expect("the footnote-carrying item");
+    assert_eq!(
+        carrier.text, "An item carrying a footnote.",
+        "the footnote body must not leak into the list item text"
+    );
+
+    assert_pool_refs_resolve(&manifest);
+}
+
+#[test]
 fn example_files_exist() {
     for name in [
         "minimal.typ",
@@ -968,6 +1114,7 @@ fn example_files_exist() {
         "image_figure.typ",
         "footnotes.typ",
         "citations.typ",
+        "nonflat_markers.typ",
         "newsletter/main.typ",
     ] {
         assert!(

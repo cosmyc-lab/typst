@@ -238,6 +238,14 @@ pub fn assert_unique_ids(nodes: &[CndNode]) {
     );
 }
 
+/// Slice a string by `[start, end)` Unicode code-point offsets — the
+/// coordinate space of a link's `text_span` (ADR 0013). Panics if the span
+/// is out of range, which is itself a useful assertion.
+pub fn codepoint_slice(text: &str, span: &[i64]) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    chars[span[0] as usize..span[1] as usize].iter().collect()
+}
+
 /// Number of nodes whose forward `refs` point at `target` — the derived
 /// incoming-edge count (ADR 0008 removed the materialized `refs_from`; the
 /// SDK computes this via `CndManifest.incoming`). Used by tests that assert

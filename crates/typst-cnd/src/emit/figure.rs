@@ -33,7 +33,7 @@ pub fn from_figure(
         .map(convert::caption_text)
         .map(Into::into);
     let fig_number = convert::figure_number(engine, &figure, styles).map(Into::into);
-    let record = convert::make_record(engine, introspector, content)?;
+    let record = convert::make_record(engine, introspector, content, &[])?;
 
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
@@ -76,6 +76,7 @@ fn minimal_record(content: &Content) -> NodeRecord {
         ref_targets: Vec::new(),
         footnote_locs: Vec::new(),
         cite_markers: Vec::new(),
+        ref_markers: Vec::new(),
         state_metadata: std::collections::HashMap::new(),
     }
 }

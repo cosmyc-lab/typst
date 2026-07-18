@@ -87,7 +87,7 @@ pub fn from_figure(
     let fig_number = convert::figure_number(engine, &figure, styles)
         .map(Into::into)
         .or_else(|| figure_number_fallback(introspector, content));
-    let wrapper_record = convert::make_record(engine, introspector, content)?;
+    let wrapper_record = convert::make_record(engine, introspector, content, &[])?;
 
     let (table_node, table_record) = convert(
         engine,
@@ -129,7 +129,7 @@ pub fn from_figure_grid(
         .map(caption_text)
         .map(Into::into);
     let fig_number = convert::figure_number(engine, &figure, styles).map(Into::into);
-    let wrapper_record = convert::make_record(engine, introspector, content)?;
+    let wrapper_record = convert::make_record(engine, introspector, content, &[])?;
 
     let mut grid = grid.clone();
     if grid.grid.is_none() {
@@ -151,6 +151,7 @@ pub fn from_figure_grid(
         ref_targets: Vec::new(),
         footnote_locs: Vec::new(),
         cite_markers: Vec::new(),
+        ref_markers: Vec::new(),
         state_metadata: std::collections::HashMap::new(),
     };
 
@@ -187,7 +188,7 @@ pub fn convert(
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = table.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed)?;
+    let record = convert::make_record(engine, introspector, &packed, &[])?;
 
     let header_rows = count_header_rows(&table);
     let cells = cells_from_grid(&table, header_rows);

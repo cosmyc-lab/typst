@@ -35,9 +35,20 @@ pub fn resolve_refs(
     introspector: &dyn Introspector,
     content: &Content,
 ) {
-    let mut edges: Vec<(Uuid, Uuid, Option<String>)> = Vec::new();
+    // Edge: (source, target, target label, marker text span). The span is
+    // populated only on the primary path, from the source node's flat-text
+    // `ref_markers` (ADR 0013); it runs first, so it wins the dedup-by-
+    // target-id in `set_ref` and the fallback path's `None` never clobbers it.
+    let mut edges: Vec<(Uuid, Uuid, Option<String>, Option<(i64, i64)>)> = Vec::new();
     let _selector = doc_selector();
 
+    // Primary path: a flat node's own `ref_markers` — the marker is in that
+    // node's realized body, giving correct attribution *and* the text span
+    // (ADR 0013). This supersedes the index-correlation heuristic below for
+    // any node that carries markers, which is where refs actually resolve
+    // (the realized content keeps only the rendered link, not a bare
+    // RefElem, so `ref_targets` is empty for flat nodes).
+    let mut ref_marker_sources: rustc_hash::FxHashSet<Uuid> = Default::default();
     for (source_id, record) in &ctx.records {
         for label in &record.ref_targets {
             // A `@key` citation is a RefElem too, but resolves in the
@@ -46,15 +57,28 @@ pub fn resolve_refs(
                 continue;
             }
             if let Some(target_id) = resolve_label(label, ctx, introspector) {
+                edges.push((*source_id, target_id, Some(label.resolve().as_str().into()), None));
+            }
+        }
+        for (label, span) in &record.ref_markers {
+            if ctx.bib_key_to_id.contains_key(label) {
+                continue;
+            }
+            if let Some(target_id) = resolve_label(label, ctx, introspector) {
+                ref_marker_sources.insert(*source_id);
                 edges.push((
                     *source_id,
                     target_id,
                     Some(label.resolve().as_str().into()),
+                    Some(*span),
                 ));
             }
         }
     }
 
+    // Fallback path: index-correlation over the original content, for nodes
+    // whose refs did not surface as markers (e.g. list items / table cells,
+    // whose text is not a single flat string). Emits `text_span: None`.
     let ref_edges = ref_edges_from_content(content);
     let paragraph_ids = paragraph_ids_from_nodes(&ctx.roots);
     let heading_ids = heading_ids_from_nodes(&ctx.roots);
@@ -67,28 +91,27 @@ pub fn resolve_refs(
             RefSourceKind::Heading => heading_ids.get(index).copied(),
         };
         let Some(source_id) = source_id else { continue };
+        // A node that produced its own markers is authoritative — skip it
+        // here so the imperfect index correlation cannot mis-attribute.
+        if ref_marker_sources.contains(&source_id) {
+            continue;
+        }
         if let Some(target_id) = resolve_label(&label, ctx, introspector) {
-            edges.push((
-                source_id,
-                target_id,
-                Some(label.resolve().as_str().into()),
-            ));
+            edges.push((source_id, target_id, Some(label.resolve().as_str().into()), None));
             if matches!(source_kind, RefSourceKind::Heading) {
                 if let Some(paragraph_id) = last_paragraph_under_heading(&ctx.roots, source_id) {
-                    edges.push((
-                        paragraph_id,
-                        target_id,
-                        Some(label.resolve().as_str().into()),
-                    ));
+                    if !ref_marker_sources.contains(&paragraph_id) {
+                        edges.push((paragraph_id, target_id, Some(label.resolve().as_str().into()), None));
+                    }
                 }
             }
         }
     }
 
-    for (source, target, target_label) in edges {
+    for (source, target, target_label, span) in edges {
         // The forward edge's `label` mirrors its target's label (ADR 0002).
         let resolved_target_label = target_label.or_else(|| node_label(ctx, target));
-        set_ref(ctx, source, target, resolved_target_label);
+        set_ref(ctx, source, target, resolved_target_label, span);
     }
 }
 
@@ -286,11 +309,23 @@ fn node_label(ctx: &ConvertContext, id: Uuid) -> Option<String> {
     walk(&ctx.roots, id)
 }
 
-fn set_ref(ctx: &mut ConvertContext, source: Uuid, target: Uuid, label: Option<String>) {
+fn set_ref(
+    ctx: &mut ConvertContext,
+    source: Uuid,
+    target: Uuid,
+    label: Option<String>,
+    span: Option<(i64, i64)>,
+) {
     if let Some(node) = find_node_mut(&mut ctx.roots, source) {
         let refs = node.refs_mut();
+        // Dedup by target id (one edge per target per node); the first
+        // occurrence — the primary, span-carrying path — wins.
         if !refs.iter().any(|reference| reference.id == target) {
-            refs.push(NodeRef::new(target, label));
+            refs.push(NodeRef {
+                id: target,
+                label,
+                text_span: span.map(|(s, e)| vec![s, e]),
+            });
         }
     }
 }

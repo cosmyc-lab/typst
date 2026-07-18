@@ -8,23 +8,29 @@ use typst_library::foundations::{Content, Label, NativeElement, Packed, Selector
 use typst_library::introspection::{Introspector, Location, Tag, TagElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    CitationForm, CiteElem, EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteElem,
-    HeadingElem, ListElem, ListItem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
+    CiteElem, EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteElem, HeadingElem, ListElem,
+    ListItem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_syntax::{FileId, Span};
 use uuid::Uuid;
 
+use crate::emit::extract::{ExtractedMarker, MarkerKind};
 use crate::emit::{code, extract, figure, heading, list, math, paragraph, quote, reading_order, table};
 use crate::manifest::{CndNode, HeadingNode};
 
 /// A citation marker occurring in a node's content, captured for
-/// resolution into a `CiteRef` once the bibliography pool exists.
+/// resolution into a `CiteRef` once the bibliography pool exists. `span`
+/// is the marker's `[start, end)` codepoint offsets in the node's rendered
+/// text — `Some` only for flat-text nodes (paragraph/heading/quote), where
+/// the text is a single string; `None` elsewhere (ADR 0013).
 #[derive(Debug, Clone)]
 pub struct CiteMarker {
     pub key: Label,
+    pub loc: Location,
     pub form: Option<String>,
     pub supplement: Option<String>,
+    pub span: Option<(i64, i64)>,
 }
 
 /// Metadata captured for each emitted node.
@@ -33,12 +39,17 @@ pub struct NodeRecord {
     pub location: Option<Location>,
     pub label: Option<Label>,
     pub ref_targets: Vec<Label>,
-    /// Locations of footnote markers occurring in this node's content,
-    /// resolved to footnote-pool ids in `pools::resolve_footnotes`.
-    pub footnote_locs: Vec<Location>,
+    /// Footnote markers occurring in this node's content: each marker's own
+    /// location (resolved to a footnote-pool id in `pools::resolve_footnotes`)
+    /// paired with its text span (`Some` only for flat-text nodes).
+    pub footnote_locs: Vec<(Location, Option<(i64, i64)>)>,
     /// Citation markers occurring in this node's content, resolved to
-    /// `CiteRef` edges in `pools::resolve_citations`.
+    /// `CiteRef` edges in `pools::resolve_cite_edges`.
     pub cite_markers: Vec<CiteMarker>,
+    /// Cross-reference markers with their text spans — only from flat-text
+    /// nodes. Consulted in `refs::resolve_refs` to attach a span to the
+    /// edge already created from `ref_targets` (never a separate edge).
+    pub ref_markers: Vec<(Label, (i64, i64))>,
     pub state_metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
@@ -745,17 +756,48 @@ pub fn metadata_at(
     crate::metadata::metadata_at(engine, introspector, location)
 }
 
+/// Build a node's record. `markers` carries the text-span markers from the
+/// flat-text walk of the node's body (paragraph/heading/quote); it is empty
+/// for non-flat nodes, whose marker *locations* are still captured (so their
+/// footnote/cite edges resolve) but whose `text_span`s stay `None` because
+/// their `text` is a concatenation of item/cell strings, not one string the
+/// offsets index into (ADR 0013).
 pub fn make_record(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     content: &Content,
+    markers: &[ExtractedMarker],
 ) -> typst_library::diag::SourceResult<NodeRecord> {
     let location = content.location();
     let label = content.label();
     let mut ref_targets = collect_ref_targets(content);
     ref_targets.dedup_by_key(|label| label.resolve());
-    let footnote_locs = collect_footnote_locs(content);
-    let cite_markers = collect_cite_markers(content);
+
+    // Span lookups from the flat-text walk (empty for non-flat nodes).
+    let mut cite_span: rustc_hash::FxHashMap<Location, (i64, i64)> = Default::default();
+    let mut footnote_span: rustc_hash::FxHashMap<Location, (i64, i64)> = Default::default();
+    let mut ref_markers: Vec<(Label, (i64, i64))> = Vec::new();
+    for marker in markers {
+        match &marker.kind {
+            MarkerKind::Cite(loc) => {
+                cite_span.entry(*loc).or_insert((marker.start, marker.end));
+            }
+            MarkerKind::Footnote(loc) => {
+                footnote_span.entry(*loc).or_insert((marker.start, marker.end));
+            }
+            MarkerKind::Ref(label) => ref_markers.push((*label, (marker.start, marker.end))),
+        }
+    }
+
+    // Universal marker-location capture (all node types) + span layering.
+    let footnote_locs = collect_footnote_locs(content)
+        .into_iter()
+        .map(|loc| (loc, footnote_span.get(&loc).copied()))
+        .collect();
+    let mut cite_markers = collect_cite_markers(content);
+    for cite in &mut cite_markers {
+        cite.span = cite_span.get(&cite.loc).copied();
+    }
 
     let state_metadata = match location {
         Some(loc) => metadata_at(engine, introspector, loc)?,
@@ -768,50 +810,41 @@ pub fn make_record(
         ref_targets,
         footnote_locs,
         cite_markers,
+        ref_markers,
         state_metadata,
     })
 }
 
-/// Collect citation markers occurring in `content`, in reading order.
-///
-/// Like footnotes, citations are pulled from the realized flow but leave a
-/// `TagElem` (`Tag::Start` holding the original `CiteElem`) at the marker
-/// position. `form`/`supplement` read off the element with the default
-/// style chain, exactly as Typst's own bibliography rendering does.
+/// Collect citation markers (location + form/supplement) occurring in
+/// `content`, in reading order — universally, from a full element traverse,
+/// so cites inside any node (including list items and table cells) produce
+/// an edge. Text spans are layered on separately in `make_record`.
 fn collect_cite_markers(content: &Content) -> Vec<CiteMarker> {
     let mut markers = Vec::new();
     let _ = content.traverse(&mut |element| {
         if let Some(tag) = element.to_packed::<TagElem>() {
             if let Tag::Start(inner, _) = &tag.tag {
                 if let Some(cite) = inner.to_packed::<CiteElem>() {
-                    let form = citation_form_str(cite.form.get(StyleChain::default()));
-                    let supplement = cite
-                        .supplement
-                        .get_cloned(StyleChain::default())
-                        .map(|c| extract::extract_text(&c).into());
-                    markers.push(CiteMarker { key: cite.key, form, supplement });
+                    if let Some(loc) = inner.location() {
+                        let form = extract::citation_form_str(cite.form.get(StyleChain::default()));
+                        let supplement = cite
+                            .supplement
+                            .get_cloned(StyleChain::default())
+                            .map(|c| extract::extract_text(&c).into());
+                        markers.push(CiteMarker {
+                            key: cite.key,
+                            loc,
+                            form,
+                            supplement,
+                            span: None,
+                        });
+                    }
                 }
             }
         }
         ControlFlow::<()>::Continue(())
     });
     markers
-}
-
-/// Map a Typst citation form to its lowercase schema string. A suppressed
-/// citation (`form: none`) maps to `"none"` (proposal 0004).
-fn citation_form_str(form: Option<CitationForm>) -> Option<String> {
-    Some(
-        match form {
-            None => "none",
-            Some(CitationForm::Normal) => "normal",
-            Some(CitationForm::Prose) => "prose",
-            Some(CitationForm::Full) => "full",
-            Some(CitationForm::Author) => "author",
-            Some(CitationForm::Year) => "year",
-        }
-        .to_string(),
-    )
 }
 
 /// Collect the locations of footnote markers occurring in `content`.

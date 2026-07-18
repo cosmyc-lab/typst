@@ -5,7 +5,7 @@ use typst_library::model::ParElem;
 use typst_library::text::Locale;
 
 use crate::emit::convert::{self, NodeRecord};
-use crate::emit::extract::extract_text;
+use crate::emit::extract::extract_with_markers;
 use crate::location::placeholder_location;
 use crate::manifest::ParagraphNode;
 
@@ -17,16 +17,16 @@ pub fn convert(
     styles: StyleChain,
     doc_lang: Option<&str>,
 ) -> typst_library::diag::SourceResult<(ParagraphNode, NodeRecord)> {
-    let text = extract_text(&par.body).into();
+    let (text, markers) = extract_with_markers(&par.body);
     let lang = doc_lang
         .map(str::to_string)
         .or_else(|| Some(Locale::get_in(styles).rfc_3066().into()));
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = par.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed)?;
+    let record = convert::make_record(engine, introspector, &packed, &markers)?;
 
-    let mut node = ParagraphNode::new(id, text, location);
+    let mut node = ParagraphNode::new(id, text.into(), location);
     node.lang = lang;
 
     Ok((node, record))
