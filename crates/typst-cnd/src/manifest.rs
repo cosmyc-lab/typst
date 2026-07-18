@@ -115,12 +115,8 @@ impl CndNode {
         &mut self.base_mut().location
     }
 
-    pub fn refs_to_mut(&mut self) -> &mut Vec<NodeRef> {
-        &mut self.base_mut().refs_to
-    }
-
-    pub fn refs_from_mut(&mut self) -> &mut Vec<NodeRef> {
-        &mut self.base_mut().refs_from
+    pub fn refs_mut(&mut self) -> &mut Vec<NodeRef> {
+        &mut self.base_mut().refs
     }
 
     pub fn cites_mut(&mut self) -> &mut Vec<CiteRef> {
@@ -144,18 +140,25 @@ impl CndNode {
     }
 }
 
-/// Resolved cross-reference edge: stable node id plus optional Typst label.
+/// Forward cross-reference edge: stable node id plus optional Typst label
+/// (ADR 0002). `id` resolves in the manifest `nodes` tree. `span` is an
+/// additive optional `[start, end)` codepoint offset marking where the
+/// reference marker sits in the containing node's rendered text — currently
+/// always `None` (spans are a deferred conformance level, populated for
+/// `NodeRef`/`CiteRef`/`FootnoteRef` together in a future task).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct NodeRef {
     pub id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<Vec<i64>>,
 }
 
 impl NodeRef {
     pub fn new(id: Uuid, label: Option<String>) -> Self {
-        Self { id, label }
+        Self { id, label, span: None }
     }
 }
 
@@ -234,10 +237,11 @@ pub struct NodeBase {
     pub id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Forward cross-reference edges (ADR 0008). The reverse index is
+    /// derived on demand by the SDK (`CndManifest.incoming`), never
+    /// serialized — no `refs_from`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub refs_to: Vec<NodeRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub refs_from: Vec<NodeRef>,
+    pub refs: Vec<NodeRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cites: Vec<CiteRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -473,8 +477,7 @@ impl NodeBase {
         Self {
             id,
             label: None,
-            refs_to: Vec::new(),
-            refs_from: Vec::new(),
+            refs: Vec::new(),
             cites: Vec::new(),
             footnotes: Vec::new(),
             state_metadata: HashMap::new(),

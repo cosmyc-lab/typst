@@ -1,6 +1,6 @@
 //! Shared helpers for typst-cnd integration tests.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use typst_cnd::{
@@ -238,73 +238,64 @@ pub fn assert_unique_ids(nodes: &[CndNode]) {
     );
 }
 
-pub fn assert_refs_resolve(nodes: &[CndNode]) {
-    let mut by_id: HashMap<
-        uuid::Uuid,
-        (&CndNode, Vec<typst_cnd::NodeRef>, Vec<typst_cnd::NodeRef>),
-    > = HashMap::new();
-
-    fn walk<'a>(
-        nodes: &'a [CndNode],
-        out: &mut HashMap<
-            uuid::Uuid,
-            (&'a CndNode, Vec<typst_cnd::NodeRef>, Vec<typst_cnd::NodeRef>),
-        >,
-    ) {
+/// Number of nodes whose forward `refs` point at `target` — the derived
+/// incoming-edge count (ADR 0008 removed the materialized `refs_from`; the
+/// SDK computes this via `CndManifest.incoming`). Used by tests that assert
+/// a node is a cross-reference target.
+pub fn incoming_count(nodes: &[CndNode], target: uuid::Uuid) -> usize {
+    fn walk(nodes: &[CndNode], target: uuid::Uuid, count: &mut usize) {
         for node in nodes {
-            let (refs_to, refs_from) = match node {
-                CndNode::Heading(h) => (&h.base.refs_to, &h.base.refs_from),
-                CndNode::Paragraph(p) => (&p.base.refs_to, &p.base.refs_from),
-                CndNode::Table(t) => (&t.base.refs_to, &t.base.refs_from),
-                CndNode::Quote(q) => (&q.base.refs_to, &q.base.refs_from),
-                CndNode::Code(c) => (&c.base.refs_to, &c.base.refs_from),
-                CndNode::Math(m) => (&m.base.refs_to, &m.base.refs_from),
-                CndNode::Figure(f) => (&f.base.refs_to, &f.base.refs_from),
-                CndNode::Image(img) => (&img.base.refs_to, &img.base.refs_from),
-                CndNode::List(l) => (&l.base.refs_to, &l.base.refs_from),
-                CndNode::Terms(t) => (&t.base.refs_to, &t.base.refs_from),
-            };
-            out.insert(
-                node.id(),
-                (node, refs_to.clone(), refs_from.clone()),
-            );
+            if node.base().refs.iter().any(|reference| reference.id == target) {
+                *count += 1;
+            }
             match node {
-                CndNode::Heading(h) => walk(&h.children, out),
-                CndNode::Figure(f) => walk(&f.children, out),
+                CndNode::Heading(h) => walk(&h.children, target, count),
+                CndNode::Figure(f) => walk(&f.children, target, count),
                 _ => {}
             }
         }
     }
+    let mut count = 0;
+    walk(nodes, target, &mut count);
+    count
+}
 
-    walk(nodes, &mut by_id);
-
-    for (id, (_, refs_to, refs_from)) in &by_id {
-        for target in refs_to {
-            assert!(
-                by_id.contains_key(&target.id),
-                "refs_to target {} from {id} does not exist",
-                target.id
-            );
-        }
-        for source in refs_from {
-            assert!(
-                by_id.contains_key(&source.id),
-                "refs_from source {} on {id} does not exist",
-                source.id
-            );
-        }
-    }
-
-    for (source_id, (_, refs_to, _)) in &by_id {
-        for target in refs_to {
-            let (_, _, refs_from) = by_id.get(&target.id).expect("target");
-            assert!(
-                refs_from.iter().any(|reference| reference.id == *source_id),
-                "missing reverse refs_from on {} for refs_to from {source_id}",
-                target.id
-            );
+/// Every forward `refs` edge must point at a node that exists in the
+/// manifest (ADR 0008). With `refs_from` gone, the reverse-consistency
+/// invariant no longer exists — the SDK derives incoming edges on demand
+/// (`CndManifest.incoming`) — so this only checks target existence.
+pub fn assert_refs_resolve(nodes: &[CndNode]) {
+    let mut ids: HashSet<uuid::Uuid> = HashSet::new();
+    fn collect_ids(nodes: &[CndNode], out: &mut HashSet<uuid::Uuid>) {
+        for node in nodes {
+            out.insert(node.id());
+            match node {
+                CndNode::Heading(h) => collect_ids(&h.children, out),
+                CndNode::Figure(f) => collect_ids(&f.children, out),
+                _ => {}
+            }
         }
     }
+    collect_ids(nodes, &mut ids);
+
+    fn check(nodes: &[CndNode], ids: &HashSet<uuid::Uuid>) {
+        for node in nodes {
+            for reference in &node.base().refs {
+                assert!(
+                    ids.contains(&reference.id),
+                    "refs target {} from {} does not exist",
+                    reference.id,
+                    node.id()
+                );
+            }
+            match node {
+                CndNode::Heading(h) => check(&h.children, ids),
+                CndNode::Figure(f) => check(&f.children, ids),
+                _ => {}
+            }
+        }
+    }
+    check(nodes, &ids);
 }
 
 /// Every `cites`/`footnotes` edge on a node must resolve to a real pool

@@ -27,7 +27,9 @@ fn doc_selector() -> Selector {
     ])
 }
 
-/// Resolve cross-references and populate `refs_to` / `refs_from` bidirectionally.
+/// Resolve cross-references and populate the forward-only `refs` list on
+/// each source node (ADR 0008). The reverse index is derived on demand by
+/// the SDK (`CndManifest.incoming`), never materialized here.
 pub fn resolve_refs(
     ctx: &mut ConvertContext,
     introspector: &dyn Introspector,
@@ -84,10 +86,9 @@ pub fn resolve_refs(
     }
 
     for (source, target, target_label) in edges {
-        let source_label = node_label(ctx, source);
+        // The forward edge's `label` mirrors its target's label (ADR 0002).
         let resolved_target_label = target_label.or_else(|| node_label(ctx, target));
-        set_ref_to(ctx, source, target, resolved_target_label);
-        set_ref_from(ctx, target, source, source_label);
+        set_ref(ctx, source, target, resolved_target_label);
     }
 }
 
@@ -285,20 +286,11 @@ fn node_label(ctx: &ConvertContext, id: Uuid) -> Option<String> {
     walk(&ctx.roots, id)
 }
 
-fn set_ref_to(ctx: &mut ConvertContext, source: Uuid, target: Uuid, label: Option<String>) {
+fn set_ref(ctx: &mut ConvertContext, source: Uuid, target: Uuid, label: Option<String>) {
     if let Some(node) = find_node_mut(&mut ctx.roots, source) {
-        let refs = node.refs_to_mut();
+        let refs = node.refs_mut();
         if !refs.iter().any(|reference| reference.id == target) {
             refs.push(NodeRef::new(target, label));
-        }
-    }
-}
-
-fn set_ref_from(ctx: &mut ConvertContext, target: Uuid, source: Uuid, label: Option<String>) {
-    if let Some(node) = find_node_mut(&mut ctx.roots, target) {
-        let refs = node.refs_from_mut();
-        if !refs.iter().any(|reference| reference.id == source) {
-            refs.push(NodeRef::new(source, label));
         }
     }
 }

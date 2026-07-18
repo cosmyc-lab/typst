@@ -3,7 +3,7 @@ mod common;
 use common::{
     all_example_files, assert_json_roundtrip, assert_manifest_contract, assert_pool_refs_resolve,
     assert_refs_resolve, assert_tag_sequence, assert_unique_ids, compile_example, example_path,
-    find_by_label, find_lists, heading_texts, label_exists, manifest_for_example,
+    find_by_label, find_lists, heading_texts, incoming_count, label_exists, manifest_for_example,
     paragraph_texts_in_order, table_stats, tags_under_heading, walk_nodes, NodeStats,
 };
 use typst_cnd::{CndNode, TableKind};
@@ -74,7 +74,10 @@ fn structured_cross_references() {
         })
         .expect("table child");
     assert!(table.raw_typst.as_ref().is_some_and(|r| r.contains("table(")));
-    assert!(!figure.base.refs_from.is_empty());
+    assert!(
+        incoming_count(&manifest.nodes, figure.base.id) > 0,
+        "the captioned figure is a cross-reference target"
+    );
 
     assert_refs_resolve(&manifest.nodes);
 }
@@ -168,7 +171,7 @@ fn complex_refs_dense_graph() {
         panic!("expected heading");
     };
     assert!(
-        !overview.base.refs_to.is_empty(),
+        !overview.base.refs.is_empty(),
         "overview heading should reference labelled targets"
     );
 
@@ -176,7 +179,7 @@ fn complex_refs_dense_graph() {
     let CndNode::Figure(signaux) = signaux else {
         panic!("expected figure");
     };
-    assert!(signaux.base.refs_from.len() >= 2);
+    assert!(incoming_count(&manifest.nodes, signaux.base.id) >= 2);
 
     let regulation = find_by_label(&manifest.nodes, "sec-regulation").expect("regulation");
     let CndNode::Heading(regulation) = regulation else {
@@ -194,7 +197,7 @@ fn complex_refs_dense_graph() {
             _ => None,
         })
         .expect("regulation paragraph with metadata");
-    assert!(!regulation_para.base.refs_to.is_empty());
+    assert!(!regulation_para.base.refs.is_empty());
 
     assert_refs_resolve(&manifest.nodes);
 }
@@ -340,7 +343,7 @@ fn complex_columns_reading_order_flatten() {
             _ => None,
         })
         .expect("post paragraph");
-    assert!(!post.base.refs_to.is_empty());
+    assert!(!post.base.refs.is_empty());
 
     assert_refs_resolve(&manifest.nodes);
 }
@@ -508,7 +511,7 @@ fn complex_semantic_all_node_types_and_xrefs() {
     let CndNode::Figure(signals) = signals else {
         panic!("expected figure");
     };
-    assert!(signals.base.refs_from.len() >= 2);
+    assert!(incoming_count(&manifest.nodes, signals.base.id) >= 2);
 
     let corpus = find_by_label(&manifest.nodes, "ch-corpus").expect("corpus");
     let CndNode::Heading(corpus) = corpus else {
@@ -543,23 +546,23 @@ fn complex_semantic_all_node_types_and_xrefs() {
             _ => None,
         })
         .expect("closing xref paragraph");
-    assert!(closing.base.refs_to.len() >= 5);
+    assert!(closing.base.refs.len() >= 5);
     assert!(
         closing
             .base
-            .refs_to
+            .refs
             .iter()
             .all(|reference| reference.label.is_some()),
-        "refs_to should carry Typst labels: {:?}",
-        closing.base.refs_to
+        "refs should carry Typst labels: {:?}",
+        closing.base.refs
     );
     assert!(
         closing
             .base
-            .refs_to
+            .refs
             .iter()
             .any(|reference| reference.label.as_deref() == Some("eq-golden")),
-        "expected @eq-golden in refs_to"
+        "expected @eq-golden in refs"
     );
     assert_eq!(
         closing.base.state_metadata.get("section").and_then(|v| v.as_str()),
@@ -694,7 +697,7 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
         panic!("expected math");
     };
     assert!(
-        !energy.base.refs_from.is_empty(),
+        incoming_count(&manifest.nodes, energy.base.id) > 0,
         "equation should be referenced from tail paragraph"
     );
 
@@ -929,11 +932,11 @@ fn citations_bibliography_pool_and_cite_edges() {
     // edge — citations resolve in the bibliography, not the node tree.
     fn assert_no_bibkey_refs(nodes: &[CndNode]) {
         for node in nodes {
-            for reference in &node.base().refs_to {
+            for reference in &node.base().refs {
                 let label = reference.label.as_deref().unwrap_or_default();
                 assert!(
                     label != "smith2024" && label != "jones2022",
-                    "citation key leaked into refs_to: {label}"
+                    "citation key leaked into refs: {label}"
                 );
             }
             match node {
