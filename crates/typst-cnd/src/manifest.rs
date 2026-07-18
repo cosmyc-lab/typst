@@ -47,11 +47,11 @@ pub struct DocMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct NodeLocation {
+    /// The page on which the node begins in the compiled document — the
+    /// one layout fact a consumer cannot derive from the tree. Reading
+    /// order, per-page order, and within-parent order are all derived by
+    /// consumers from the normative reading order of `nodes` (spec §2).
     pub page: i32,
-    pub span: i32,
-    pub page_span: i32,
-    pub parent_span: i32,
-    pub span_count: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
