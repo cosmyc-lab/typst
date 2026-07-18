@@ -141,11 +141,12 @@ impl CndNode {
 }
 
 /// Forward cross-reference edge: stable node id plus optional Typst label
-/// (ADR 0002). `id` resolves in the manifest `nodes` tree. `span` is an
-/// additive optional `[start, end)` codepoint offset marking where the
+/// (ADR 0002). `id` resolves in the manifest `nodes` tree. `text_span` is
+/// an additive optional `[start, end)` codepoint offset marking where the
 /// reference marker sits in the containing node's rendered text — currently
-/// always `None` (spans are a deferred conformance level, populated for
-/// `NodeRef`/`CiteRef`/`FootnoteRef` together in a future task).
+/// always `None` (text spans are a deferred conformance level, populated
+/// for `NodeRef`/`CiteRef`/`FootnoteRef` together in a future task). Named
+/// `text_span` to pin the coordinate space (ADR 0013).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct NodeRef {
@@ -153,20 +154,20 @@ pub struct NodeRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub span: Option<Vec<i64>>,
+    pub text_span: Option<Vec<i64>>,
 }
 
 impl NodeRef {
     pub fn new(id: Uuid, label: Option<String>) -> Self {
-        Self { id, label, span: None }
+        Self { id, label, text_span: None }
     }
 }
 
 /// Forward citation edge; `id` resolves in the manifest `bibliography`
-/// pool (proposal 0004). `form` mirrors Typst's citation form; `span` is
-/// an optional `[start, end)` codepoint offset into the node's rendered
-/// text (currently always `None` — spans are a deferred conformance
-/// level, see the pools module).
+/// pool (proposal 0004). `form` mirrors Typst's citation form; `text_span`
+/// is an optional `[start, end)` codepoint offset into the node's rendered
+/// text (currently always `None` — a deferred conformance level, see the
+/// pools module; ADR 0013).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct CiteRef {
@@ -174,7 +175,7 @@ pub struct CiteRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub span: Option<Vec<i64>>,
+    pub text_span: Option<Vec<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub form: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,6 +183,7 @@ pub struct CiteRef {
 }
 
 /// Forward footnote edge; `id` resolves in the manifest `footnotes` pool.
+/// `text_span` as on `NodeRef`/`CiteRef` (ADR 0013).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct FootnoteRef {
@@ -189,7 +191,7 @@ pub struct FootnoteRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub span: Option<Vec<i64>>,
+    pub text_span: Option<Vec<i64>>,
 }
 
 /// Footnote pool entry — flat supporting text keyed by its rendered

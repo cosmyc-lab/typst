@@ -7,11 +7,12 @@
 //! markers (captured as introspection tag locations during conversion) to
 //! `FootnoteRef` edges pointing at the pool.
 //!
-//! Conformance note — spans: the `span` field on `FootnoteRef`/`CiteRef`
-//! is a deferred conformance level. Edges resolve to real pool entries,
-//! but `span` is always `None` today; the schema allows null spans. Adding
-//! positioned spans requires threading codepoint offsets through the text
-//! extractor and is tracked as follow-up work.
+//! Conformance note — text spans: the `text_span` field on
+//! `FootnoteRef`/`CiteRef` (ADR 0013) is a deferred conformance level.
+//! Edges resolve to real pool entries, but `text_span` is always `None`
+//! today; the schema allows null spans. Adding positioned spans requires
+//! threading codepoint offsets through the text extractor and is tracked
+//! as follow-up work.
 
 use typst_library::engine::Engine;
 use typst_library::foundations::{NativeElement, StyleChain};
@@ -199,7 +200,7 @@ pub fn resolve_cite_edges(ctx: &mut ConvertContext) {
                     CiteRef {
                         id: bib_id,
                         label: Some(marker.key.resolve().to_string()),
-                        span: None,
+                        text_span: None,
                         form: marker.form.clone(),
                         supplement: marker.supplement.clone(),
                     },
@@ -243,7 +244,7 @@ fn resolve_footnote_edges(ctx: &mut ConvertContext) {
         if let Some(node) = find_node_mut(&mut ctx.roots, node_id) {
             let footnotes = node.footnotes_mut();
             if !footnotes.iter().any(|reference| reference.id == pool_id) {
-                footnotes.push(FootnoteRef { id: pool_id, label, span: None });
+                footnotes.push(FootnoteRef { id: pool_id, label, text_span: None });
             }
         }
     }
