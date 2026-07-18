@@ -50,16 +50,11 @@ pub fn resolve_refs(
     // RefElem, so `ref_targets` is empty for flat nodes).
     let mut ref_marker_sources: rustc_hash::FxHashSet<Uuid> = Default::default();
     for (source_id, record) in &ctx.records {
-        for label in &record.ref_targets {
-            // A `@key` citation is a RefElem too, but resolves in the
-            // bibliography pool, not the node tree — keep it out of `refs`.
-            if ctx.bib_key_to_id.contains_key(label) {
-                continue;
-            }
-            if let Some(target_id) = resolve_label(label, ctx, introspector) {
-                edges.push((*source_id, target_id, Some(label.resolve().as_str().into()), None));
-            }
-        }
+        // `ref_markers` first: these carry spans, and `set_ref` dedups
+        // first-wins per target, so the spanned edge must be pushed before
+        // the span-less `ref_targets` edge for the same target (today
+        // `ref_targets` is empty for realized flat nodes, but keep the order
+        // robust against that ever changing).
         for (label, span) in &record.ref_markers {
             if ctx.bib_key_to_id.contains_key(label) {
                 continue;
@@ -72,6 +67,16 @@ pub fn resolve_refs(
                     Some(label.resolve().as_str().into()),
                     Some(*span),
                 ));
+            }
+        }
+        for label in &record.ref_targets {
+            // A `@key` citation is a RefElem too, but resolves in the
+            // bibliography pool, not the node tree — keep it out of `refs`.
+            if ctx.bib_key_to_id.contains_key(label) {
+                continue;
+            }
+            if let Some(target_id) = resolve_label(label, ctx, introspector) {
+                edges.push((*source_id, target_id, Some(label.resolve().as_str().into()), None));
             }
         }
     }
