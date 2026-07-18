@@ -19,6 +19,7 @@ pub struct NodeStats {
     pub figures: usize,
     pub images: usize,
     pub lists: usize,
+    pub terms: usize,
     pub max_heading_level: i32,
     pub pages: HashSet<i32>,
     pub labels: HashSet<String>,
@@ -146,6 +147,13 @@ pub fn walk_nodes(nodes: &[CndNode], stats: &mut NodeStats) {
                     stats.labels.insert(label.clone());
                 }
             }
+            CndNode::Terms(t) => {
+                stats.terms += 1;
+                stats.pages.insert(t.base.location.page);
+                if let Some(label) = &t.base.label {
+                    stats.labels.insert(label.clone());
+                }
+            }
         }
     }
 }
@@ -193,7 +201,8 @@ pub fn table_stats(nodes: &[CndNode]) -> TableStats {
                 | CndNode::Code(_)
                 | CndNode::Math(_)
                 | CndNode::Image(_)
-                | CndNode::List(_) => {}
+                | CndNode::List(_)
+                | CndNode::Terms(_) => {}
             }
         }
     }
@@ -220,7 +229,8 @@ pub fn assert_unique_ids(nodes: &[CndNode]) {
         + stats.math
         + stats.figures
         + stats.images
-        + stats.lists;
+        + stats.lists
+        + stats.terms;
     assert_eq!(
         stats.ids.len(),
         total,
@@ -252,6 +262,7 @@ pub fn assert_refs_resolve(nodes: &[CndNode]) {
                 CndNode::Figure(f) => (&f.base.refs_to, &f.base.refs_from),
                 CndNode::Image(img) => (&img.base.refs_to, &img.base.refs_from),
                 CndNode::List(l) => (&l.base.refs_to, &l.base.refs_from),
+                CndNode::Terms(t) => (&t.base.refs_to, &t.base.refs_from),
             };
             out.insert(
                 node.id(),
@@ -359,7 +370,8 @@ pub fn paragraph_texts_in_order(nodes: &[CndNode]) -> Vec<String> {
                 | CndNode::Math(_)
                 | CndNode::Figure(_)
                 | CndNode::Image(_)
-                | CndNode::List(_) => {}
+                | CndNode::List(_)
+                | CndNode::Terms(_) => {}
             }
         }
     }
@@ -410,7 +422,8 @@ pub fn find_lists(nodes: &[CndNode]) -> Vec<&ListNode> {
                 | CndNode::Code(_)
                 | CndNode::Math(_)
                 | CndNode::Figure(_)
-                | CndNode::Image(_) => {}
+                | CndNode::Image(_)
+                | CndNode::Terms(_) => {}
             }
         }
     }

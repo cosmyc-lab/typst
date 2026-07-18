@@ -9,7 +9,7 @@ use typst_library::introspection::{Introspector, Location};
 use typst_library::math::EquationElem;
 use typst_library::model::{
     EnumElem, EnumItem, FigureCaption, FigureElem, HeadingElem, ListElem, ListItem, ParElem,
-    QuoteElem, RefElem, Supplement, TableElem,
+    QuoteElem, RefElem, Supplement, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_syntax::{FileId, Span};
@@ -66,6 +66,7 @@ fn doc_selector() -> Selector {
         EquationElem::ELEM.select(),
         ListElem::ELEM.select(),
         EnumElem::ELEM.select(),
+        TermsElem::ELEM.select(),
     ])
 }
 
@@ -99,6 +100,20 @@ fn build_list_enum_ranges(engine: &Engine, introspector: &dyn Introspector) -> V
     for selector in [ListElem::ELEM.select(), EnumElem::ELEM.select()] {
         for elem in introspector.query(&selector) {
             if let Some(range) = source_range(engine, elem.span()) {
+                ranges.push(range);
+            }
+        }
+    }
+    // Definition-list item ranges: a list/enum whose source sits inside a
+    // term item's range is nested description content (inlined into the
+    // term's text), not a standalone node. `TermItem` elements are not
+    // independently introspectable — reach them through `TermsElem.children`.
+    for elem in introspector.query(&TermsElem::ELEM.select()) {
+        let Some(terms) = elem.to_packed::<TermsElem>() else {
+            continue;
+        };
+        for item in &terms.children {
+            if let Some(range) = source_range(engine, item.span()) {
                 ranges.push(range);
             }
         }
@@ -293,6 +308,7 @@ fn build_skip_ranges(engine: &Engine, introspector: &dyn Introspector) -> Vec<So
         QuoteElem::ELEM.select(),
         ListElem::ELEM.select(),
         EnumElem::ELEM.select(),
+        TermsElem::ELEM.select(),
         FigureElem::ELEM.select(),
     ];
     let mut ranges = Vec::new();
@@ -392,6 +408,16 @@ fn build_skip_paragraph_texts(introspector: &dyn Introspector) -> FxHashSet<Stri
         }
     }
 
+    for elem in introspector.query(&TermsElem::ELEM.select()) {
+        let Some(terms) = elem.to_packed::<TermsElem>() else {
+            continue;
+        };
+        for item in &terms.children {
+            push_text_key(&mut skip, &extract::extract_text(&item.term));
+            push_text_key(&mut skip, &extract::extract_text(&item.description));
+        }
+    }
+
     for elem in introspector.query(&FigureElem::ELEM.select()) {
         let Some(figure) = elem.to_packed::<FigureElem>() else {
             continue;
@@ -480,6 +506,11 @@ pub fn convert_from_introspector(
         items.push((loc, elem));
     }
 
+    for elem in introspector.query(&TermsElem::ELEM.select()) {
+        let Some(loc) = elem.location() else { continue };
+        items.push((loc, elem));
+    }
+
     for elem in introspector.query(&RawElem::ELEM.select()) {
         let Some(raw) = elem.to_packed::<RawElem>() else { continue };
         if !raw.block.get(styles) {
@@ -552,6 +583,10 @@ fn dispatch(
         let (node, record) = list::from_enum(engine, introspector, enum_, styles)?;
         ctx.register(node.base.id, record);
         push_node(CndNode::List(node), ctx, stack);
+    } else if let Some(terms) = content.to_packed::<TermsElem>() {
+        let (node, record) = list::from_terms(engine, introspector, terms, styles)?;
+        ctx.register(node.base.id, record);
+        push_node(CndNode::Terms(node), ctx, stack);
     } else if let Some(raw) = content.to_packed::<RawElem>() {
         let (node, record) = code::convert(engine, introspector, raw, styles)?;
         ctx.register(node.base.id, record);

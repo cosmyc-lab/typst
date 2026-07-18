@@ -12,13 +12,15 @@ use typst_syntax::Span;
 use crate::emit::convert::{self, ConvertContext};
 use crate::emit::refs;
 use crate::location::LocationAssigner;
-use crate::manifest::{CND_VERSION, CndManifest, DocDate, DocMetadata};
+use crate::manifest::{BibEntry, CND_VERSION, CndManifest, DocDate, DocMetadata, Footnote};
 
 /// A compiled CND document before JSON serialization.
 #[derive(Debug, Clone)]
 pub struct CndDocument {
     info: DocumentInfo,
     nodes: Vec<crate::manifest::CndNode>,
+    bibliography: Vec<BibEntry>,
+    footnotes: Vec<Footnote>,
     introspector: Arc<PagedIntrospector>,
 }
 
@@ -29,6 +31,16 @@ impl CndDocument {
 
     pub fn nodes(&self) -> &[crate::manifest::CndNode] {
         &self.nodes
+    }
+
+    /// Bibliography pool (proposal 0004). Empty until pool collection lands.
+    pub fn bibliography(&self) -> &[BibEntry] {
+        &self.bibliography
+    }
+
+    /// Footnote pool (proposal 0004). Empty until pool collection lands.
+    pub fn footnotes(&self) -> &[Footnote] {
+        &self.footnotes
     }
 
     pub fn introspector(&self) -> &Arc<PagedIntrospector> {
@@ -71,7 +83,13 @@ impl Output for CndDocument {
         let mut assigner = LocationAssigner::new(introspector.clone(), ctx.records);
         assigner.assign_all(&mut nodes);
 
-        Ok(Self { info, nodes, introspector })
+        Ok(Self {
+            info,
+            nodes,
+            bibliography: Vec::new(),
+            footnotes: Vec::new(),
+            introspector,
+        })
     }
 
     fn introspector(&self) -> &dyn Introspector {
@@ -126,6 +144,10 @@ pub fn manifest_from_document(
         compiled_at,
         doc: doc_metadata_from_info(document.info()),
         nodes: document.nodes().to_vec(),
+        // Pools are populated by a later increment (footnote/bibliography
+        // collection); always-present empty vecs satisfy the 0.2.0 contract.
+        bibliography: document.bibliography().to_vec(),
+        footnotes: document.footnotes().to_vec(),
     }
 }
 

@@ -1,12 +1,12 @@
 use typst_library::engine::Engine;
 use typst_library::foundations::{NativeElement, Packed, Smart, StyleChain};
 use typst_library::introspection::Introspector;
-use typst_library::model::{EnumElem, EnumItem, ListElem, ListItem};
+use typst_library::model::{EnumElem, EnumItem, ListElem, ListItem, TermItem, TermsElem};
 
 use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
-use crate::manifest::{ListItem as CndListItem, ListNode};
+use crate::manifest::{ListItem as CndListItem, ListNode, TermItem as CndTermItem, TermsNode};
 
 pub fn from_list(
     engine: &mut Engine,
@@ -53,6 +53,34 @@ pub fn from_enum(
         .collect();
 
     Ok((node, record))
+}
+
+/// Convert a Typst definition list (`/ term: description`) into a
+/// `TermsNode`. Mirror of `from_list`: term/description are flat text by
+/// schema, so there is no nesting recursion (proposal 0004).
+pub fn from_terms(
+    engine: &mut Engine,
+    introspector: &dyn Introspector,
+    terms: &Packed<TermsElem>,
+    styles: StyleChain,
+) -> typst_library::diag::SourceResult<(TermsNode, NodeRecord)> {
+    let id = uuid::Uuid::new_v4();
+    let location = placeholder_location();
+    let packed = terms.clone().pack();
+    let record = convert::make_record(engine, introspector, &packed)?;
+
+    let mut node = TermsNode::new(id, location);
+    node.tight = terms.tight.get(styles);
+    node.items = terms.children.iter().map(term_item).collect();
+
+    Ok((node, record))
+}
+
+fn term_item(item: &Packed<TermItem>) -> CndTermItem {
+    CndTermItem {
+        term: extract_text(&item.term).into(),
+        description: extract_text(&item.description).into(),
+    }
 }
 
 fn list_item(item: &Packed<ListItem>, ordered: bool, styles: StyleChain) -> CndListItem {

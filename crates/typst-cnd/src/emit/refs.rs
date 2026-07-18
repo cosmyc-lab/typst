@@ -3,7 +3,9 @@ use std::ops::ControlFlow;
 use typst_library::foundations::{Content, Label, NativeElement, Selector};
 use typst_library::introspection::Introspector;
 use typst_library::math::EquationElem;
-use typst_library::model::{EnumElem, FigureElem, HeadingElem, ListElem, ParElem, QuoteElem, RefElem};
+use typst_library::model::{
+    EnumElem, FigureElem, HeadingElem, ListElem, ParElem, QuoteElem, RefElem, TermsElem,
+};
 use typst_library::text::RawElem;
 use uuid::Uuid;
 
@@ -21,6 +23,7 @@ fn doc_selector() -> Selector {
         EquationElem::ELEM.select(),
         ListElem::ELEM.select(),
         EnumElem::ELEM.select(),
+        TermsElem::ELEM.select(),
     ])
 }
 
@@ -131,7 +134,8 @@ fn walk_paragraph_ids(nodes: &[CndNode], out: &mut Vec<Uuid>) {
             | CndNode::Code(_)
             | CndNode::Math(_)
             | CndNode::Image(_)
-            | CndNode::List(_) => {}
+            | CndNode::List(_)
+            | CndNode::Terms(_) => {}
         }
     }
 }
@@ -206,7 +210,8 @@ fn find_labeled_table(ctx: &ConvertContext) -> Option<Uuid> {
                 | CndNode::Code(_)
                 | CndNode::Math(_)
                 | CndNode::Image(_)
-                | CndNode::List(_) => {}
+                | CndNode::List(_)
+                | CndNode::Terms(_) => {}
             }
         }
         None
@@ -244,7 +249,8 @@ fn last_paragraph_under_heading(nodes: &[CndNode], heading_id: Uuid) -> Option<U
                 | CndNode::Math(_)
                 | CndNode::Figure(_)
                 | CndNode::Image(_)
-                | CndNode::List(_) => {}
+                | CndNode::List(_)
+                | CndNode::Terms(_) => {}
             }
         }
     }

@@ -17,6 +17,13 @@ pub struct CndManifest {
     pub compiled_at: String,
     pub doc: DocMetadata,
     pub nodes: Vec<CndNode>,
+    /// Bibliography pool — target of `cites` edges. Always present (never
+    /// null); empty when the document cites nothing (proposal 0004).
+    #[serde(default)]
+    pub bibliography: Vec<BibEntry>,
+    /// Footnote pool — target of `footnotes` edges. Always present.
+    #[serde(default)]
+    pub footnotes: Vec<Footnote>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +73,7 @@ pub enum CndNode {
     Figure(FigureNode),
     Image(ImageNode),
     List(ListNode),
+    Terms(TermsNode),
 }
 
 impl CndNode {
@@ -84,6 +92,7 @@ impl CndNode {
             Self::Figure(n) => &n.base,
             Self::Image(n) => &n.base,
             Self::List(n) => &n.base,
+            Self::Terms(n) => &n.base,
         }
     }
 
@@ -98,6 +107,7 @@ impl CndNode {
             Self::Figure(n) => &mut n.base,
             Self::Image(n) => &mut n.base,
             Self::List(n) => &mut n.base,
+            Self::Terms(n) => &mut n.base,
         }
     }
 
@@ -111,6 +121,14 @@ impl CndNode {
 
     pub fn refs_from_mut(&mut self) -> &mut Vec<NodeRef> {
         &mut self.base_mut().refs_from
+    }
+
+    pub fn cites_mut(&mut self) -> &mut Vec<CiteRef> {
+        &mut self.base_mut().cites
+    }
+
+    pub fn footnotes_mut(&mut self) -> &mut Vec<FootnoteRef> {
+        &mut self.base_mut().footnotes
     }
 
     /// Nodes with their own reading-flow children: headings and figure
@@ -141,6 +159,75 @@ impl NodeRef {
     }
 }
 
+/// Forward citation edge; `id` resolves in the manifest `bibliography`
+/// pool (proposal 0004). `form` mirrors Typst's citation form; `span` is
+/// an optional `[start, end)` codepoint offset into the node's rendered
+/// text (currently always `None` — spans are a deferred conformance
+/// level, see the pools module).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct CiteRef {
+    pub id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<Vec<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supplement: Option<String>,
+}
+
+/// Forward footnote edge; `id` resolves in the manifest `footnotes` pool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct FootnoteRef {
+    pub id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<Vec<i64>>,
+}
+
+/// Footnote pool entry — flat supporting text keyed by its rendered
+/// ordinal `label` (proposal 0004).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct Footnote {
+    pub id: Uuid,
+    pub label: String,
+    pub text: String,
+}
+
+/// Bibliography pool entry — target of `cites` edges. `rendered` is the
+/// reference string as displayed in the compiled document; a curated
+/// typed subset is lifted alongside it, and the full source entry is
+/// carried losslessly as structured JSON in `raw` (proposal 0004).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BibEntry {
+    pub id: Uuid,
+    pub label: String,
+    pub rendered: String,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub type_: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub year: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Full source entry (Hayagriva) as structured JSON — always present.
+    #[serde(default = "default_json_object")]
+    pub raw: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct NodeBase {
@@ -151,6 +238,10 @@ pub struct NodeBase {
     pub refs_to: Vec<NodeRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs_from: Vec<NodeRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cites: Vec<CiteRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub footnotes: Vec<FootnoteRef>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_metadata: HashMap<String, serde_json::Value>,
     pub location: NodeLocation,
@@ -322,6 +413,41 @@ pub struct ListNode {
     pub items: Vec<ListItem>,
 }
 
+/// Single term/description pair of a definition list. Flat text, no id,
+/// not ref-targetable — same shape as `ListItem`/`TableCell`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TermItem {
+    pub term: String,
+    pub description: String,
+}
+
+/// Definition list (Typst `/ term: description` items) — proposal 0004.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TermsNode {
+    #[serde(flatten)]
+    pub base: NodeBase,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub tight: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<TermItem>,
+}
+
+impl TermsNode {
+    pub fn new(id: Uuid, location: NodeLocation) -> Self {
+        Self {
+            base: NodeBase::new(id, location),
+            tight: true,
+            items: Vec::new(),
+        }
+    }
+}
+
+fn default_json_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
 fn default_one() -> i32 {
     1
 }
@@ -349,6 +475,8 @@ impl NodeBase {
             label: None,
             refs_to: Vec::new(),
             refs_from: Vec::new(),
+            cites: Vec::new(),
+            footnotes: Vec::new(),
             state_metadata: HashMap::new(),
             location,
         }

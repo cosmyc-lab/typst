@@ -753,6 +753,84 @@ fn inline_code_not_duplicated_in_paragraphs() {
 }
 
 #[test]
+fn terms_definition_lists() {
+    let manifest = manifest_for_example("terms.typ");
+    let mut stats = NodeStats::default();
+    walk_nodes(&manifest.nodes, &mut stats);
+
+    // Two definition lists, and the list nested in a term description must
+    // NOT also surface as a standalone list node (proposal 0004 dedup).
+    assert_eq!(stats.terms, 2);
+    assert_eq!(stats.lists, 0, "nested list must inline into the term, not emit a node");
+
+    let mut terms: Vec<&CndNode> = Vec::new();
+    fn collect<'a>(nodes: &'a [CndNode], out: &mut Vec<&'a CndNode>) {
+        for node in nodes {
+            if matches!(node, CndNode::Terms(_)) {
+                out.push(node);
+            }
+            if let CndNode::Heading(h) = node {
+                collect(&h.children, out);
+            }
+        }
+    }
+    collect(&manifest.nodes, &mut terms);
+    assert_eq!(terms.len(), 2);
+
+    let CndNode::Terms(tight) = terms[0] else { panic!() };
+    assert!(tight.tight, "first list is a tight definition list");
+    assert_eq!(tight.items.len(), 3);
+    assert_eq!(tight.items[0].term, "manifest");
+    assert_eq!(tight.items[0].description, "The serialized document tree.");
+
+    let CndNode::Terms(wide) = terms[1] else { panic!() };
+    assert!(!wide.tight, "second list is a wide definition list");
+    assert_eq!(wide.items.len(), 3);
+    let consumer = &wide.items[1];
+    assert_eq!(consumer.term, "consumer");
+    assert!(
+        consumer.description.contains("the search indexer")
+            && consumer.description.contains("export tooling"),
+        "nested list content is inlined into the term description: {:?}",
+        consumer.description
+    );
+
+    assert_refs_resolve(&manifest.nodes);
+}
+
+#[test]
+fn image_figure_carries_path_and_alt() {
+    let manifest = manifest_for_example("image_figure.typ");
+    let mut stats = NodeStats::default();
+    walk_nodes(&manifest.nodes, &mut stats);
+    assert_eq!(stats.images, 1, "the captioned image is an ImageNode child");
+
+    let figure = find_by_label(&manifest.nodes, "fig-cover").expect("figure");
+    let CndNode::Figure(figure) = figure else {
+        panic!("expected figure wrapper");
+    };
+    assert_eq!(figure.kind.as_deref(), Some("image"));
+    assert!(figure.caption.as_deref().is_some_and(|c| c.contains("cover art")));
+
+    let image = figure
+        .children
+        .iter()
+        .find_map(|c| match c {
+            CndNode::Image(img) => Some(img),
+            _ => None,
+        })
+        .expect("image child");
+    assert!(
+        image.path.as_deref().is_some_and(|p| p.contains("newsletter-cover.png")),
+        "image path preserved: {:?}",
+        image.path
+    );
+    assert_eq!(image.alt.as_deref(), Some("Department cover art"));
+
+    assert_refs_resolve(&manifest.nodes);
+}
+
+#[test]
 fn example_files_exist() {
     for name in [
         "minimal.typ",
@@ -765,6 +843,8 @@ fn example_files_exist() {
         "complex_semantic.typ",
         "complex_hardcore.typ",
         "rich.typ",
+        "terms.typ",
+        "image_figure.typ",
         "newsletter/main.typ",
     ] {
         assert!(
