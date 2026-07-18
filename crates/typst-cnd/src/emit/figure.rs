@@ -74,6 +74,7 @@ fn minimal_record(content: &Content) -> NodeRecord {
         location: content.location(),
         label: None,
         ref_targets: Vec::new(),
+        footnote_locs: Vec::new(),
         state_metadata: std::collections::HashMap::new(),
     }
 }

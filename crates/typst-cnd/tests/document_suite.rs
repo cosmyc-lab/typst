@@ -1,10 +1,10 @@
 mod common;
 
 use common::{
-    all_example_files, assert_json_roundtrip, assert_manifest_contract, assert_refs_resolve,
-    assert_tag_sequence, assert_unique_ids, compile_example, example_path, find_by_label,
-    find_lists, heading_texts, label_exists, manifest_for_example, paragraph_texts_in_order,
-    table_stats, tags_under_heading, walk_nodes, NodeStats,
+    all_example_files, assert_json_roundtrip, assert_manifest_contract, assert_pool_refs_resolve,
+    assert_refs_resolve, assert_tag_sequence, assert_unique_ids, compile_example, example_path,
+    find_by_label, find_lists, heading_texts, label_exists, manifest_for_example,
+    paragraph_texts_in_order, table_stats, tags_under_heading, walk_nodes, NodeStats,
 };
 use typst_cnd::{CndNode, TableKind};
 
@@ -831,6 +831,50 @@ fn image_figure_carries_path_and_alt() {
 }
 
 #[test]
+fn footnotes_pool_and_edges() {
+    let manifest = manifest_for_example("footnotes.typ");
+
+    // Three declaration footnotes become pool entries; the labelled note is
+    // referenced twice (its declaration plus a `#footnote(<label>)` marker).
+    let labels: Vec<&str> = manifest.footnotes.iter().map(|f| f.label.as_str()).collect();
+    assert_eq!(labels, vec!["1", "2", "3"]);
+    assert!(
+        manifest.footnotes.iter().any(|f| f.text.contains("2023 audit")),
+        "footnote body text is captured in the pool"
+    );
+
+    assert_pool_refs_resolve(&manifest);
+
+    // Collect footnote edges per paragraph in reading order.
+    let mut edges: Vec<Vec<String>> = Vec::new();
+    fn walk(nodes: &[CndNode], out: &mut Vec<Vec<String>>) {
+        for node in nodes {
+            match node {
+                CndNode::Paragraph(p) => out.push(
+                    p.base
+                        .footnotes
+                        .iter()
+                        .filter_map(|r| r.label.clone())
+                        .collect(),
+                ),
+                CndNode::Heading(h) => walk(&h.children, out),
+                _ => {}
+            }
+        }
+    }
+    walk(&manifest.nodes, &mut edges);
+    // The middle paragraph carries two markers (note 2 and the re-reference
+    // to note 3); the last paragraph declares note 3.
+    assert!(
+        edges.iter().any(|e| e.len() == 2 && e.contains(&"2".to_string()) && e.contains(&"3".to_string())),
+        "a paragraph should carry both note 2 and the re-referenced note 3: {edges:?}"
+    );
+    assert!(edges.iter().any(|e| e == &vec!["1".to_string()]));
+
+    assert_refs_resolve(&manifest.nodes);
+}
+
+#[test]
 fn example_files_exist() {
     for name in [
         "minimal.typ",
@@ -845,6 +889,7 @@ fn example_files_exist() {
         "rich.typ",
         "terms.typ",
         "image_figure.typ",
+        "footnotes.typ",
         "newsletter/main.typ",
     ] {
         assert!(

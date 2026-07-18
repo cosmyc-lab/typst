@@ -307,6 +307,54 @@ pub fn assert_refs_resolve(nodes: &[CndNode]) {
     }
 }
 
+/// Every `cites`/`footnotes` edge on a node must resolve to a real pool
+/// entry, and pool-entry ids must be globally unique and disjoint from
+/// node ids (proposal 0004 invariants).
+pub fn assert_pool_refs_resolve(manifest: &CndManifest) {
+    let footnote_ids: HashSet<uuid::Uuid> = manifest.footnotes.iter().map(|f| f.id).collect();
+    let bib_ids: HashSet<uuid::Uuid> = manifest.bibliography.iter().map(|b| b.id).collect();
+
+    fn walk(
+        nodes: &[CndNode],
+        footnote_ids: &HashSet<uuid::Uuid>,
+        bib_ids: &HashSet<uuid::Uuid>,
+    ) {
+        for node in nodes {
+            for reference in &node.base().footnotes {
+                assert!(
+                    footnote_ids.contains(&reference.id),
+                    "footnote edge {} does not resolve to a pool entry",
+                    reference.id
+                );
+            }
+            for citation in &node.base().cites {
+                assert!(
+                    bib_ids.contains(&citation.id),
+                    "cite edge {} does not resolve to a bibliography entry",
+                    citation.id
+                );
+            }
+            match node {
+                CndNode::Heading(h) => walk(&h.children, footnote_ids, bib_ids),
+                CndNode::Figure(f) => walk(&f.children, footnote_ids, bib_ids),
+                _ => {}
+            }
+        }
+    }
+    walk(&manifest.nodes, &footnote_ids, &bib_ids);
+
+    // Pool ids are unique and disjoint from each other and from node ids.
+    let mut node_ids = NodeStats::default();
+    walk_nodes(&manifest.nodes, &mut node_ids);
+    assert_eq!(footnote_ids.len(), manifest.footnotes.len(), "duplicate footnote ids");
+    assert_eq!(bib_ids.len(), manifest.bibliography.len(), "duplicate bib ids");
+    assert!(footnote_ids.is_disjoint(&bib_ids), "footnote/bib ids overlap");
+    assert!(
+        footnote_ids.is_disjoint(&node_ids.ids) && bib_ids.is_disjoint(&node_ids.ids),
+        "pool ids overlap node ids"
+    );
+}
+
 pub fn assert_json_roundtrip(manifest: &CndManifest) {
     let json = manifest_to_json(manifest).expect("serialize");
     let parsed: CndManifest = serde_json::from_str(&json).expect("deserialize");

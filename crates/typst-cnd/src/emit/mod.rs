@@ -6,6 +6,7 @@ pub mod heading;
 pub mod list;
 pub mod math;
 pub mod paragraph;
+pub mod pools;
 pub mod quote;
 pub mod reading_order;
 pub mod refs;

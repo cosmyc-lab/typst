@@ -5,11 +5,11 @@ use rustc_hash::FxHashSet;
 use typst_library::WorldExt;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Label, NativeElement, Packed, Selector, StyleChain};
-use typst_library::introspection::{Introspector, Location};
+use typst_library::introspection::{Introspector, Location, Tag, TagElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    EnumElem, EnumItem, FigureCaption, FigureElem, HeadingElem, ListElem, ListItem, ParElem,
-    QuoteElem, RefElem, Supplement, TableElem, TermsElem,
+    EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteElem, HeadingElem, ListElem, ListItem,
+    ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_syntax::{FileId, Span};
@@ -24,6 +24,9 @@ pub struct NodeRecord {
     pub location: Option<Location>,
     pub label: Option<Label>,
     pub ref_targets: Vec<Label>,
+    /// Locations of footnote markers occurring in this node's content,
+    /// resolved to footnote-pool ids in `pools::resolve_footnote_edges`.
+    pub footnote_locs: Vec<Location>,
     pub state_metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
@@ -34,6 +37,12 @@ pub struct ConvertContext {
     pub records: rustc_hash::FxHashMap<Uuid, NodeRecord>,
     pub location_to_id: rustc_hash::FxHashMap<Location, Uuid>,
     pub label_to_id: rustc_hash::FxHashMap<Label, Uuid>,
+    /// Footnote pool (proposal 0004), populated by `pools::build_footnote_pool`.
+    pub footnotes: Vec<crate::manifest::Footnote>,
+    /// Map from a footnote marker's own location (declaration *or*
+    /// re-reference) to its pool-entry id. A node's `footnote_locs` are
+    /// resolved through this map; both marker kinds land on the same entry.
+    pub footnote_loc_to_id: rustc_hash::FxHashMap<Location, Uuid>,
 }
 
 impl ConvertContext {
@@ -726,6 +735,7 @@ pub fn make_record(
     let label = content.label();
     let mut ref_targets = collect_ref_targets(content);
     ref_targets.dedup_by_key(|label| label.resolve());
+    let footnote_locs = collect_footnote_locs(content);
 
     let state_metadata = match location {
         Some(loc) => metadata_at(engine, introspector, loc)?,
@@ -736,8 +746,35 @@ pub fn make_record(
         location,
         label,
         ref_targets,
+        footnote_locs,
         state_metadata,
     })
+}
+
+/// Collect the locations of footnote markers occurring in `content`.
+///
+/// The realized tree no longer carries the `FootnoteElem` in the flow (the
+/// note body is pulled to the page bottom), but it leaves an introspection
+/// `TagElem` at the marker position whose `Tag::Start` holds the original
+/// footnote element. That is the reliable per-node signal: a node whose
+/// content holds such a tag references that footnote (proposal 0004).
+fn collect_footnote_locs(content: &Content) -> Vec<Location> {
+    let mut locs = Vec::new();
+    let _ = content.traverse(&mut |element| {
+        if let Some(tag) = element.to_packed::<TagElem>() {
+            if let Tag::Start(inner, _) = &tag.tag {
+                if inner.to_packed::<FootnoteElem>().is_some() {
+                    if let Some(loc) = inner.location() {
+                        if !locs.contains(&loc) {
+                            locs.push(loc);
+                        }
+                    }
+                }
+            }
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    locs
 }
 
 pub fn apply_metadata(ctx: &mut ConvertContext) {

@@ -295,7 +295,7 @@ fn set_ref_from(ctx: &mut ConvertContext, target: Uuid, source: Uuid, label: Opt
     }
 }
 
-fn find_node_mut(nodes: &mut [CndNode], id: Uuid) -> Option<&mut CndNode> {
+pub fn find_node_mut(nodes: &mut [CndNode], id: Uuid) -> Option<&mut CndNode> {
     for node in nodes {
         if node.id() == id {
             return Some(node);

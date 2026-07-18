@@ -10,7 +10,7 @@ use typst_library::model::{Document, DocumentInfo};
 use typst_syntax::Span;
 
 use crate::emit::convert::{self, ConvertContext};
-use crate::emit::refs;
+use crate::emit::{pools, refs};
 use crate::location::LocationAssigner;
 use crate::manifest::{BibEntry, CND_VERSION, CndManifest, DocDate, DocMetadata, Footnote};
 
@@ -79,6 +79,13 @@ impl Output for CndDocument {
         convert::apply_metadata(&mut ctx);
         refs::resolve_refs(&mut ctx, introspector.as_ref(), content);
 
+        // Out-of-tree pools + typed edges (proposal 0004): build the
+        // footnote pool and attach each marker to its node. Markers are
+        // captured per node during conversion as introspection tag
+        // locations, since the realized flow keeps only rendered markers.
+        pools::resolve_footnotes(engine, introspector.as_ref(), styles, &mut ctx)?;
+
+        let footnotes = ctx.footnotes.clone();
         let mut nodes = ctx.roots;
         let mut assigner = LocationAssigner::new(introspector.clone(), ctx.records);
         assigner.assign_all(&mut nodes);
@@ -87,7 +94,7 @@ impl Output for CndDocument {
             info,
             nodes,
             bibliography: Vec::new(),
-            footnotes: Vec::new(),
+            footnotes,
             introspector,
         })
     }
