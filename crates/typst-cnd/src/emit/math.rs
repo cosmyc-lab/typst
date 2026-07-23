@@ -11,7 +11,7 @@ use typst_syntax::Span;
 use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
-use crate::manifest::MathNode;
+use crate::model::{MathNode, RawSource};
 
 pub fn convert(
     engine: &mut Engine,
@@ -40,8 +40,8 @@ pub fn convert(
 
     let mut node = MathNode::new(id, text.into(), location);
     node.block = block;
-    node.numbering = numbering.map(Into::into);
-    node.raw_typst = raw_typst_from_span(engine, equation.span());
+    node.number = numbering.map(Into::into);
+    node.raw = raw_typst_from_span(engine, equation.span()).map(RawSource::typst);
 
     Ok((node, record))
 }

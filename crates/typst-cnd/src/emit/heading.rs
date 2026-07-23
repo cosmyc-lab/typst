@@ -7,7 +7,7 @@ use typst_library::model::HeadingElem;
 use crate::emit::convert::{self, HeadingFrame, NodeRecord};
 use crate::emit::extract::extract_with_markers;
 use crate::location::placeholder_location;
-use crate::manifest::HeadingNode;
+use crate::model::HeadingNode;
 
 /// Convert a realized heading element into a CND heading node.
 pub fn convert(
@@ -18,7 +18,10 @@ pub fn convert(
     stack: &[HeadingFrame],
 ) -> typst_library::diag::SourceResult<(HeadingNode, NodeRecord)> {
     let level = heading.resolve_level(styles).get() as i32;
+    // Typst yields an empty string for an unnumbered heading; the format has
+    // no such third state — `number` is a resolved value or absent.
     let numbering: EcoString = heading.numbers.clone().unwrap_or_default();
+    let number = (!numbering.is_empty()).then(|| numbering.to_string());
     let (text, markers) = extract_with_markers(&heading.body);
     let segment = if numbering.is_empty() {
         text.clone()
@@ -37,6 +40,6 @@ pub fn convert(
     let packed = heading.clone().pack();
     let record = convert::make_record(engine, introspector, &packed, &markers)?;
 
-    let node = HeadingNode::new(id, level, numbering.into(), text.into(), heading_path, location);
+    let node = HeadingNode::new(id, level, number, text.into(), heading_path, location);
     Ok((node, record))
 }

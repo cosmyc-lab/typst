@@ -14,7 +14,7 @@ use typst_library::introspection::Introspector;
 use uuid::Uuid;
 
 use crate::emit::convert::NodeRecord;
-use crate::manifest::{CndNode, NodeLocation};
+use crate::model::{CndNode, NodeLocation};
 
 /// Placeholder location filled in later by [`LocationAssigner`].
 pub fn placeholder_location() -> NodeLocation {

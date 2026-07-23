@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::emit::convert::{self, NodeRecord};
 use crate::emit::{code, table};
 use crate::location::placeholder_location;
-use crate::manifest::{CndNode, FigureNode, ImageNode};
+use crate::model::{CndNode, FigureNode, ImageNode, RawSource};
 
 /// Convert a non-table figure (image, code, custom kind, …) into a wrapper
 /// `FigureNode` plus whatever children it carries. Table/grid figures are
@@ -39,7 +39,7 @@ pub fn from_figure(
     let location = placeholder_location();
     let mut node = FigureNode::new(id, location);
     node.caption = caption;
-    node.fig_number = fig_number;
+    node.number = fig_number;
     node.kind = figure_kind(&figure, styles);
 
     let mut records = vec![(id, record)];
@@ -62,7 +62,7 @@ pub fn from_figure(
         }
     }
 
-    node.raw_typst = table::raw_typst_for_label(engine, content.label());
+    node.raw = table::raw_typst_for_label(engine, content.label()).map(RawSource::typst);
 
     Ok((node, records))
 }

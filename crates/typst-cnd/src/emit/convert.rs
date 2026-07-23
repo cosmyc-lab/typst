@@ -9,7 +9,7 @@ use typst_library::introspection::{Introspector, Location, Tag, TagElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
     CiteElem, EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteElem, HeadingElem, ListElem,
-    ListItem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
+    ListItem, ParElem, QuoteElem, RefElem, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_syntax::{FileId, Span};
@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::emit::extract::{ExtractedMarker, MarkerKind};
 use crate::emit::{code, extract, figure, heading, list, math, paragraph, quote, reading_order, table};
-use crate::manifest::{CndNode, HeadingNode};
+use crate::model::{CndNode, HeadingNode};
 
 /// A citation marker occurring in a node's content, captured for
 /// resolution into a `CiteRef` once the bibliography pool exists. `span`
@@ -61,14 +61,14 @@ pub struct ConvertContext {
     pub location_to_id: rustc_hash::FxHashMap<Location, Uuid>,
     pub label_to_id: rustc_hash::FxHashMap<Label, Uuid>,
     /// Footnote pool (proposal 0004), populated by `pools::resolve_footnotes`.
-    pub footnotes: Vec<crate::manifest::Footnote>,
+    pub footnotes: Vec<crate::model::Footnote>,
     /// Map from a footnote marker's own location (declaration *or*
     /// re-reference) to its pool-entry id. A node's `footnote_locs` are
     /// resolved through this map; both marker kinds land on the same entry.
     pub footnote_loc_to_id: rustc_hash::FxHashMap<Location, Uuid>,
     /// Bibliography pool (proposal 0004), populated by
     /// `pools::resolve_citations`.
-    pub bibliography: Vec<crate::manifest::BibEntry>,
+    pub bibliography: Vec<crate::model::BibEntry>,
     /// Map from a bibliography `@key` to its pool-entry id. Also used to
     /// keep citation keys out of the cross-reference index (a `@key`
     /// citation is a `RefElem` but resolves in the bibliography, not nodes).
@@ -907,6 +907,18 @@ fn set_metadata(
     node.base_mut().state_metadata = metadata;
 }
 
+/// The figure's counter value **as resolved and displayed** — `"3"`,
+/// `"2.1"` — and nothing else.
+///
+/// The supplement ("Figure", "Table", "Abbildung") is deliberately not
+/// prepended. It is a localized rendering word, and baking it into data
+/// makes the field unusable in any other locale; composing the prefix is a
+/// consumer's decision, and `FigureNode::kind` already carries the counter
+/// selector it composes from (spec §6).
+///
+/// An author-supplied custom supplement is therefore dropped rather than
+/// smuggled into `number` — the format has no field for it today, and
+/// inventing one here would be a format change made in a producer.
 pub fn figure_number(
     engine: &mut Engine,
     figure: &Packed<FigureElem>,
@@ -918,19 +930,7 @@ pub fn figure_number(
     let display = counter
         .display_at(engine, location, styles, numbering, figure.span())
         .ok()?;
-    let number = extract::extract_text(&display);
-
-    match figure.supplement.get_ref(styles) {
-        typst_library::foundations::Smart::Custom(Some(Supplement::Content(supplement))) => {
-            let supplement = extract::extract_text(supplement);
-            if supplement.is_empty() {
-                Some(number)
-            } else {
-                Some(ecow::eco_format!("{supplement} {number}"))
-            }
-        }
-        _ => Some(number),
-    }
+    Some(extract::extract_text(&display))
 }
 
 pub fn caption_text(caption: &Packed<FigureCaption>) -> EcoString {

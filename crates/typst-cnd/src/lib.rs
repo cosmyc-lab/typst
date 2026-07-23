@@ -1,15 +1,16 @@
-//! Typst's CND manifest exporter.
+//! Typst's CND exporter.
 
 mod cnd;
 mod document;
 mod emit;
 mod location;
-mod manifest;
+mod model;
 mod metadata;
 pub mod world;
 
-pub use self::document::{CndDocument, cnd_document, manifest_from_document, manifest_to_json};
-pub use self::manifest::{
-    BibEntry, CND_VERSION, CiteRef, CndManifest, CndNode, DocMetadata, FigureNode, Footnote,
-    FootnoteRef, ImageNode, ListNode, NodeRef, TableKind, TableNode, TermItem, TermsNode,
+pub use self::document::{CndDocument, cnd_document, cnd_from_document, cnd_to_json};
+pub use self::model::{
+    BibEntry, CND_VERSION, CiteRef, Cnd, CndNode, DocMetadata, FigureNode, Footnote,
+    FootnoteRef, ImageNode, ListNode, NodeRef, RawSource, SourceInfo, TableKind, TableNode,
+    TermItem, TermsNode,
 };

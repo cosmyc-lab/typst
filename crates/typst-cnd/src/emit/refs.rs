@@ -10,7 +10,7 @@ use typst_library::text::RawElem;
 use uuid::Uuid;
 
 use crate::emit::convert::ConvertContext;
-use crate::manifest::{CndNode, NodeRef};
+use crate::model::{CndNode, NodeRef};
 
 fn doc_selector() -> Selector {
     Selector::Or(eco_vec![
@@ -29,7 +29,7 @@ fn doc_selector() -> Selector {
 
 /// Resolve cross-references and populate the forward-only `refs` list on
 /// each source node (ADR 0008). The reverse index is derived on demand by
-/// the SDK (`CndManifest.incoming`), never materialized here.
+/// the SDK (`Cnd.incoming`), never materialized here.
 pub fn resolve_refs(
     ctx: &mut ConvertContext,
     introspector: &dyn Introspector,
@@ -113,10 +113,17 @@ pub fn resolve_refs(
         }
     }
 
-    for (source, target, target_label, span) in edges {
-        // The forward edge's `label` mirrors its target's label (ADR 0002).
-        let resolved_target_label = target_label.or_else(|| node_label(ctx, target));
-        set_ref(ctx, source, target, resolved_target_label, span);
+    for (source, target, marker_label, span) in edges {
+        // An edge names its target by label (ADR 0017). Prefer the label the
+        // target node actually carries — that is the one a consumer resolves
+        // against; the marker label is the fallback for the rare case where
+        // the target resolved through the introspector but the node itself
+        // never received a label. With neither there is nothing to name, so
+        // the edge is dropped rather than emitted unresolvable.
+        let Some(label) = node_label(ctx, target).or(marker_label) else {
+            continue;
+        };
+        set_ref(ctx, source, label, span);
     }
 }
 
@@ -317,17 +324,17 @@ fn node_label(ctx: &ConvertContext, id: Uuid) -> Option<String> {
 fn set_ref(
     ctx: &mut ConvertContext,
     source: Uuid,
-    target: Uuid,
-    label: Option<String>,
+    label: String,
     span: Option<(i64, i64)>,
 ) {
     if let Some(node) = find_node_mut(&mut ctx.roots, source) {
         let refs = node.refs_mut();
-        // Dedup by target id (one edge per target per node); the first
-        // occurrence — the primary, span-carrying path — wins.
-        if !refs.iter().any(|reference| reference.id == target) {
+        // Dedup by target label (one edge per target per node); the first
+        // occurrence — the primary, span-carrying path — wins. Labels are
+        // globally unique (ADR 0017), so this is the same dedup the target
+        // id used to give.
+        if !refs.iter().any(|reference| reference.label == label) {
             refs.push(NodeRef {
-                id: target,
                 label,
                 text_span: span.map(|(s, e)| vec![s, e]),
             });

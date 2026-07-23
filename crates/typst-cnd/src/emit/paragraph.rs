@@ -7,7 +7,7 @@ use typst_library::text::Locale;
 use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::extract_with_markers;
 use crate::location::placeholder_location;
-use crate::manifest::ParagraphNode;
+use crate::model::ParagraphNode;
 
 /// Convert a realized paragraph into a CND paragraph node.
 pub fn convert(

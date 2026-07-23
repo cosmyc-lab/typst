@@ -7,7 +7,7 @@ use typst_library::text::RawElem;
 use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
-use crate::manifest::CodeNode;
+use crate::model::CodeNode;
 
 pub fn convert(
     engine: &mut Engine,

@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::emit::convert::ConvertContext;
 use crate::emit::extract::extract_text;
 use crate::emit::refs::find_node_mut;
-use crate::manifest::{BibEntry, CiteRef, Footnote, FootnoteRef};
+use crate::model::{BibEntry, CiteRef, Footnote, FootnoteRef};
 
 /// Build the footnote pool into `ctx.footnotes` and the marker-location →
 /// pool-id map into `ctx.footnote_loc_to_id`, then attach a `FootnoteRef`
@@ -145,7 +145,7 @@ pub fn build_bibliography_pool(
             let bib_entry = BibEntry {
                 id,
                 label: label.resolve().to_string(),
-                rendered: rendered_string(entry),
+                formatted: Some(rendered_string(entry)),
                 type_: raw.get("type").and_then(|v| v.as_str()).map(str::to_string),
                 authors: source
                     .authors()
@@ -162,7 +162,7 @@ pub fn build_bibliography_pool(
                     .map(|t| t.value.to_str().to_string()),
                 doi: source.doi().map(str::to_string),
                 url: source.url_any().map(|u| u.value.to_string()),
-                raw,
+                fields: raw,
             };
             ctx.bib_key_to_id.insert(label, id);
             ctx.bibliography.push(bib_entry);
@@ -197,7 +197,10 @@ pub fn resolve_cite_edges(ctx: &mut ConvertContext) {
     let mut edges: Vec<(Uuid, CiteRef)> = Vec::new();
     for (node_id, record) in &ctx.records {
         for marker in &record.cite_markers {
-            if let Some(bib_id) = ctx.bib_key_to_id.get(&marker.key).copied() {
+            // The edge names its target by label now, but the lookup still
+            // gates it: a `@key` with no bibliography entry must not
+            // produce an unresolvable `cites` edge.
+            if ctx.bib_key_to_id.contains_key(&marker.key) {
                 let suppressed = marker.form.as_deref() == Some("none");
                 let text_span = if suppressed {
                     None
@@ -207,8 +210,7 @@ pub fn resolve_cite_edges(ctx: &mut ConvertContext) {
                 edges.push((
                     *node_id,
                     CiteRef {
-                        id: bib_id,
-                        label: Some(marker.key.resolve().to_string()),
+                        label: marker.key.resolve().to_string(),
                         text_span,
                         form: marker.form.clone(),
                         supplement: marker.supplement.clone(),
@@ -251,9 +253,11 @@ fn resolve_footnote_edges(ctx: &mut ConvertContext) {
     }
 
     for (node_id, pool_id, span) in edges {
-        let label = labels.get(&pool_id).cloned();
+        // A footnote pool entry always carries a label (its rendered
+        // ordinal), so this lookup cannot fail; skipping rather than
+        // unwrapping keeps an unresolvable edge from ever being emitted.
+        let Some(label) = labels.get(&pool_id).cloned() else { continue };
         let reference = FootnoteRef {
-            id: pool_id,
             label,
             text_span: span.map(|(s, e)| vec![s, e]),
         };

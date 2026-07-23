@@ -3,7 +3,7 @@
 //! This module is the "CND authoring SDK" surface: native functions
 //! injected into every document's global scope (see `world.rs`'s
 //! `library.global.scope_mut().define("cnd", crate::cnd::module())`), for
-//! Typst source that wants to produce a CND manifest with more than the
+//! Typst source that wants to produce a CND cnd with more than the
 //! default node shape — without the document author hand-writing fragile
 //! state-bracketing Typst code themselves. Grows by proven need, one
 //! primitive at a time (today: `cnd.table`'s `content_kind`), not as a
@@ -67,9 +67,8 @@ fn cnd_unset_content_kind(prev: Dict) -> Dict {
 ///
 /// `content_kind` defaults to `none` (unset) — matching the CND format's
 /// own default (unset resolves to `"data"`, never guessed): this shared
-/// primitive stays neutral, a document's own wrapper is the right place to
-/// pick a different default for its own corpus (see `cosmyc_*.typ`'s local
-/// `ctable`, which currently forwards straight through to `cnd.table`).
+/// primitive stays neutral, and a document's own wrapper is the right place
+/// to pick a different default for its own corpus.
 #[typst_macros::func(name = "table")]
 fn cnd_table(engine: &mut Engine, args: &mut Args) -> SourceResult<Content> {
     let span = args.span;

@@ -12,13 +12,13 @@ use typst_syntax::Span;
 use crate::emit::convert::{self, ConvertContext};
 use crate::emit::{pools, refs};
 use crate::location::LocationAssigner;
-use crate::manifest::{BibEntry, CND_VERSION, CndManifest, DocDate, DocMetadata, Footnote};
+use crate::model::{BibEntry, CND_VERSION, Cnd, DocDate, DocMetadata, Footnote, SourceInfo};
 
 /// A compiled CND document before JSON serialization.
 #[derive(Debug, Clone)]
 pub struct CndDocument {
     info: DocumentInfo,
-    nodes: Vec<crate::manifest::CndNode>,
+    nodes: Vec<crate::model::CndNode>,
     bibliography: Vec<BibEntry>,
     footnotes: Vec<Footnote>,
     introspector: Arc<PagedIntrospector>,
@@ -29,7 +29,7 @@ impl CndDocument {
         &self.info
     }
 
-    pub fn nodes(&self) -> &[crate::manifest::CndNode] {
+    pub fn nodes(&self) -> &[crate::model::CndNode] {
         &self.nodes
     }
 
@@ -144,21 +144,21 @@ pub fn cnd_document(
     CndDocument::create(engine, content, styles)
 }
 
-/// Build a manifest JSON model from a compiled document.
-pub fn manifest_from_document(
+/// Build a CND from a compiled document.
+pub fn cnd_from_document(
     document: &CndDocument,
-    doc_hash: String,
-    compiled_at: String,
-) -> CndManifest {
-    CndManifest {
+    source: SourceInfo,
+    built_at: String,
+) -> Cnd {
+    Cnd {
         id: None,
         cnd_version: CND_VERSION.into(),
-        doc_hash,
-        compiled_at,
+        built_at,
+        source: Some(source),
         doc: doc_metadata_from_info(document.info()),
         nodes: document.nodes().to_vec(),
         // Pools are populated by a later increment (footnote/bibliography
-        // collection); always-present empty vecs satisfy the 0.2.0 contract.
+        // collection); always-present empty vecs satisfy the contract.
         bibliography: document.bibliography().to_vec(),
         footnotes: document.footnotes().to_vec(),
     }
@@ -198,12 +198,12 @@ fn datetime_to_doc_date(dt: Datetime) -> DocDate {
     }
 }
 
-/// Serialize a manifest to pretty JSON.
-pub fn manifest_to_json(manifest: &CndManifest) -> SourceResult<String> {
-    serde_json::to_string_pretty(manifest).map_err(|err| {
+/// Serialize a CND to pretty JSON.
+pub fn cnd_to_json(cnd: &Cnd) -> SourceResult<String> {
+    serde_json::to_string_pretty(cnd).map_err(|err| {
         eco_vec![error!(
             Span::detached(),
-            "failed to serialize CND manifest: {err}"
+            "failed to serialize CND: {err}"
         )]
     })
 }

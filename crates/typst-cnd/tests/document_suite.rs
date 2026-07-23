@@ -1,10 +1,11 @@
 mod common;
 
 use common::{
-    all_example_files, assert_json_roundtrip, assert_manifest_contract, assert_pool_refs_resolve,
+    all_example_files, assert_json_roundtrip, assert_cnd_contract,
+    assert_labels_globally_unique, assert_pool_refs_resolve,
     assert_refs_resolve, assert_tag_sequence, assert_unique_ids, codepoint_slice, compile_example,
     example_path, find_by_label, find_lists, heading_texts, incoming_count, label_exists,
-    manifest_for_example, paragraph_texts_in_order, table_stats, tags_under_heading, walk_nodes,
+    cnd_for_example, paragraph_texts_in_order, table_stats, tags_under_heading, walk_nodes,
     NodeStats,
 };
 use typst_cnd::{CndNode, TableKind};
@@ -30,13 +31,14 @@ fn all_examples_compile() {
 }
 
 #[test]
-fn all_examples_produce_valid_manifests() {
+fn all_examples_produce_valid_cnds() {
     for path in all_example_files() {
         let name = path.file_name().unwrap().to_string_lossy();
-        let manifest = manifest_for_example(&name);
-        assert_manifest_contract(&manifest);
-        assert_unique_ids(&manifest.nodes);
-        assert_json_roundtrip(&manifest);
+        let cnd = cnd_for_example(&name);
+        assert_cnd_contract(&cnd);
+        assert_unique_ids(&cnd.nodes);
+        assert_labels_globally_unique(&cnd);
+        assert_json_roundtrip(&cnd);
     }
 }
 
@@ -54,10 +56,10 @@ fn minimal_document_structure() {
 
 #[test]
 fn structured_cross_references() {
-    let manifest = manifest_for_example("structured.typ");
-    assert!(label_exists(&manifest.nodes, "tab-params-nominaux"));
+    let cnd = cnd_for_example("structured.typ");
+    assert!(label_exists(&cnd.nodes, "tab-params-nominaux"));
 
-    let figure = find_by_label(&manifest.nodes, "tab-params-nominaux").expect("figure");
+    let figure = find_by_label(&cnd.nodes, "tab-params-nominaux").expect("figure");
     let CndNode::Figure(figure) = figure else {
         panic!("expected figure node");
     };
@@ -65,7 +67,7 @@ fn structured_cross_references() {
         figure.caption.as_deref(),
         Some("Paramètres nominaux de fonctionnement.")
     );
-    assert!(figure.fig_number.as_deref().is_some_and(|n| n.contains('1')));
+    assert!(figure.number.as_deref().is_some_and(|n| n.contains('1')));
     let table = figure
         .children
         .iter()
@@ -74,22 +76,22 @@ fn structured_cross_references() {
             _ => None,
         })
         .expect("table child");
-    assert!(table.raw_typst.as_ref().is_some_and(|r| r.contains("table(")));
+    assert!(table.raw.as_ref().map(|r| r.value.as_str()).is_some_and(|r| r.contains("table(")));
     assert!(
-        incoming_count(&manifest.nodes, figure.base.id) > 0,
+        incoming_count(&cnd.nodes, figure.base.label.as_deref().expect("label")) > 0,
         "the captioned figure is a cross-reference target"
     );
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn comprehensive_document_structure() {
-    let manifest = manifest_for_example("comprehensive.typ");
+    let cnd = cnd_for_example("comprehensive.typ");
     let mut stats = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut stats);
+    walk_nodes(&cnd.nodes, &mut stats);
 
-    let root_paragraphs = manifest
+    let root_paragraphs = cnd
         .nodes
         .iter()
         .filter(|n| matches!(n, CndNode::Paragraph(_)))
@@ -102,12 +104,12 @@ fn comprehensive_document_structure() {
     assert!(stats.max_heading_level >= 3);
     assert_eq!(stats.tables, 4);
 
-    let tables = table_stats(&manifest.nodes);
+    let tables = table_stats(&cnd.nodes);
     assert_eq!(tables.with_caption, 4);
     assert_eq!(tables.with_fig_number, 4);
     assert_eq!(tables.with_label, 4);
 
-    let arch = find_by_label(&manifest.nodes, "ch-architecture").expect("architecture heading");
+    let arch = find_by_label(&cnd.nodes, "ch-architecture").expect("architecture heading");
     let CndNode::Heading(arch) = arch else {
         panic!("expected heading");
     };
@@ -122,20 +124,20 @@ fn comprehensive_document_structure() {
     assert_eq!(para.base.state_metadata.get("revision").and_then(|v| v.as_str()), Some("4.2"));
     assert_eq!(para.base.state_metadata.get("status").and_then(|v| v.as_str()), Some("approved"));
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn complex_multipage_spans_pages() {
-    let manifest = manifest_for_example("complex_multipage.typ");
+    let cnd = cnd_for_example("complex_multipage.typ");
     let mut stats = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut stats);
+    walk_nodes(&cnd.nodes, &mut stats);
 
     assert!(stats.pages.len() >= 2, "expected content on multiple pages: {:?}", stats.pages);
     assert!(stats.headings >= 5);
     assert_eq!(stats.tables, 2);
 
-    let f101 = find_by_label(&manifest.nodes, "sec-f101").expect("f101 heading");
+    let f101 = find_by_label(&cnd.nodes, "sec-f101").expect("f101 heading");
     let CndNode::Heading(f101) = f101 else {
         panic!("expected heading");
     };
@@ -149,25 +151,25 @@ fn complex_multipage_spans_pages() {
         .expect("paragraph with zone metadata");
     assert_eq!(para.base.state_metadata.get("criticality").and_then(|v| v.as_str()), Some("high"));
 
-    let tables = table_stats(&manifest.nodes);
+    let tables = table_stats(&cnd.nodes);
     assert_eq!(tables.with_caption, 2);
     assert_eq!(tables.with_fig_number, 2);
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn complex_refs_dense_graph() {
-    let manifest = manifest_for_example("complex_refs.typ");
+    let cnd = cnd_for_example("complex_refs.typ");
     let mut stats = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut stats);
+    walk_nodes(&cnd.nodes, &mut stats);
 
     assert_eq!(stats.tables, 3);
-    assert!(label_exists(&manifest.nodes, "tab-signaux"));
-    assert!(label_exists(&manifest.nodes, "tab-boucles"));
-    assert!(label_exists(&manifest.nodes, "tab-recap"));
+    assert!(label_exists(&cnd.nodes, "tab-signaux"));
+    assert!(label_exists(&cnd.nodes, "tab-boucles"));
+    assert!(label_exists(&cnd.nodes, "tab-recap"));
 
-    let overview = find_by_label(&manifest.nodes, "ch-overview").expect("overview");
+    let overview = find_by_label(&cnd.nodes, "ch-overview").expect("overview");
     let CndNode::Heading(overview) = overview else {
         panic!("expected heading");
     };
@@ -176,13 +178,13 @@ fn complex_refs_dense_graph() {
         "overview heading should reference labelled targets"
     );
 
-    let signaux = find_by_label(&manifest.nodes, "tab-signaux").expect("signaux");
+    let signaux = find_by_label(&cnd.nodes, "tab-signaux").expect("signaux");
     let CndNode::Figure(signaux) = signaux else {
         panic!("expected figure");
     };
-    assert!(incoming_count(&manifest.nodes, signaux.base.id) >= 2);
+    assert!(incoming_count(&cnd.nodes, signaux.base.label.as_deref().expect("label")) >= 2);
 
-    let regulation = find_by_label(&manifest.nodes, "sec-regulation").expect("regulation");
+    let regulation = find_by_label(&cnd.nodes, "sec-regulation").expect("regulation");
     let CndNode::Heading(regulation) = regulation else {
         panic!("expected heading");
     };
@@ -200,32 +202,32 @@ fn complex_refs_dense_graph() {
         .expect("regulation paragraph with metadata");
     assert!(!regulation_para.base.refs.is_empty());
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn complex_tables_standalone_and_figure_variants() {
-    let manifest = manifest_for_example("complex_tables.typ");
+    let cnd = cnd_for_example("complex_tables.typ");
     let mut stats = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut stats);
+    walk_nodes(&cnd.nodes, &mut stats);
 
     assert_eq!(stats.tables, 3);
-    assert!(label_exists(&manifest.nodes, "tab-config-standalone"));
-    assert!(label_exists(&manifest.nodes, "tab-plages-a"));
-    assert!(label_exists(&manifest.nodes, "tab-plages-b"));
+    assert!(label_exists(&cnd.nodes, "tab-config-standalone"));
+    assert!(label_exists(&cnd.nodes, "tab-plages-a"));
+    assert!(label_exists(&cnd.nodes, "tab-plages-b"));
 
-    let standalone = find_by_label(&manifest.nodes, "tab-config-standalone").expect("standalone");
+    let standalone = find_by_label(&cnd.nodes, "tab-config-standalone").expect("standalone");
     let CndNode::Table(_standalone) = standalone else {
         panic!("expected bare table (standalone is not figure-wrapped)");
     };
 
-    let tables = table_stats(&manifest.nodes);
+    let tables = table_stats(&cnd.nodes);
     assert_eq!(tables.with_caption, 2, "only figure tables have captions");
     assert_eq!(tables.with_fig_number, 2);
     assert_eq!(tables.with_label, 3);
 
-    let plages_a = find_by_label(&manifest.nodes, "tab-plages-a").expect("plages a");
-    let plages_b = find_by_label(&manifest.nodes, "tab-plages-b").expect("plages b");
+    let plages_a = find_by_label(&cnd.nodes, "tab-plages-a").expect("plages a");
+    let plages_b = find_by_label(&cnd.nodes, "tab-plages-b").expect("plages b");
     let CndNode::Figure(a) = plages_a else { panic!() };
     let CndNode::Figure(b) = plages_b else { panic!() };
     assert_ne!(a.base.id, b.base.id);
@@ -249,17 +251,17 @@ fn complex_tables_standalone_and_figure_variants() {
     assert!(a_table.cells.iter().any(|c| c.text.contains("PT-A")));
     assert!(b_table.cells.iter().any(|c| c.text.contains("PT-C")));
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn complex_columns_reading_order_flatten() {
-    let manifest = manifest_for_example("complex_columns.typ");
+    let cnd = cnd_for_example("complex_columns.typ");
     let mut stats = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut stats);
+    walk_nodes(&cnd.nodes, &mut stats);
 
     assert_tag_sequence(
-        &manifest.nodes,
+        &cnd.nodes,
         &[
             "INTRO", "L1", "L2", "M1", "M2", "R1", "OUT-L", "IN-L1", "IN-R1", "OUT-R", "PC1",
             "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "POST",
@@ -267,27 +269,27 @@ fn complex_columns_reading_order_flatten() {
     );
 
     assert_eq!(
-        tags_under_heading(&manifest.nodes, "sec-three-cols"),
+        tags_under_heading(&cnd.nodes, "sec-three-cols"),
         vec!["L1", "L2", "M1", "M2", "R1"]
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        tags_under_heading(&manifest.nodes, "sec-nested-cols"),
+        tags_under_heading(&cnd.nodes, "sec-nested-cols"),
         vec!["OUT-L", "IN-L1", "IN-R1", "OUT-R"]
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        tags_under_heading(&manifest.nodes, "ch-page-cols"),
+        tags_under_heading(&cnd.nodes, "ch-page-cols"),
         (1..=8)
             .map(|i| format!("PC{i}"))
             .collect::<Vec<_>>()
     );
 
-    let three_cols = find_by_label(&manifest.nodes, "sec-three-cols").expect("three cols");
+    let three_cols = find_by_label(&cnd.nodes, "sec-three-cols").expect("three cols");
     let CndNode::Heading(three_cols) = three_cols else {
         panic!("expected heading");
     };
@@ -304,7 +306,7 @@ fn complex_columns_reading_order_flatten() {
         Some("left")
     );
 
-    let figure = find_by_label(&manifest.nodes, "tab-bus-col").expect("figure");
+    let figure = find_by_label(&cnd.nodes, "tab-bus-col").expect("figure");
     let CndNode::Figure(figure) = figure else {
         panic!("expected figure");
     };
@@ -319,7 +321,7 @@ fn complex_columns_reading_order_flatten() {
         .expect("table child");
     assert_eq!(table.cells.len(), 6);
 
-    let page_cols = find_by_label(&manifest.nodes, "ch-page-cols").expect("page cols");
+    let page_cols = find_by_label(&cnd.nodes, "ch-page-cols").expect("page cols");
     let CndNode::Heading(page_cols) = page_cols else {
         panic!("expected heading");
     };
@@ -335,7 +337,7 @@ fn complex_columns_reading_order_flatten() {
         "page-column paragraphs should start after the pagebreak"
     );
 
-    let post = find_by_label(&manifest.nodes, "ch-single")
+    let post = find_by_label(&cnd.nodes, "ch-single")
         .and_then(|n| match n {
             CndNode::Heading(h) => h.children.iter().find_map(|c| match c {
                 CndNode::Paragraph(p) if p.text.starts_with("[POST]") => Some(p),
@@ -346,7 +348,7 @@ fn complex_columns_reading_order_flatten() {
         .expect("post paragraph");
     assert!(!post.base.refs.is_empty());
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 /// Real-world newsletter template using `@preview/dashing-dept-news`.
@@ -354,22 +356,22 @@ fn complex_columns_reading_order_flatten() {
 /// First compile needs network access to fetch the package from Typst Universe.
 #[test]
 fn newsletter_dashing_dept_news_template() {
-    let manifest = manifest_for_example("newsletter/main.typ");
-    assert_eq!(manifest.cnd_version, typst_cnd::CND_VERSION);
-    assert!(manifest.doc_hash.starts_with("sha256:"));
-    assert_eq!(manifest.doc.title, "Chemistry Department");
-    assert_unique_ids(&manifest.nodes);
-    assert_json_roundtrip(&manifest);
-    assert_refs_resolve(&manifest.nodes);
+    let cnd = cnd_for_example("newsletter/main.typ");
+    assert_eq!(cnd.cnd_version, typst_cnd::CND_VERSION);
+    assert!(cnd.source.as_ref().expect("source").hash.starts_with("sha256:"));
+    assert_eq!(cnd.doc.title, "Chemistry Department");
+    assert_unique_ids(&cnd.nodes);
+    assert_json_roundtrip(&cnd);
+    assert_refs_resolve(&cnd.nodes);
 
-    assert_eq!(manifest.doc.title, "Chemistry Department");
+    assert_eq!(cnd.doc.title, "Chemistry Department");
 
     let mut stats = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut stats);
+    walk_nodes(&cnd.nodes, &mut stats);
     assert!(stats.headings >= 5);
     assert!(stats.paragraphs >= 10);
 
-    let headings = heading_texts(&manifest.nodes);
+    let headings = heading_texts(&cnd.nodes);
     for expected in [
         "The Sixtus Award goes to Purview",
         "Guest lecture from Dr. Elizabeth Lee",
@@ -390,7 +392,7 @@ fn newsletter_dashing_dept_news_template() {
         })
     }
 
-    let sixtus = find_heading(&manifest.nodes, "Sixtus Award").expect("sixtus heading");
+    let sixtus = find_heading(&cnd.nodes, "Sixtus Award").expect("sixtus heading");
     let CndNode::Heading(sixtus) = sixtus else { panic!() };
     assert!(
         sixtus
@@ -405,9 +407,9 @@ fn newsletter_dashing_dept_news_template() {
 
 #[test]
 fn rich_document_node_types() {
-    let manifest = manifest_for_example("rich.typ");
+    let cnd = cnd_for_example("rich.typ");
     let mut stats = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut stats);
+    walk_nodes(&cnd.nodes, &mut stats);
 
     assert!(stats.quotes >= 1, "expected at least one quote node");
     assert!(stats.lists >= 2, "expected bullet and numbered lists");
@@ -418,7 +420,7 @@ fn rich_document_node_types() {
     assert!(stats.figures >= 1, "expected at least one figure node");
     assert!(stats.tables >= 1, "expected a grid-in-figure table node");
 
-    let grid_fig = find_by_label(&manifest.nodes, "rich-grid").expect("grid figure");
+    let grid_fig = find_by_label(&cnd.nodes, "rich-grid").expect("grid figure");
     let CndNode::Figure(grid_fig) = grid_fig else {
         panic!("expected grid figure node");
     };
@@ -433,13 +435,13 @@ fn rich_document_node_types() {
         .expect("grid table child");
     assert_eq!(grid.kind, typst_cnd::TableKind::Grid);
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn rich_document_no_duplicate_container_paragraphs() {
-    let manifest = manifest_for_example("rich.typ");
-    let paragraphs = paragraph_texts_in_order(&manifest.nodes);
+    let cnd = cnd_for_example("rich.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
 
     assert_eq!(
         paragraphs,
@@ -453,13 +455,13 @@ fn rich_document_no_duplicate_container_paragraphs() {
 
 #[test]
 fn complex_semantic_all_node_types_and_xrefs() {
-    let manifest = manifest_for_example("complex_semantic.typ");
+    let cnd = cnd_for_example("complex_semantic.typ");
     let mut stats = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut stats);
+    walk_nodes(&cnd.nodes, &mut stats);
 
-    assert_eq!(manifest.doc.title, "Hardcore semantic fixture — CND integration");
-    assert!(manifest.doc.authors.len() >= 2);
-    assert!(manifest.doc.keywords.iter().any(|k| k.contains("quote")));
+    assert_eq!(cnd.doc.title, "Hardcore semantic fixture — CND integration");
+    assert!(cnd.doc.authors.len() >= 2);
+    assert!(cnd.doc.keywords.iter().any(|k| k.contains("quote")));
 
     assert!(stats.headings >= 8);
     assert_eq!(stats.quotes, 2);
@@ -483,17 +485,17 @@ fn complex_semantic_all_node_types_and_xrefs() {
         "sec-xrefs",
         "ch-annex",
     ] {
-        assert!(label_exists(&manifest.nodes, label), "missing label {label}");
+        assert!(label_exists(&cnd.nodes, label), "missing label {label}");
     }
 
-    let knuth = find_by_label(&manifest.nodes, "quote-knuth").expect("knuth quote");
+    let knuth = find_by_label(&cnd.nodes, "quote-knuth").expect("knuth quote");
     let CndNode::Quote(knuth) = knuth else {
         panic!("expected quote node");
     };
     assert_eq!(knuth.attribution.as_deref(), Some("Donald Knuth"));
     assert!(knuth.text.contains("Programs are meant to be read"));
 
-    let grid_fig = find_by_label(&manifest.nodes, "fig-grid-zones").expect("grid");
+    let grid_fig = find_by_label(&cnd.nodes, "fig-grid-zones").expect("grid");
     let CndNode::Figure(grid_fig) = grid_fig else {
         panic!("expected grid figure node");
     };
@@ -508,13 +510,13 @@ fn complex_semantic_all_node_types_and_xrefs() {
         .expect("grid table child");
     assert_eq!(grid.kind, TableKind::Grid);
 
-    let signals = find_by_label(&manifest.nodes, "tab-signals").expect("signals");
+    let signals = find_by_label(&cnd.nodes, "tab-signals").expect("signals");
     let CndNode::Figure(signals) = signals else {
         panic!("expected figure");
     };
-    assert!(incoming_count(&manifest.nodes, signals.base.id) >= 2);
+    assert!(incoming_count(&cnd.nodes, signals.base.label.as_deref().expect("label")) >= 2);
 
-    let corpus = find_by_label(&manifest.nodes, "ch-corpus").expect("corpus");
+    let corpus = find_by_label(&cnd.nodes, "ch-corpus").expect("corpus");
     let CndNode::Heading(corpus) = corpus else {
         panic!("expected heading");
     };
@@ -535,7 +537,7 @@ fn complex_semantic_all_node_types_and_xrefs() {
         Some("hard-1")
     );
 
-    let xrefs = find_by_label(&manifest.nodes, "sec-xrefs").expect("xrefs section");
+    let xrefs = find_by_label(&cnd.nodes, "sec-xrefs").expect("xrefs section");
     let CndNode::Heading(xrefs) = xrefs else {
         panic!("expected heading");
     };
@@ -548,12 +550,10 @@ fn complex_semantic_all_node_types_and_xrefs() {
         })
         .expect("closing xref paragraph");
     assert!(closing.base.refs.len() >= 5);
+    // A label is now the edge itself, not an optional decoration on it —
+    // an unlabelled edge cannot be represented (ADR 0017).
     assert!(
-        closing
-            .base
-            .refs
-            .iter()
-            .all(|reference| reference.label.is_some()),
+        closing.base.refs.iter().all(|reference| !reference.label.is_empty()),
         "refs should carry Typst labels: {:?}",
         closing.base.refs
     );
@@ -562,7 +562,7 @@ fn complex_semantic_all_node_types_and_xrefs() {
             .base
             .refs
             .iter()
-            .any(|reference| reference.label.as_deref() == Some("eq-golden")),
+            .any(|reference| reference.label == "eq-golden"),
         "expected @eq-golden in refs"
     );
     assert_eq!(
@@ -570,7 +570,7 @@ fn complex_semantic_all_node_types_and_xrefs() {
         Some("xrefs")
     );
 
-    let lists = find_lists(&manifest.nodes);
+    let lists = find_lists(&cnd.nodes);
     let bullet = lists
         .iter()
         .find(|list| !list.ordered && list.items.iter().any(|item| !item.children.is_empty()))
@@ -579,7 +579,7 @@ fn complex_semantic_all_node_types_and_xrefs() {
     assert_eq!(bullet.items[1].children.len(), 2);
     assert!(bullet.items[1].children[1].text.contains("LI-B2"));
 
-    let annex = find_by_label(&manifest.nodes, "ch-annex").expect("annex");
+    let annex = find_by_label(&cnd.nodes, "ch-annex").expect("annex");
     let CndNode::Heading(annex) = annex else {
         panic!("expected heading");
     };
@@ -593,13 +593,13 @@ fn complex_semantic_all_node_types_and_xrefs() {
         .expect("standalone bare table");
     assert!(standalone.cells.iter().any(|c| c.text.contains("complex_semantic")));
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn complex_semantic_no_duplicate_container_paragraphs() {
-    let manifest = manifest_for_example("complex_semantic.typ");
-    let paragraphs = paragraph_texts_in_order(&manifest.nodes);
+    let cnd = cnd_for_example("complex_semantic.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
 
     for leaked in [
         "Programs are meant to be read",
@@ -618,11 +618,11 @@ fn complex_semantic_no_duplicate_container_paragraphs() {
 
 #[test]
 fn complex_hardcore_columns_semantics_and_reading_order() {
-    let manifest = manifest_for_example("complex_hardcore.typ");
+    let cnd = cnd_for_example("complex_hardcore.typ");
     let mut stats = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut stats);
+    walk_nodes(&cnd.nodes, &mut stats);
 
-    assert_eq!(manifest.doc.title, "Hardcore mixed layout + semantics");
+    assert_eq!(cnd.doc.title, "Hardcore mixed layout + semantics");
     assert!(stats.pages.len() >= 2, "expected multipage layout: {:?}", stats.pages);
     assert_eq!(stats.quotes, 1);
     assert_eq!(stats.code, 1);
@@ -631,13 +631,13 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
     assert_eq!(stats.tables, 2);
 
     assert_tag_sequence(
-        &manifest.nodes,
+        &cnd.nodes,
         &[
             "HC-0", "HC-L1", "HC-R1", "HC-R2", "HC-NL", "HC-IL", "HC-IR", "TAIL-1", "TAIL-3",
         ],
     );
 
-    let cols = find_by_label(&manifest.nodes, "sec-cols-blocks").expect("cols section");
+    let cols = find_by_label(&cnd.nodes, "sec-cols-blocks").expect("cols section");
     let CndNode::Heading(cols) = cols else {
         panic!("expected heading");
     };
@@ -662,7 +662,7 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
         "quote body must not duplicate as paragraph"
     );
 
-    let grid_fig = find_by_label(&manifest.nodes, "fig-hc-grid").expect("grid");
+    let grid_fig = find_by_label(&cnd.nodes, "fig-hc-grid").expect("grid");
     let CndNode::Figure(grid_fig) = grid_fig else {
         panic!("expected grid figure");
     };
@@ -676,7 +676,7 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
         .expect("grid table child");
     assert_eq!(grid.kind, TableKind::Grid);
 
-    let tail = find_by_label(&manifest.nodes, "sec-tail").expect("tail");
+    let tail = find_by_label(&cnd.nodes, "sec-tail").expect("tail");
     let CndNode::Heading(tail) = tail else {
         panic!("expected heading");
     };
@@ -693,22 +693,22 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
         "tail paragraph should contain resolved reference text"
     );
 
-    let energy = find_by_label(&manifest.nodes, "eq-hc-energy").expect("energy eq");
+    let energy = find_by_label(&cnd.nodes, "eq-hc-energy").expect("energy eq");
     let CndNode::Math(energy) = energy else {
         panic!("expected math");
     };
     assert!(
-        incoming_count(&manifest.nodes, energy.base.id) > 0,
+        incoming_count(&cnd.nodes, energy.base.label.as_deref().expect("label")) > 0,
         "equation should be referenced from tail paragraph"
     );
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn inline_code_not_duplicated_in_paragraphs() {
-    let manifest = manifest_for_example("inline_code.typ");
-    let paragraphs = paragraph_texts_in_order(&manifest.nodes);
+    let cnd = cnd_for_example("inline_code.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
 
     for text in &paragraphs {
         for token in &["typst-cnd", "extract_text", "plain_text", "foo"] {
@@ -720,7 +720,7 @@ fn inline_code_not_duplicated_in_paragraphs() {
         }
     }
 
-    let lists = find_lists(&manifest.nodes);
+    let lists = find_lists(&cnd.nodes);
     assert!(!lists.is_empty(), "inline_code.typ should produce at least one list");
     for list in lists {
         for item in &list.items {
@@ -745,7 +745,7 @@ fn inline_code_not_duplicated_in_paragraphs() {
             }
         }
     }
-    collect_quote_texts(&manifest.nodes, &mut quote_texts);
+    collect_quote_texts(&cnd.nodes, &mut quote_texts);
     assert!(!quote_texts.is_empty(), "inline_code.typ should produce at least one quote");
     for text in &quote_texts {
         let count = text.matches("extract_text").count();
@@ -758,9 +758,9 @@ fn inline_code_not_duplicated_in_paragraphs() {
 
 #[test]
 fn terms_definition_lists() {
-    let manifest = manifest_for_example("terms.typ");
+    let cnd = cnd_for_example("terms.typ");
     let mut stats = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut stats);
+    walk_nodes(&cnd.nodes, &mut stats);
 
     // Two definition lists, and the list nested in a term description must
     // NOT also surface as a standalone list node (proposal 0004 dedup).
@@ -778,7 +778,7 @@ fn terms_definition_lists() {
             }
         }
     }
-    collect(&manifest.nodes, &mut terms);
+    collect(&cnd.nodes, &mut terms);
     assert_eq!(terms.len(), 2);
 
     let CndNode::Terms(tight) = terms[0] else { panic!() };
@@ -799,17 +799,17 @@ fn terms_definition_lists() {
         consumer.description
     );
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn image_figure_carries_path_and_alt() {
-    let manifest = manifest_for_example("image_figure.typ");
+    let cnd = cnd_for_example("image_figure.typ");
     let mut stats = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut stats);
+    walk_nodes(&cnd.nodes, &mut stats);
     assert_eq!(stats.images, 1, "the captioned image is an ImageNode child");
 
-    let figure = find_by_label(&manifest.nodes, "fig-cover").expect("figure");
+    let figure = find_by_label(&cnd.nodes, "fig-cover").expect("figure");
     let CndNode::Figure(figure) = figure else {
         panic!("expected figure wrapper");
     };
@@ -831,23 +831,23 @@ fn image_figure_carries_path_and_alt() {
     );
     assert_eq!(image.alt.as_deref(), Some("Department cover art"));
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn footnotes_pool_and_edges() {
-    let manifest = manifest_for_example("footnotes.typ");
+    let cnd = cnd_for_example("footnotes.typ");
 
     // Three declaration footnotes become pool entries; the labelled note is
     // referenced twice (its declaration plus a `#footnote(<label>)` marker).
-    let labels: Vec<&str> = manifest.footnotes.iter().map(|f| f.label.as_str()).collect();
+    let labels: Vec<&str> = cnd.footnotes.iter().map(|f| f.label.as_str()).collect();
     assert_eq!(labels, vec!["1", "2", "3"]);
     assert!(
-        manifest.footnotes.iter().any(|f| f.text.contains("2023 audit")),
+        cnd.footnotes.iter().any(|f| f.text.contains("2023 audit")),
         "footnote body text is captured in the pool"
     );
 
-    assert_pool_refs_resolve(&manifest);
+    assert_pool_refs_resolve(&cnd);
 
     // Collect footnote edges per paragraph in reading order.
     let mut edges: Vec<Vec<String>> = Vec::new();
@@ -858,7 +858,7 @@ fn footnotes_pool_and_edges() {
                     p.base
                         .footnotes
                         .iter()
-                        .filter_map(|r| r.label.clone())
+                        .map(|r| r.label.clone())
                         .collect(),
                 ),
                 CndNode::Heading(h) => walk(&h.children, out),
@@ -866,7 +866,7 @@ fn footnotes_pool_and_edges() {
             }
         }
     }
-    walk(&manifest.nodes, &mut edges);
+    walk(&cnd.nodes, &mut edges);
     // The middle paragraph carries two markers (note 2 and the re-reference
     // to note 3); the last paragraph declares note 3.
     assert!(
@@ -884,7 +884,7 @@ fn footnotes_pool_and_edges() {
                     for reference in &p.base.footnotes {
                         out.push((
                             p.text.clone(),
-                            reference.label.clone().unwrap_or_default(),
+                            reference.label.clone(),
                             reference.text_span.clone(),
                         ));
                     }
@@ -895,7 +895,7 @@ fn footnotes_pool_and_edges() {
         }
     }
     let mut spans = Vec::new();
-    footnote_spans(&manifest.nodes, &mut spans);
+    footnote_spans(&cnd.nodes, &mut spans);
     for (text, label, span) in &spans {
         let span = span.as_ref().expect("footnote in a paragraph carries a text span");
         assert_eq!(span[1] - span[0], 1, "footnote marker span is 1 code point wide");
@@ -911,15 +911,15 @@ fn footnotes_pool_and_edges() {
         "note 3 is positioned in both the declaring and re-referencing paragraphs"
     );
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn citations_bibliography_pool_and_cite_edges() {
-    let manifest = manifest_for_example("citations.typ");
+    let cnd = cnd_for_example("citations.typ");
 
     // Bibliography pool: two cited works with the curated typed subset.
-    let smith = manifest
+    let smith = cnd
         .bibliography
         .iter()
         .find(|b| b.label == "smith2024")
@@ -928,12 +928,18 @@ fn citations_bibliography_pool_and_cite_edges() {
     assert_eq!(smith.year, Some(2024));
     assert!(smith.authors.iter().any(|a| a.contains("Smith")));
     assert_eq!(smith.doi.as_deref(), Some("10.1000/jods.2024.12"));
-    assert!(!smith.rendered.is_empty(), "rendered reference string present");
-    assert!(smith.raw.get("title").is_some(), "raw carries the full source entry");
+    assert!(
+        smith.formatted.as_deref().is_some_and(|f| !f.is_empty()),
+        "formatted reference string present"
+    );
+    assert!(
+        smith.fields.get("title").is_some(),
+        "fields carries the full source entry"
+    );
 
-    assert!(manifest.bibliography.iter().any(|b| b.label == "jones2022"));
+    assert!(cnd.bibliography.iter().any(|b| b.label == "jones2022"));
 
-    assert_pool_refs_resolve(&manifest);
+    assert_pool_refs_resolve(&cnd);
 
     // Collect cite edges per paragraph.
     let mut cites: Vec<Vec<(String, Option<String>, Option<String>)>> = Vec::new();
@@ -945,7 +951,7 @@ fn citations_bibliography_pool_and_cite_edges() {
                         .cites
                         .iter()
                         .map(|c| {
-                            (c.label.clone().unwrap_or_default(), c.form.clone(), c.supplement.clone())
+                            (c.label.clone(), c.form.clone(), c.supplement.clone())
                         })
                         .collect(),
                 ),
@@ -954,7 +960,7 @@ fn citations_bibliography_pool_and_cite_edges() {
             }
         }
     }
-    walk(&manifest.nodes, &mut cites);
+    walk(&cnd.nodes, &mut cites);
     let all: Vec<_> = cites.iter().flatten().collect();
 
     // Supplement, prose form, and suppressed (form: none) citation captured.
@@ -975,7 +981,7 @@ fn citations_bibliography_pool_and_cite_edges() {
                     for cite in &p.base.cites {
                         out.push((
                             p.text.clone(),
-                            cite.label.clone().unwrap_or_default(),
+                            cite.label.clone(),
                             cite.form.clone(),
                             cite.text_span.clone(),
                         ));
@@ -986,7 +992,7 @@ fn citations_bibliography_pool_and_cite_edges() {
             }
         }
     }
-    cite_spans(&manifest.nodes, &mut spans);
+    cite_spans(&cnd.nodes, &mut spans);
     assert!(
         spans.iter().any(|(text, k, f, sp)| k == "smith2024"
             && f.as_deref() == Some("normal")
@@ -1005,7 +1011,7 @@ fn citations_bibliography_pool_and_cite_edges() {
     fn assert_no_bibkey_refs(nodes: &[CndNode]) {
         for node in nodes {
             for reference in &node.base().refs {
-                let label = reference.label.as_deref().unwrap_or_default();
+                let label = reference.label.as_str();
                 assert!(
                     label != "smith2024" && label != "jones2022",
                     "citation key leaked into refs: {label}"
@@ -1018,14 +1024,14 @@ fn citations_bibliography_pool_and_cite_edges() {
             }
         }
     }
-    assert_no_bibkey_refs(&manifest.nodes);
+    assert_no_bibkey_refs(&cnd.nodes);
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn ref_text_spans_are_codepoint_offsets() {
-    let manifest = manifest_for_example("complex_refs.typ");
+    let cnd = cnd_for_example("complex_refs.typ");
 
     // Collect (node text, ref label, span) for every positioned ref.
     let mut spans: Vec<(String, String, Vec<i64>)> = Vec::new();
@@ -1036,7 +1042,7 @@ fn ref_text_spans_are_codepoint_offsets() {
                     if let Some(span) = &reference.text_span {
                         out.push((
                             p.text.clone(),
-                            reference.label.clone().unwrap_or_default(),
+                            reference.label.clone(),
                             span.clone(),
                         ));
                     }
@@ -1047,7 +1053,7 @@ fn ref_text_spans_are_codepoint_offsets() {
             }
         }
     }
-    walk(&manifest.nodes, &mut spans);
+    walk(&cnd.nodes, &mut spans);
     assert!(!spans.is_empty(), "cross-reference markers should carry text spans");
 
     // Every span slices to the rendered reference text, and the `\u{a0}`
@@ -1069,20 +1075,20 @@ fn ref_text_spans_are_codepoint_offsets() {
         "expected a ref rendering \"Chapitre\\u{{a0}}11\" (11 code points, 12 bytes): {spans:?}"
     );
 
-    assert_refs_resolve(&manifest.nodes);
+    assert_refs_resolve(&cnd.nodes);
 }
 
 #[test]
 fn markers_in_non_flat_nodes_do_not_leak_or_span() {
-    let manifest = manifest_for_example("nonflat_markers.typ");
+    let cnd = cnd_for_example("nonflat_markers.typ");
 
     // The footnote still enters the pool even though it sits in a list item.
-    assert_eq!(manifest.footnotes.len(), 1);
-    assert!(manifest.footnotes[0].text.contains("inside a list item"));
+    assert_eq!(cnd.footnotes.len(), 1);
+    assert!(cnd.footnotes[0].text.contains("inside a list item"));
 
     // Leak guard: the footnote body must not bleed into the list item text
     // (the item body is text-extracted unrealized; ADR 0013 leak fix).
-    let lists = find_lists(&manifest.nodes);
+    let lists = find_lists(&cnd.nodes);
     let list = lists.first().expect("a bullet list");
     let carrier = list
         .items
@@ -1094,7 +1100,7 @@ fn markers_in_non_flat_nodes_do_not_leak_or_span() {
         "the footnote body must not leak into the list item text"
     );
 
-    assert_pool_refs_resolve(&manifest);
+    assert_pool_refs_resolve(&cnd);
 }
 
 #[test]

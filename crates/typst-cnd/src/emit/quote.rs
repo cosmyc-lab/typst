@@ -8,7 +8,7 @@ use typst_library::text::Locale;
 use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::{extract_text, extract_with_markers};
 use crate::location::placeholder_location;
-use crate::manifest::QuoteNode;
+use crate::model::QuoteNode;
 
 pub fn convert(
     engine: &mut Engine,

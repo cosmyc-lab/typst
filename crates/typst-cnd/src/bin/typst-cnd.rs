@@ -5,11 +5,11 @@ use clap::{Parser, Subcommand};
 use ecow::eco_vec;
 use typst::compile;
 use typst::diag::{SourceResult, error};
-use typst_cnd::{CndDocument, manifest_from_document, manifest_to_json, world};
+use typst_cnd::{CndDocument, cnd_from_document, cnd_to_json, world};
 use typst_syntax::Span;
 
 #[derive(Parser)]
-#[command(name = "typst-cnd", about = "Compile Typst sources into CND manifest JSON")]
+#[command(name = "typst-cnd", about = "Compile Typst sources into CND JSON")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -17,11 +17,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compile a `.typ` file into a CND manifest JSON file.
+    /// Compile a `.typ` file into a `.cnd` file.
     Compile {
         /// Input Typst file.
         input: PathBuf,
-        /// Output manifest JSON path.
+        /// Output `.cnd` path.
         #[arg(short, long)]
         output: PathBuf,
     },
@@ -60,12 +60,12 @@ fn compile_file(input: &std::path::Path, output: &std::path::Path) -> SourceResu
     }
 
     let document = warned.output?;
-    let manifest = manifest_from_document(
+    let cnd = cnd_from_document(
         &document,
-        world::doc_hash(&world),
-        world::compiled_at_now(),
+        world::source_info(&world),
+        world::built_at_now(),
     );
-    let json = manifest_to_json(&manifest)?;
+    let json = cnd_to_json(&cnd)?;
     std::fs::write(output, json).map_err(|err| {
         eco_vec![error!(
             Span::detached(),

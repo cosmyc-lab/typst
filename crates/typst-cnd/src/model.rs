@@ -1,20 +1,26 @@
-//! Serde types matching the cnd-engine manifest contract.
+//! Serde types matching the CND format contract (cnd-sdk).
+//!
+//! These duplicate the reference models rather than binding them: nothing
+//! is shared as code across languages (ADR 0019). Agreement is proved by
+//! emitting a CND and running it through the SDK's `validate()`, not by
+//! construction.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const CND_VERSION: &str = "0.2.0";
+pub const CND_VERSION: &str = "0.3.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct CndManifest {
+pub struct Cnd {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Uuid>,
     pub cnd_version: String,
-    pub doc_hash: String,
-    pub compiled_at: String,
+    pub built_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceInfo>,
     pub doc: DocMetadata,
     pub nodes: Vec<CndNode>,
     /// Bibliography pool — target of `cites` edges. Always present (never
@@ -49,6 +55,40 @@ pub struct DocMetadata {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
+}
+
+/// The input artifact this CND was built from — deliberately separate from
+/// `doc`, which identifies the work (spec §2.1).
+///
+/// `hash` is comparable only between CNDs from *this* producer over the
+/// same source. `uri` is a producer-local identifier and is never promised
+/// resolvable, so it must stay relative — an absolute workstation path
+/// would leak the filesystem tree to every downstream reader.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceInfo {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+}
+
+/// The producer's verbatim source for a node, with its language. A bare
+/// string dropped the one thing a consumer needs in order to decide whether
+/// to attempt a parse: which language the content is in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct RawSource {
+    pub format: String,
+    pub value: String,
+}
+
+impl RawSource {
+    /// Every `raw` this producer emits is Typst source, by construction.
+    pub fn typst(value: impl Into<String>) -> Self {
+        Self { format: "typst".into(), value: value.into() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,40 +180,39 @@ impl CndNode {
     }
 }
 
-/// Forward cross-reference edge: stable node id plus optional Typst label
-/// (ADR 0002). `id` resolves in the manifest `nodes` tree. `text_span` is
-/// an additive optional `[start, end)` codepoint offset marking where the
-/// reference marker sits in the containing node's rendered text — currently
-/// always `None` (text spans are a deferred conformance level, populated
-/// for `NodeRef`/`CiteRef`/`FootnoteRef` together in a future task). Named
+/// Forward cross-reference edge, keyed by the target's label (ADR 0017,
+/// superseding the `{id, label}` form of ADR 0002). `label` resolves in the
+/// `nodes` tree.
+///
+/// An edge keys on the label rather than the id because an id is not
+/// durable across builds (ADR 0015) — this producer mints a fresh `uuid4`
+/// on every run, so an edge carrying one would expire immediately. The
+/// label lives in the Typst source and survives.
+///
+/// `text_span` is an optional `[start, end)` codepoint offset marking where
+/// the reference marker sits in the containing node's rendered text; named
 /// `text_span` to pin the coordinate space (ADR 0013).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct NodeRef {
-    pub id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+    pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_span: Option<Vec<i64>>,
 }
 
 impl NodeRef {
-    pub fn new(id: Uuid, label: Option<String>) -> Self {
-        Self { id, label, text_span: None }
+    pub fn new(label: impl Into<String>) -> Self {
+        Self { label: label.into(), text_span: None }
     }
 }
 
-/// Forward citation edge; `id` resolves in the manifest `bibliography`
-/// pool (proposal 0004). `form` mirrors Typst's citation form; `text_span`
-/// is an optional `[start, end)` codepoint offset into the node's rendered
-/// text (currently always `None` — a deferred conformance level, see the
-/// pools module; ADR 0013).
+/// Forward citation edge; `label` resolves in the `bibliography` pool
+/// (proposal 0004). `form` mirrors Typst's citation form; `text_span` as on
+/// `NodeRef` (ADR 0013).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct CiteRef {
-    pub id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+    pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_span: Option<Vec<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,14 +221,12 @@ pub struct CiteRef {
     pub supplement: Option<String>,
 }
 
-/// Forward footnote edge; `id` resolves in the manifest `footnotes` pool.
-/// `text_span` as on `NodeRef`/`CiteRef` (ADR 0013).
+/// Forward footnote edge; `label` resolves in the `footnotes` pool.
+/// `text_span` as on `NodeRef` (ADR 0013).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct FootnoteRef {
-    pub id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+    pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_span: Option<Vec<i64>>,
 }
@@ -204,16 +241,18 @@ pub struct Footnote {
     pub text: String,
 }
 
-/// Bibliography pool entry — target of `cites` edges. `rendered` is the
-/// reference string as displayed in the compiled document; a curated
-/// typed subset is lifted alongside it, and the full source entry is
-/// carried losslessly as structured JSON in `raw` (proposal 0004).
+/// Bibliography pool entry — target of `cites` edges. `formatted` is the
+/// reference string as displayed in the built document; a curated typed
+/// subset is lifted alongside it, and the full source entry is carried
+/// losslessly as structured JSON in `fields` — named `fields` rather than
+/// `raw` because `raw` means `{format, value}` on nodes (spec §5.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct BibEntry {
     pub id: Uuid,
     pub label: String,
-    pub rendered: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formatted: Option<String>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub type_: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -230,7 +269,7 @@ pub struct BibEntry {
     pub url: Option<String>,
     /// Full source entry (Hayagriva) as structured JSON — always present.
     #[serde(default = "default_json_object")]
-    pub raw: serde_json::Value,
+    pub fields: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,7 +279,7 @@ pub struct NodeBase {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     /// Forward cross-reference edges (ADR 0008). The reverse index is
-    /// derived on demand by the SDK (`CndManifest.incoming`), never
+    /// derived on demand by the SDK (`Cnd.incoming`), never
     /// serialized — no `refs_from`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<NodeRef>,
@@ -259,7 +298,12 @@ pub struct HeadingNode {
     #[serde(flatten)]
     pub base: NodeBase,
     pub level: i32,
-    pub numbering: String,
+    /// The counter value as resolved and displayed ("2.1.1"), never the
+    /// pattern and never the counter-label word (spec §6). `None` for an
+    /// unnumbered heading — an empty string would be a third state the
+    /// format does not have.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number: Option<String>,
     pub text: String,
     pub heading_path: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -315,7 +359,7 @@ pub struct TableNode {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cells: Vec<TableCell>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_typst: Option<String>,
+    pub raw: Option<RawSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,9 +395,9 @@ pub struct MathNode {
     pub base: NodeBase,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_typst: Option<String>,
+    pub raw: Option<RawSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub numbering: Option<String>,
+    pub number: Option<String>,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub block: bool,
 }
@@ -364,7 +408,7 @@ pub struct MathNode {
 /// keeps its own node type and `location`. `kind` is the counter/label
 /// selector of the figure ("image", "table", "raw", or an author-custom
 /// kind like "atom") — an open string, never a content discriminator.
-/// An unconvertible body yields `children: []` with `raw_typst` filled.
+/// An unconvertible body yields `children: []` with `raw` filled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FigureNode {
@@ -373,13 +417,13 @@ pub struct FigureNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub fig_number: Option<String>,
+    pub number: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<CndNode>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_typst: Option<String>,
+    pub raw: Option<RawSource>,
 }
 
 /// Leaf image content. A bare image outside any figure is an `ImageNode`
@@ -492,7 +536,7 @@ impl HeadingNode {
     pub fn new(
         id: Uuid,
         level: i32,
-        numbering: String,
+        number: Option<String>,
         text: String,
         heading_path: Vec<String>,
         location: NodeLocation,
@@ -500,7 +544,7 @@ impl HeadingNode {
         Self {
             base: NodeBase::new(id, location),
             level,
-            numbering,
+            number,
             text,
             heading_path,
             children: Vec::new(),
@@ -525,7 +569,7 @@ impl TableNode {
             kind: TableKind::Table,
             content_kind: None,
             cells: Vec::new(),
-            raw_typst: None,
+            raw: None,
         }
     }
 }
@@ -558,8 +602,8 @@ impl MathNode {
         Self {
             base: NodeBase::new(id, location),
             text,
-            raw_typst: None,
-            numbering: None,
+            raw: None,
+            number: None,
             block: true,
         }
     }
@@ -570,10 +614,10 @@ impl FigureNode {
         Self {
             base: NodeBase::new(id, location),
             caption: None,
-            fig_number: None,
+            number: None,
             kind: None,
             children: Vec::new(),
-            raw_typst: None,
+            raw: None,
         }
     }
 }

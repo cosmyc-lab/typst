@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use typst_cnd::{
-    CndDocument, CndManifest, CndNode, ListNode, manifest_from_document, manifest_to_json,
-    world::{CndWorld, compiled_at_now, doc_hash},
+    CndDocument, Cnd, CndNode, ListNode, cnd_from_document, cnd_to_json,
+    world::{CndWorld, built_at_now, source_info},
 };
 
 #[derive(Debug, Default)]
@@ -56,11 +56,11 @@ pub fn compile_example(name: &str) -> CndDocument {
         .unwrap_or_else(|errors| panic!("compile failed for {}: {errors:?}", path.display()))
 }
 
-pub fn manifest_for_example(name: &str) -> CndManifest {
+pub fn cnd_for_example(name: &str) -> Cnd {
     let path = example_path(name);
     let world = CndWorld::new(&path).expect("world");
     let doc = compile_example(name);
-    manifest_from_document(&doc, doc_hash(&world), compiled_at_now())
+    cnd_from_document(&doc, source_info(&world), built_at_now())
 }
 
 pub fn heading_texts(nodes: &[CndNode]) -> Vec<String> {
@@ -167,7 +167,7 @@ pub fn table_stats(nodes: &[CndNode]) -> TableStats {
         for node in nodes {
             match node {
                 CndNode::Table(table) => {
-                    if table.raw_typst.as_ref().is_some_and(|r| !r.is_empty()) {
+                    if table.raw.as_ref().is_some_and(|r| !r.value.is_empty()) {
                         stats.with_raw_typst += 1;
                     }
                     if table.base.label.is_some() {
@@ -177,7 +177,7 @@ pub fn table_stats(nodes: &[CndNode]) -> TableStats {
                 CndNode::Figure(figure) => {
                     let has_caption = figure.caption.as_ref().is_some_and(|c| !c.is_empty());
                     let has_fig_number =
-                        figure.fig_number.as_ref().is_some_and(|n| !n.is_empty());
+                        figure.number.as_ref().is_some_and(|n| !n.is_empty());
                     for child in &figure.children {
                         if let CndNode::Table(table) = child {
                             if has_caption {
@@ -186,7 +186,7 @@ pub fn table_stats(nodes: &[CndNode]) -> TableStats {
                             if has_fig_number {
                                 stats.with_fig_number += 1;
                             }
-                            if table.raw_typst.as_ref().is_some_and(|r| !r.is_empty()) {
+                            if table.raw.as_ref().is_some_and(|r| !r.value.is_empty()) {
                                 stats.with_raw_typst += 1;
                             }
                             if figure.base.label.is_some() {
@@ -210,12 +210,18 @@ pub fn table_stats(nodes: &[CndNode]) -> TableStats {
     stats
 }
 
-pub fn assert_manifest_contract(manifest: &CndManifest) {
-    assert_eq!(manifest.cnd_version, typst_cnd::CND_VERSION);
-    assert!(manifest.doc_hash.starts_with("sha256:"));
-    assert!(!manifest.compiled_at.is_empty());
-    assert!(!manifest.doc.title.is_empty());
-    assert!(!manifest.doc.authors.is_empty());
+pub fn assert_cnd_contract(cnd: &Cnd) {
+    assert_eq!(cnd.cnd_version, typst_cnd::CND_VERSION);
+    let source = cnd.source.as_ref().expect("source block");
+    assert_eq!(source.type_, "typst");
+    assert!(source.hash.starts_with("sha256:"));
+    // `uri` is a producer-local identifier, never promised resolvable — and
+    // never absolute, which would leak the filesystem tree (spec §2.1).
+    let uri = source.uri.as_deref().expect("source uri");
+    assert!(!uri.starts_with('/'), "source.uri must stay relative, got {uri}");
+    assert!(!cnd.built_at.is_empty());
+    assert!(!cnd.doc.title.is_empty());
+    assert!(!cnd.doc.authors.is_empty());
 }
 
 pub fn assert_unique_ids(nodes: &[CndNode]) {
@@ -246,14 +252,14 @@ pub fn codepoint_slice(text: &str, span: &[i64]) -> String {
     chars[span[0] as usize..span[1] as usize].iter().collect()
 }
 
-/// Number of nodes whose forward `refs` point at `target` — the derived
+/// Number of nodes whose forward `refs` name `target` — the derived
 /// incoming-edge count (ADR 0008 removed the materialized `refs_from`; the
-/// SDK computes this via `CndManifest.incoming`). Used by tests that assert
-/// a node is a cross-reference target.
-pub fn incoming_count(nodes: &[CndNode], target: uuid::Uuid) -> usize {
-    fn walk(nodes: &[CndNode], target: uuid::Uuid, count: &mut usize) {
+/// SDK computes this via `Cnd.incoming`). Keyed by label, since that is
+/// what an edge carries (ADR 0017).
+pub fn incoming_count(nodes: &[CndNode], target: &str) -> usize {
+    fn walk(nodes: &[CndNode], target: &str, count: &mut usize) {
         for node in nodes {
-            if node.base().refs.iter().any(|reference| reference.id == target) {
+            if node.base().refs.iter().any(|reference| reference.label == target) {
                 *count += 1;
             }
             match node {
@@ -268,85 +274,130 @@ pub fn incoming_count(nodes: &[CndNode], target: uuid::Uuid) -> usize {
     count
 }
 
-/// Every forward `refs` edge must point at a node that exists in the
-/// manifest (ADR 0008). With `refs_from` gone, the reverse-consistency
-/// invariant no longer exists — the SDK derives incoming edges on demand
-/// (`CndManifest.incoming`) — so this only checks target existence.
-pub fn assert_refs_resolve(nodes: &[CndNode]) {
-    let mut ids: HashSet<uuid::Uuid> = HashSet::new();
-    fn collect_ids(nodes: &[CndNode], out: &mut HashSet<uuid::Uuid>) {
+/// Collect every node label in the tree.
+pub fn node_labels(nodes: &[CndNode]) -> HashSet<String> {
+    fn walk(nodes: &[CndNode], out: &mut HashSet<String>) {
         for node in nodes {
-            out.insert(node.id());
+            if let Some(label) = &node.base().label {
+                out.insert(label.clone());
+            }
             match node {
-                CndNode::Heading(h) => collect_ids(&h.children, out),
-                CndNode::Figure(f) => collect_ids(&f.children, out),
+                CndNode::Heading(h) => walk(&h.children, out),
+                CndNode::Figure(f) => walk(&f.children, out),
                 _ => {}
             }
         }
     }
-    collect_ids(nodes, &mut ids);
+    let mut out = HashSet::new();
+    walk(nodes, &mut out);
+    out
+}
 
-    fn check(nodes: &[CndNode], ids: &HashSet<uuid::Uuid>) {
+/// Every forward `refs` edge must name a label some node carries (ADR
+/// 0017). Existence only — the reverse-consistency invariant is gone with
+/// `refs_from` (ADR 0008), and the SDK derives incoming edges on demand.
+pub fn assert_refs_resolve(nodes: &[CndNode]) {
+    let labels = node_labels(nodes);
+
+    fn check(nodes: &[CndNode], labels: &HashSet<String>) {
         for node in nodes {
             for reference in &node.base().refs {
                 assert!(
-                    ids.contains(&reference.id),
-                    "refs target {} from {} does not exist",
-                    reference.id,
+                    labels.contains(&reference.label),
+                    "refs target @{} from {} resolves to no node",
+                    reference.label,
                     node.id()
                 );
             }
             match node {
-                CndNode::Heading(h) => check(&h.children, ids),
-                CndNode::Figure(f) => check(&f.children, ids),
+                CndNode::Heading(h) => check(&h.children, labels),
+                CndNode::Figure(f) => check(&f.children, labels),
                 _ => {}
             }
         }
     }
-    check(nodes, &ids);
+    check(nodes, &labels);
+}
+
+/// Labels are globally unique across nodes and both pools (ADR 0017) — the
+/// invariant that lets an edge name its target by label alone. Typst itself
+/// permits duplicate labels (it only errors on ambiguous *resolution*), so
+/// this is a real thing a document can violate, not a formality.
+pub fn assert_labels_globally_unique(cnd: &Cnd) {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut claim = |label: &str, owner: String| {
+        assert!(seen.insert(label.to_string()), "duplicate label @{label} on {owner}");
+    };
+
+    fn walk(nodes: &[CndNode], claim: &mut impl FnMut(&str, String)) {
+        for node in nodes {
+            if let Some(label) = &node.base().label {
+                claim(label, format!("node {}", node.id()));
+            }
+            match node {
+                CndNode::Heading(h) => walk(&h.children, claim),
+                CndNode::Figure(f) => walk(&f.children, claim),
+                _ => {}
+            }
+        }
+    }
+    walk(&cnd.nodes, &mut claim);
+    for entry in &cnd.bibliography {
+        claim(&entry.label, format!("bibliography entry {}", entry.id));
+    }
+    for note in &cnd.footnotes {
+        claim(&note.label, format!("footnote {}", note.id));
+    }
 }
 
 /// Every `cites`/`footnotes` edge on a node must resolve to a real pool
 /// entry, and pool-entry ids must be globally unique and disjoint from
 /// node ids (proposal 0004 invariants).
-pub fn assert_pool_refs_resolve(manifest: &CndManifest) {
-    let footnote_ids: HashSet<uuid::Uuid> = manifest.footnotes.iter().map(|f| f.id).collect();
-    let bib_ids: HashSet<uuid::Uuid> = manifest.bibliography.iter().map(|b| b.id).collect();
+pub fn assert_pool_refs_resolve(cnd: &Cnd) {
+    let footnote_ids: HashSet<uuid::Uuid> = cnd.footnotes.iter().map(|f| f.id).collect();
+    let bib_ids: HashSet<uuid::Uuid> = cnd.bibliography.iter().map(|b| b.id).collect();
+    let footnote_labels: HashSet<&str> =
+        cnd.footnotes.iter().map(|f| f.label.as_str()).collect();
+    let bib_labels: HashSet<&str> =
+        cnd.bibliography.iter().map(|b| b.label.as_str()).collect();
 
+    // Each family resolves in its OWN domain — existence is not enough,
+    // because labels are unique document-wide, so a `cites` edge naming a
+    // footnote would still resolve to something (spec §5).
     fn walk(
         nodes: &[CndNode],
-        footnote_ids: &HashSet<uuid::Uuid>,
-        bib_ids: &HashSet<uuid::Uuid>,
+        footnote_labels: &HashSet<&str>,
+        bib_labels: &HashSet<&str>,
     ) {
         for node in nodes {
             for reference in &node.base().footnotes {
                 assert!(
-                    footnote_ids.contains(&reference.id),
-                    "footnote edge {} does not resolve to a pool entry",
-                    reference.id
+                    footnote_labels.contains(reference.label.as_str()),
+                    "footnote edge @{} does not resolve in the footnotes pool",
+                    reference.label
                 );
             }
             for citation in &node.base().cites {
                 assert!(
-                    bib_ids.contains(&citation.id),
-                    "cite edge {} does not resolve to a bibliography entry",
-                    citation.id
+                    bib_labels.contains(citation.label.as_str()),
+                    "cite edge @{} does not resolve in the bibliography pool",
+                    citation.label
                 );
             }
             match node {
-                CndNode::Heading(h) => walk(&h.children, footnote_ids, bib_ids),
-                CndNode::Figure(f) => walk(&f.children, footnote_ids, bib_ids),
+                CndNode::Heading(h) => walk(&h.children, footnote_labels, bib_labels),
+                CndNode::Figure(f) => walk(&f.children, footnote_labels, bib_labels),
                 _ => {}
             }
         }
     }
-    walk(&manifest.nodes, &footnote_ids, &bib_ids);
+    walk(&cnd.nodes, &footnote_labels, &bib_labels);
 
     // Pool ids are unique and disjoint from each other and from node ids.
     let mut node_ids = NodeStats::default();
-    walk_nodes(&manifest.nodes, &mut node_ids);
-    assert_eq!(footnote_ids.len(), manifest.footnotes.len(), "duplicate footnote ids");
-    assert_eq!(bib_ids.len(), manifest.bibliography.len(), "duplicate bib ids");
+    walk_nodes(&cnd.nodes, &mut node_ids);
+    assert_eq!(footnote_ids.len(), cnd.footnotes.len(), "duplicate footnote ids");
+    assert_eq!(bib_ids.len(), cnd.bibliography.len(), "duplicate bib ids");
     assert!(footnote_ids.is_disjoint(&bib_ids), "footnote/bib ids overlap");
     assert!(
         footnote_ids.is_disjoint(&node_ids.ids) && bib_ids.is_disjoint(&node_ids.ids),
@@ -354,12 +405,12 @@ pub fn assert_pool_refs_resolve(manifest: &CndManifest) {
     );
 }
 
-pub fn assert_json_roundtrip(manifest: &CndManifest) {
-    let json = manifest_to_json(manifest).expect("serialize");
-    let parsed: CndManifest = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(parsed.cnd_version, manifest.cnd_version);
-    assert_eq!(parsed.doc.title, manifest.doc.title);
-    assert_eq!(parsed.nodes.len(), manifest.nodes.len());
+pub fn assert_json_roundtrip(cnd: &Cnd) {
+    let json = cnd_to_json(cnd).expect("serialize");
+    let parsed: Cnd = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed.cnd_version, cnd.cnd_version);
+    assert_eq!(parsed.doc.title, cnd.doc.title);
+    assert_eq!(parsed.nodes.len(), cnd.nodes.len());
 }
 
 pub fn label_exists(nodes: &[CndNode], label: &str) -> bool {
@@ -403,7 +454,7 @@ pub fn all_example_files() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Collect paragraph texts in depth-first manifest order (reading order).
+/// Collect paragraph texts in depth-first cnd order (reading order).
 pub fn paragraph_texts_in_order(nodes: &[CndNode]) -> Vec<String> {
     let mut out = Vec::new();
     fn walk(nodes: &[CndNode], out: &mut Vec<String>) {
@@ -455,7 +506,7 @@ pub fn tags_under_heading(nodes: &[CndNode], label: &str) -> Vec<String> {
     paragraph_tags_in_order(&heading.children)
 }
 
-/// Collect list nodes in depth-first manifest order.
+/// Collect list nodes in depth-first cnd order.
 pub fn find_lists(nodes: &[CndNode]) -> Vec<&ListNode> {
     let mut out = Vec::new();
     fn walk<'a>(nodes: &'a [CndNode], out: &mut Vec<&'a ListNode>) {

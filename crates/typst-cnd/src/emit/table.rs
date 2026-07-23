@@ -14,7 +14,7 @@ use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::extract_text;
 use crate::emit::figure::figure_kind;
 use crate::location::placeholder_location;
-use crate::manifest::{CndNode, FigureNode, TableCell, TableKind, TableNode};
+use crate::model::{CndNode, FigureNode, RawSource, TableCell, TableKind, TableNode};
 
 /// Find a table element nested inside realized figure (or other) content.
 pub fn table_in_content(content: &Content) -> Option<Packed<TableElem>> {
@@ -102,7 +102,7 @@ pub fn from_figure(
     let wrapper_id = Uuid::new_v4();
     let mut wrapper = FigureNode::new(wrapper_id, placeholder_location());
     wrapper.caption = caption.map(Into::into);
-    wrapper.fig_number = fig_number.map(Into::into);
+    wrapper.number = fig_number.map(Into::into);
     wrapper.kind = figure_kind(&figure, styles);
     wrapper.children.push(CndNode::Table(table_node));
 
@@ -143,7 +143,7 @@ pub fn from_figure_grid(
     table_node.kind = TableKind::Grid;
     table_node.content_kind = content_kind_from_metadata(&wrapper_record.state_metadata);
     table_node.cells = cells;
-    table_node.raw_typst = raw_typst_for_label(engine, content.label());
+    table_node.raw = raw_typst_for_label(engine, content.label()).map(RawSource::typst);
 
     let table_record = NodeRecord {
         location: content.location(),
@@ -158,7 +158,7 @@ pub fn from_figure_grid(
     let wrapper_id = Uuid::new_v4();
     let mut wrapper = FigureNode::new(wrapper_id, placeholder_location());
     wrapper.caption = caption;
-    wrapper.fig_number = fig_number;
+    wrapper.number = fig_number;
     wrapper.kind = figure_kind(&figure, styles);
     wrapper.children.push(CndNode::Table(table_node));
 
@@ -200,7 +200,7 @@ pub fn convert(
     let mut node = TableNode::new(id, location);
     node.content_kind = content_kind_from_metadata(&record.state_metadata);
     node.cells = cells;
-    node.raw_typst = raw_typst;
+    node.raw = raw_typst.map(RawSource::typst);
 
     Ok((node, record))
 }

@@ -9,13 +9,15 @@ use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
+
+use crate::model::SourceInfo;
 use typst_kit::datetime::Time;
 use typst_kit::downloader::SystemDownloader;
 use typst_kit::files::{FileLoader, FileStore, FsRoot};
 use typst_kit::fonts::{self, FontStore};
 use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
 
-/// A world for compiling `.typ` sources into CND manifests.
+/// A world for compiling `.typ` sources into CND CNDs.
 pub struct CndWorld {
     main: FileId,
     library: LazyHash<Library>,
@@ -125,18 +127,32 @@ impl FileLoader for CndFiles {
     }
 }
 
-/// Compute a SHA-256 content hash for the main source file.
-pub fn doc_hash(world: &dyn World) -> String {
+/// Describe the input artifact this CND is built from (spec §2.1).
+///
+/// The hash covers the main source file only, so it is comparable strictly
+/// between two runs of *this* producer over the same source — which is
+/// exactly the contract the format states for `source.hash`, and why a
+/// consumer must never compare it against another producer's.
+///
+/// `uri` is the main file's project-relative virtual path, never an
+/// absolute one: it is a producer-local identifier that is never promised
+/// resolvable, and an absolute workstation path would leak the filesystem
+/// tree to every downstream reader.
+pub fn source_info(world: &dyn World) -> SourceInfo {
     use sha2::{Digest, Sha256};
 
     let main = world.main();
     let source = world.source(main).expect("main source");
     let digest = Sha256::digest(source.text().as_bytes());
-    format!("sha256:{}", hex::encode(digest))
+    SourceInfo {
+        type_: "typst".into(),
+        hash: format!("sha256:{}", hex::encode(digest)),
+        uri: Some(main.vpath().get_without_slash().to_string()),
+    }
 }
 
 /// Current UTC timestamp in RFC 3339 format.
-pub fn compiled_at_now() -> String {
+pub fn built_at_now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())

@@ -6,7 +6,7 @@ use typst_library::model::{EnumElem, EnumItem, ListElem, ListItem, TermItem, Ter
 use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
-use crate::manifest::{ListItem as CndListItem, ListNode, TermItem as CndTermItem, TermsNode};
+use crate::model::{ListItem as CndListItem, ListNode, TermItem as CndTermItem, TermsNode};
 
 pub fn from_list(
     engine: &mut Engine,
