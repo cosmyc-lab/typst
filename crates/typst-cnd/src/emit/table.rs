@@ -103,6 +103,8 @@ pub fn from_figure(
     let mut wrapper = FigureNode::new(wrapper_id, placeholder_location());
     wrapper.caption = caption.map(Into::into);
     wrapper.number = fig_number.map(Into::into);
+    wrapper.counter_label =
+        convert::figure_counter_label(&figure, styles).map(Into::into);
     wrapper.kind = figure_kind(&figure, styles);
     wrapper.children.push(CndNode::Table(table_node));
 
@@ -159,6 +161,8 @@ pub fn from_figure_grid(
     let mut wrapper = FigureNode::new(wrapper_id, placeholder_location());
     wrapper.caption = caption;
     wrapper.number = fig_number;
+    wrapper.counter_label =
+        convert::figure_counter_label(&figure, styles).map(Into::into);
     wrapper.kind = figure_kind(&figure, styles);
     wrapper.children.push(CndNode::Table(table_node));
 

@@ -1,6 +1,9 @@
 #set text(lang: "en")
 #set heading(numbering: "1.1")
-#set figure(numbering: "Figure 1")
+// The counter pattern carries the value only; the displayed word comes
+// from the supplement. "Figure 1" as a pattern is wrong — Typst reads the
+// `i` as a roman counter, yielding "Fi"/"Fii".
+#set figure(numbering: "1")
 #set math.equation(numbering: "(1)")
 #set document(
   title: "Hardcore semantic fixture — CND integration",

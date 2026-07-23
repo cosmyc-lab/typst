@@ -40,6 +40,8 @@ pub fn from_figure(
     let mut node = FigureNode::new(id, location);
     node.caption = caption;
     node.number = fig_number;
+    node.counter_label =
+        convert::figure_counter_label(&figure, styles).map(Into::into);
     node.kind = figure_kind(&figure, styles);
 
     let mut records = vec![(id, record)];

@@ -9,7 +9,7 @@ use typst_library::introspection::{Introspector, Location, Tag, TagElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
     CiteElem, EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteElem, HeadingElem, ListElem,
-    ListItem, ParElem, QuoteElem, RefElem, TableElem, TermsElem,
+    ListItem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_syntax::{FileId, Span};
@@ -916,9 +916,7 @@ fn set_metadata(
 /// consumer's decision, and `FigureNode::kind` already carries the counter
 /// selector it composes from (spec §6).
 ///
-/// An author-supplied custom supplement is therefore dropped rather than
-/// smuggled into `number` — the format has no field for it today, and
-/// inventing one here would be a format change made in a producer.
+/// The word itself is captured separately by `figure_counter_label`.
 pub fn figure_number(
     engine: &mut Engine,
     figure: &Packed<FigureElem>,
@@ -931,6 +929,31 @@ pub fn figure_number(
         .display_at(engine, location, styles, numbering, figure.span())
         .ok()?;
     Some(extract::extract_text(&display))
+}
+
+/// The figure's supplement — the word displayed in front of the number
+/// ("Figure", "Tabelle", "Atom"), emitted as `counter_label` (spec §6,
+/// proposal 0010).
+///
+/// Typst has already resolved this during `synthesize()`: either from the
+/// element kind and the document language, or from the author for a custom
+/// `kind`, where no localized name exists and Typst requires one. The
+/// second case is why this cannot be derived downstream — nothing else in
+/// the CND encodes the author's word.
+pub fn figure_counter_label(
+    figure: &Packed<FigureElem>,
+    styles: StyleChain,
+) -> Option<EcoString> {
+    // Only meaningful next to a number; an unnumbered figure displays no
+    // counter at all, so a label for it would be a word nothing precedes.
+    figure.numbering.get_ref(styles).as_ref()?;
+    match figure.supplement.get_ref(styles) {
+        typst_library::foundations::Smart::Custom(Some(Supplement::Content(supplement))) => {
+            let text = extract::extract_text(supplement);
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
 }
 
 pub fn caption_text(caption: &Packed<FigureCaption>) -> EcoString {

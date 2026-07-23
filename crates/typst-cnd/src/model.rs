@@ -304,6 +304,15 @@ pub struct HeadingNode {
     /// format does not have.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub number: Option<String>,
+    /// The word displayed in front of `number` ("Figure", "Tabelle"), as
+    /// Typst resolved it for the document's language — its `supplement`
+    /// (spec §6, proposal 0010). Kept beside `number` rather than fused
+    /// into it: for an author-defined `kind` Typst has no localized name
+    /// and requires the author to supply this, so nothing else in the CND
+    /// encodes it. Named `counter_label` because `supplement` already
+    /// means a citation locator in this format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counter_label: Option<String>,
     pub text: String,
     pub heading_path: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -398,6 +407,8 @@ pub struct MathNode {
     pub raw: Option<RawSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub number: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counter_label: Option<String>,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub block: bool,
 }
@@ -418,6 +429,8 @@ pub struct FigureNode {
     pub caption: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub number: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counter_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -545,6 +558,7 @@ impl HeadingNode {
             base: NodeBase::new(id, location),
             level,
             number,
+            counter_label: None,
             text,
             heading_path,
             children: Vec::new(),
@@ -604,6 +618,7 @@ impl MathNode {
             text,
             raw: None,
             number: None,
+            counter_label: None,
             block: true,
         }
     }
@@ -615,6 +630,7 @@ impl FigureNode {
             base: NodeBase::new(id, location),
             caption: None,
             number: None,
+            counter_label: None,
             kind: None,
             children: Vec::new(),
             raw: None,
