@@ -104,11 +104,12 @@ impl Session {
         explicit: bool,
     ) -> Option<CompletionsResult> {
         let source = self.prepare(main_path, path)?;
+        let cursor = sanitize_cursor(source.text(), cursor);
         let (from, completions) = typst_ide::autocomplete(
             &self.world,
             Option::<&PagedDocument>::None,
             &source,
-            cursor.min(source.text().len()),
+            cursor,
             explicit,
         )?;
         Some(CompletionsResult { from, completions })
@@ -126,11 +127,12 @@ impl Session {
         cursor: usize,
     ) -> Option<TooltipResult> {
         let source = self.prepare(main_path, path)?;
+        let cursor = sanitize_cursor(source.text(), cursor);
         typst_ide::tooltip(
             &self.world,
             Option::<&PagedDocument>::None,
             &source,
-            cursor.min(source.text().len()),
+            cursor,
             Side::Before,
         )
         .map(TooltipResult::from)
@@ -148,6 +150,22 @@ impl Default for Session {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Makes a caller-supplied byte offset safe to slice `text` at.
+///
+/// The offset is clamped to the length of the text and then snapped back to
+/// the nearest preceding UTF-8 character boundary. Both are load-bearing:
+/// `typst-ide` slices the source at the cursor, so an offset that is past the
+/// end or in the middle of a multi-byte character would panic — and a panic
+/// would poison the whole module for the rest of the session.
+fn sanitize_cursor(text: &str, cursor: usize) -> usize {
+    let mut cursor = cursor.min(text.len());
+    // Terminates because offset 0 is always a character boundary.
+    while !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    cursor
 }
 
 #[cfg(test)]
@@ -203,9 +221,10 @@ mod tests {
             .iter()
             .find(|c| c["label"] == "table")
             .expect("`table` completion");
+        // A unit `CompletionKind` serializes to a bare kebab-case string.
         assert_eq!(entry["kind"], "func");
-        assert!(entry.get("apply").is_some());
-        assert!(entry.get("detail").is_some());
+        assert!(entry["apply"].as_str().is_some_and(|s| s.contains("table")));
+        assert_eq!(entry["detail"], "A table of items.");
 
         let mut s = session_with("#table()");
         let tip = s
@@ -216,10 +235,65 @@ mod tests {
         assert!(json["value"].is_string());
     }
 
+    /// The variant `CompletionKind::Symbol(_)` is externally tagged, so it
+    /// serializes to an object where every other kind is a bare string.
+    /// Consumers have to handle both, hence this guard.
+    #[test]
+    fn symbol_completions_serialize_as_an_object() {
+        let mut s = session_with("#sym.");
+        let result = s
+            .autocomplete_impl("main.typ", "main.typ", 5, true)
+            .expect("completions");
+        let symbol = result
+            .completions
+            .iter()
+            .find(|c| matches!(c.kind, typst_ide::CompletionKind::Symbol(_)))
+            .expect("at least one symbol completion");
+
+        let json = serde_json::to_value(symbol).expect("serializable");
+        assert!(json["kind"].is_object(), "got {}", json["kind"]);
+        let inner = json["kind"]["symbol"].as_str().expect("`symbol` payload");
+        assert!(!inner.is_empty());
+        assert!(json["label"].is_string());
+    }
+
     #[test]
     fn unknown_paths_yield_none() {
         let mut s = session_with("#tab");
         assert!(s.autocomplete_impl("main.typ", "missing.typ", 0, true).is_none());
         assert!(s.tooltip_impl("main.typ", "missing.typ", 0).is_none());
+    }
+
+    #[test]
+    fn unknown_main_path_yields_none() {
+        let mut s = session_with("#tab");
+        // Unknown but well-formed: the file simply is not in the world.
+        assert!(s.autocomplete_impl("missing.typ", "main.typ", 4, true).is_some());
+        // Malformed: escapes the project root, so no `FileId` can be built.
+        assert!(s.autocomplete_impl("../escape.typ", "main.typ", 4, true).is_none());
+        assert!(s.tooltip_impl("../escape.typ", "main.typ", 4).is_none());
+    }
+
+    #[test]
+    fn mid_character_cursors_do_not_panic() {
+        // `é` occupies bytes 1..3, so offset 2 is inside it.
+        let mut s = session_with("#émoji");
+        let _ = s.autocomplete_impl("main.typ", "main.typ", 2, true);
+        let _ = s.tooltip_impl("main.typ", "main.typ", 2);
+
+        // Well past the end of the text.
+        let _ = s.autocomplete_impl("main.typ", "main.typ", 9_999, true);
+        let _ = s.tooltip_impl("main.typ", "main.typ", 9_999);
+    }
+
+    #[test]
+    fn sanitize_cursor_snaps_back_to_a_boundary() {
+        let text = "#émoji";
+        assert_eq!(sanitize_cursor(text, 0), 0);
+        assert_eq!(sanitize_cursor(text, 1), 1);
+        assert_eq!(sanitize_cursor(text, 2), 1); // inside `é`
+        assert_eq!(sanitize_cursor(text, 3), 3);
+        assert_eq!(sanitize_cursor(text, 9_999), text.len());
+        assert_eq!(sanitize_cursor("", 5), 0);
     }
 }
