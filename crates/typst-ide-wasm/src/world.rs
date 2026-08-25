@@ -133,10 +133,19 @@ impl World for BrowserWorld {
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        match self.assets.get(&id) {
-            Some(bytes) => Ok(bytes.clone()),
-            None => Err(FileError::NotFound(id.vpath().get_without_slash().into())),
+        if let Some(bytes) = self.assets.get(&id) {
+            return Ok(bytes.clone());
         }
+
+        // Source files are byte-addressable too. Without this fallback,
+        // `read("chapter.typ")` — or any other `file()`-path access to a file
+        // that was handed to the session as a source rather than as an asset —
+        // would fail even though the world holds its text.
+        if let Some(source) = self.sources.get(&id) {
+            return Ok(Bytes::from_string(source.text().to_owned()));
+        }
+
+        Err(FileError::NotFound(id.vpath().get_without_slash().into()))
     }
 
     fn font(&self, index: usize) -> Option<Font> {

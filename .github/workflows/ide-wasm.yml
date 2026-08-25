@@ -1,0 +1,19 @@
+name: typst-ide-wasm
+on:
+  push:
+    tags: ["ide-wasm-v*"]
+  workflow_dispatch:
+jobs:
+  build-pkg:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo install wasm-pack --locked
+      - run: wasm-pack build crates/typst-ide-wasm --target web --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: typst-ide-wasm-pkg
+          path: crates/typst-ide-wasm/pkg/

@@ -21,9 +21,19 @@ mod world;
 pub use self::bindings::IdeSession;
 pub use self::world::BrowserWorld;
 
-use typst::syntax::Side;
-use typst_ide::{Completion, Tooltip};
+use std::num::NonZeroUsize;
+
+use typst::World;
+use typst::introspection::PagedPosition;
+use typst::layout::{Abs, Point};
+use typst::syntax::{FileId, Side, Source};
+use typst_ide::{Completion, Jump, Tooltip};
 use typst_layout::PagedDocument;
+
+/// How many compilations a memoized result may go unused before it is dropped.
+///
+/// The same value the CLI's watch loop uses.
+const EVICT_MAX_AGE: usize = 10;
 
 /// The result of an autocompletion request.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -56,38 +66,189 @@ impl From<Tooltip> for TooltipResult {
     }
 }
 
+/// A position in the rendered document.
+///
+/// Coordinates are in **points**, measured from the top left of the page, and
+/// the page number is **1-based**.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct PreviewPosition {
+    /// The page the position is on, starting at 1.
+    pub page: usize,
+    /// The horizontal offset from the left edge of the page, in points.
+    pub x: f64,
+    /// The vertical offset from the top edge of the page, in points.
+    pub y: f64,
+}
+
+/// Where a click in the rendered document leads.
+///
+/// This mirrors [`typst_ide::Jump`], which is not serializable itself.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum JumpResult {
+    /// A position in a source file.
+    File {
+        /// The project-root-relative path, _without_ a leading slash.
+        path: String,
+        /// The UTF-8 byte offset into that file.
+        offset: usize,
+    },
+    /// An external URL.
+    Url {
+        /// The target of the link.
+        url: String,
+    },
+    /// Another position in the same document, e.g. an internal link.
+    Position {
+        /// The page the position is on, starting at 1.
+        page: usize,
+        /// The horizontal offset from the left edge of the page, in points.
+        x: f64,
+        /// The vertical offset from the top edge of the page, in points.
+        y: f64,
+    },
+}
+
 /// An editing session over a set of in-memory files.
 ///
 /// The session owns the world, so files and fonts are added once and reused
-/// across requests.
+/// across requests. It also caches the most recently compiled document, which
+/// is what makes label completions, label tooltips and both jump directions
+/// work.
 pub struct Session {
     world: BrowserWorld,
+    /// The most recently compiled document, if the last compilation succeeded.
+    document: Option<PagedDocument>,
+    /// The main file `document` was compiled from.
+    document_main: Option<FileId>,
+    /// Whether a file or font changed since `document` was compiled.
+    dirty: bool,
 }
 
 impl Session {
     /// Creates an empty session, without any files or fonts.
     pub fn new() -> Self {
-        Self { world: BrowserWorld::new() }
+        Self {
+            world: BrowserWorld::new(),
+            document: None,
+            document_main: None,
+            dirty: true,
+        }
     }
 
     /// Loads a font file, adding every face it contains.
     pub fn add_font(&mut self, bytes: &[u8]) {
         self.world.add_font(bytes);
+        // Layout depends on the available fonts, so this invalidates the
+        // cached document just like a file change does.
+        self.dirty = true;
     }
 
     /// Adds or replaces a source file.
     pub fn add_source(&mut self, path: &str, text: &str) {
         self.world.add_source(path, text);
+        self.dirty = true;
     }
 
     /// Adds or replaces a non-source file.
     pub fn add_asset(&mut self, path: &str, bytes: &[u8]) {
         self.world.add_asset(path, bytes);
+        self.dirty = true;
     }
 
     /// Removes a file, whether it is a source file or an asset.
     pub fn remove_file(&mut self, path: &str) {
         self.world.remove_file(path);
+        self.dirty = true;
+    }
+
+    /// Compiles the project rooted at `main_path` and caches the result.
+    ///
+    /// Returns the error messages if compilation failed; the cached document
+    /// is then cleared. Either way the session stops being dirty, so a failing
+    /// project is not recompiled over and over by the on-demand paths.
+    pub fn compile_impl(&mut self, main_path: &str) -> Result<(), Vec<String>> {
+        let Some(main) = self.select_main(main_path) else {
+            return Err(vec![format!("invalid main file path: {main_path}")]);
+        };
+        self.compile(main)
+    }
+
+    /// Computes the positions in the rendered document that correspond to
+    /// `cursor` within the file at `path`.
+    ///
+    /// A span can be laid out more than once (e.g. in a repeated header), so
+    /// this returns every match. Recompiles first if the cached document is
+    /// stale: unlike a completion, a coordinate from an outdated layout is not
+    /// merely incomplete, it is wrong.
+    pub fn jump_from_cursor_impl(
+        &mut self,
+        main_path: &str,
+        path: &str,
+        cursor: usize,
+    ) -> Vec<PreviewPosition> {
+        let Some(main) = self.select_main(main_path) else {
+            return Vec::new();
+        };
+        let Some(source) = self.world.source_at(path) else {
+            return Vec::new();
+        };
+        // Sanitize before compiling, so the caller's offset is made safe on
+        // every path through this function rather than only the one where a
+        // document comes back.
+        let cursor = sanitize_cursor(source.text(), cursor);
+
+        self.ensure_document(main);
+        let Some(document) = self.document.as_ref() else {
+            return Vec::new();
+        };
+
+        typst_ide::jump_from_cursor(document, &source, cursor)
+            .into_iter()
+            .map(|position| PreviewPosition {
+                page: position.page.get(),
+                x: position.point.x.to_pt(),
+                y: position.point.y.to_pt(),
+            })
+            .collect()
+    }
+
+    /// Determines where a click at `(x, y)` in points on the 1-based `page`
+    /// of the rendered document leads.
+    ///
+    /// Returns `None` if there is nothing to jump to at that point, or if the
+    /// project does not compile. Recompiles first if the cached document is
+    /// stale, for the same reason as [`Self::jump_from_cursor_impl`].
+    pub fn jump_from_click_impl(
+        &mut self,
+        main_path: &str,
+        page: usize,
+        x: f64,
+        y: f64,
+    ) -> Option<JumpResult> {
+        // Validate the click before doing any work: pages are 1-based.
+        let position = PagedPosition {
+            page: NonZeroUsize::new(page)?,
+            point: Point::new(Abs::pt(x), Abs::pt(y)),
+        };
+
+        let main = self.select_main(main_path)?;
+        self.ensure_document(main);
+        let document = self.document.as_ref()?;
+
+        let jump = typst_ide::jump_from_click(&self.world, document, &position)?;
+        Some(match jump {
+            Jump::File(id, offset) => JumpResult::File {
+                path: id.vpath().get_without_slash().to_owned(),
+                offset,
+            },
+            Jump::Url(url) => JumpResult::Url { url: url.to_string() },
+            Jump::Position(position) => JumpResult::Position {
+                page: position.page.get(),
+                x: position.point.x.to_pt(),
+                y: position.point.y.to_pt(),
+            },
+        })
     }
 
     /// Computes completions at `cursor` within the file at `path`, compiling
@@ -96,6 +257,12 @@ impl Session {
     /// Returns `None` if either path is unknown or if there is nothing to
     /// complete at the cursor. Set `explicit` when the user asked for
     /// completions themselves rather than just typing.
+    ///
+    /// The cached document is passed along when there is one for the same main
+    /// file, which is what makes label completions appear. It is deliberately
+    /// _not_ recompiled here, even if it is stale: completions run on every
+    /// keystroke, and a slightly outdated set of labels is far better than a
+    /// full layout per character.
     pub fn autocomplete_impl(
         &mut self,
         main_path: &str,
@@ -107,7 +274,7 @@ impl Session {
         let cursor = sanitize_cursor(source.text(), cursor);
         let (from, completions) = typst_ide::autocomplete(
             &self.world,
-            Option::<&PagedDocument>::None,
+            self.cached_document(),
             &source,
             cursor,
             explicit,
@@ -119,7 +286,8 @@ impl Session {
     /// in the context of `main_path`.
     ///
     /// Returns `None` if either path is unknown or if there is nothing to show
-    /// at the cursor.
+    /// at the cursor. Uses the cached document under the same rules as
+    /// [`Self::autocomplete_impl`].
     pub fn tooltip_impl(
         &mut self,
         main_path: &str,
@@ -130,7 +298,7 @@ impl Session {
         let cursor = sanitize_cursor(source.text(), cursor);
         typst_ide::tooltip(
             &self.world,
-            Option::<&PagedDocument>::None,
+            self.cached_document(),
             &source,
             cursor,
             Side::Before,
@@ -138,11 +306,64 @@ impl Session {
         .map(TooltipResult::from)
     }
 
-    /// Points the world at `main_path` and retrieves the source at `path`.
-    fn prepare(&mut self, main_path: &str, path: &str) -> Option<typst::syntax::Source> {
+    /// Points the world at `main_path`, returning its file id.
+    ///
+    /// Returns `None` if the path is malformed.
+    fn select_main(&mut self, main_path: &str) -> Option<FileId> {
         let main = self::world::file_id(main_path)?;
         self.world.set_main(main);
+        Some(main)
+    }
+
+    /// Points the world at `main_path` and retrieves the source at `path`.
+    fn prepare(&mut self, main_path: &str, path: &str) -> Option<Source> {
+        self.select_main(main_path)?;
         self.world.source_at(path)
+    }
+
+    /// The cached document, if it belongs to the currently selected main file.
+    ///
+    /// May be stale — see [`Self::autocomplete_impl`].
+    fn cached_document(&self) -> Option<&PagedDocument> {
+        if self.document_main != Some(self.world.main()) {
+            return None;
+        }
+        self.document.as_ref()
+    }
+
+    /// Recompiles if the cached document does not match the current state of
+    /// the world.
+    ///
+    /// A document is stale both when a file changed and when it was compiled
+    /// from a different main file. Compilation errors are dropped here; the
+    /// callers of this treat "no document" and "broken project" alike.
+    fn ensure_document(&mut self, main: FileId) {
+        if self.dirty || self.document_main != Some(main) {
+            let _ = self.compile(main);
+        }
+    }
+
+    /// Compiles the world as it stands and caches the outcome.
+    fn compile(&mut self, main: FileId) -> Result<(), Vec<String>> {
+        let compiled = typst::compile::<PagedDocument>(&self.world);
+
+        // The session is long-lived and memoized layout results would
+        // otherwise accumulate for every keystroke's worth of edits. This
+        // matches what the CLI's watch loop does after each recompilation.
+        comemo::evict(EVICT_MAX_AGE);
+
+        self.dirty = false;
+        self.document_main = Some(main);
+        match compiled.output {
+            Ok(document) => {
+                self.document = Some(document);
+                Ok(())
+            }
+            Err(errors) => {
+                self.document = None;
+                Err(errors.iter().map(|error| error.message.to_string()).collect())
+            }
+        }
     }
 }
 
@@ -179,6 +400,124 @@ mod tests {
         }
         s.add_source("main.typ", text);
         s
+    }
+
+    #[test]
+    fn cursor_jump_lands_on_a_page() {
+        let mut s = session_with("= Heading\n\nSome text here.");
+        s.compile_impl("main.typ").expect("compiles");
+        let positions = s.jump_from_cursor_impl("main.typ", "main.typ", 14);
+        assert!(!positions.is_empty());
+        assert_eq!(positions[0].page, 1);
+    }
+
+    #[test]
+    fn click_jump_resolves_back_to_source() {
+        let mut s = session_with("= Heading\n\nSome text here.");
+        s.compile_impl("main.typ").expect("compiles");
+        let positions = s.jump_from_cursor_impl("main.typ", "main.typ", 14);
+        let p = &positions[0];
+        let jump = s.jump_from_click_impl("main.typ", p.page, p.x, p.y).expect("jump");
+        match jump {
+            JumpResult::File { path, .. } => assert_eq!(path, "main.typ"),
+            other => panic!("expected file jump, got {other:?}"),
+        }
+    }
+
+    /// `read` goes through `World::file`, which must serve files that were
+    /// handed to the session as sources — the assertion inside the document
+    /// fails the compilation if the bytes come back wrong.
+    #[test]
+    fn read_serves_source_files() {
+        let mut s = session_with("#assert.eq(read(\"chapter.typ\"), \"= Ch\")");
+        s.add_source("chapter.typ", "= Ch");
+        s.compile_impl("main.typ")
+            .unwrap_or_else(|errors| panic!("compile failed: {errors:?}"));
+    }
+
+    #[test]
+    fn an_edit_invalidates_the_cached_document() {
+        let mut s = session_with("Some text here.");
+        s.compile_impl("main.typ").expect("compiles");
+        let before = s.jump_from_cursor_impl("main.typ", "main.typ", 2);
+        assert!(!before.is_empty());
+
+        // Push the paragraph down the page. Without invalidation the jump
+        // would still report the old, higher position.
+        s.add_source("main.typ", "#v(100pt)\nSome text here.");
+        let after = s.jump_from_cursor_impl("main.typ", "main.typ", 12);
+        assert!(!after.is_empty());
+        assert!(
+            after[0].y > before[0].y + 50.0,
+            "expected the text to move down, got {} then {}",
+            before[0].y,
+            after[0].y
+        );
+    }
+
+    /// Label completions are the reason the document is threaded into
+    /// `autocomplete` at all, so they double as the proof that it is.
+    #[test]
+    fn label_completions_come_from_the_cached_document() {
+        let mut s = session_with("= Heading <intro>\n\n@");
+        let without = s.autocomplete_impl("main.typ", "main.typ", 20, true);
+        assert!(
+            !without.is_some_and(|r| r.completions.iter().any(|c| c.label == "intro")),
+            "there is no document yet, so there are no labels to offer"
+        );
+
+        s.compile_impl("main.typ").expect("compiles");
+        let with = s
+            .autocomplete_impl("main.typ", "main.typ", 20, true)
+            .expect("completions");
+        assert!(with.completions.iter().any(|c| c.label == "intro"));
+    }
+
+    #[test]
+    fn jumps_yield_nothing_on_bad_input() {
+        let mut s = session_with("= Heading\n\nSome text here.");
+        // Malformed main path: no file id can be built.
+        assert!(s.jump_from_cursor_impl("../escape.typ", "main.typ", 14).is_empty());
+        assert!(s.jump_from_click_impl("../escape.typ", 1, 10.0, 10.0).is_none());
+        // Unknown file to jump from.
+        assert!(s.jump_from_cursor_impl("main.typ", "missing.typ", 14).is_empty());
+        // Pages are 1-based, and there is only one of them.
+        assert!(s.jump_from_click_impl("main.typ", 0, 10.0, 10.0).is_none());
+        assert!(s.jump_from_click_impl("main.typ", 99, 10.0, 10.0).is_none());
+        // A click on the empty margin has nothing under it.
+        assert!(s.jump_from_click_impl("main.typ", 1, 1.0, 1.0).is_none());
+    }
+
+    #[test]
+    fn jump_results_serialize_to_the_documented_shape() {
+        let mut s = session_with("= Heading\n\nSome text here.");
+        s.compile_impl("main.typ").expect("compiles");
+
+        let positions = s.jump_from_cursor_impl("main.typ", "main.typ", 14);
+        let json = serde_json::to_value(positions[0]).expect("serializable");
+        assert_eq!(json["page"], 1);
+        assert!(json["x"].as_f64().is_some_and(|x| x > 0.0));
+        assert!(json["y"].as_f64().is_some_and(|y| y > 0.0));
+
+        let p = positions[0];
+        let jump = s.jump_from_click_impl("main.typ", p.page, p.x, p.y).expect("jump");
+        let json = serde_json::to_value(&jump).expect("serializable");
+        assert_eq!(json["kind"], "file");
+        assert_eq!(json["path"], "main.typ");
+        assert!(json["offset"].is_u64());
+    }
+
+    #[test]
+    fn clicking_a_link_yields_its_url() {
+        let mut s = session_with("#link(\"https://typst.app\")[Go]");
+        s.compile_impl("main.typ").expect("compiles");
+        // Byte 28 sits inside the `Go` text node.
+        let positions = s.jump_from_cursor_impl("main.typ", "main.typ", 28);
+        let p = positions[0];
+        let jump = s.jump_from_click_impl("main.typ", p.page, p.x, p.y).expect("jump");
+        let json = serde_json::to_value(&jump).expect("serializable");
+        assert_eq!(json["kind"], "url");
+        assert_eq!(json["url"], "https://typst.app");
     }
 
     #[test]
@@ -284,6 +623,15 @@ mod tests {
         // Well past the end of the text.
         let _ = s.autocomplete_impl("main.typ", "main.typ", 9_999, true);
         let _ = s.tooltip_impl("main.typ", "main.typ", 9_999);
+
+        // The jump path takes a cursor too, so it carries the same contract.
+        // The document has to compile for the offset to reach the sanitizer,
+        // hence a plain paragraph rather than the code expression above.
+        let mut s = session_with("héllo wörld");
+        s.compile_impl("main.typ").expect("compiles");
+        // `é` occupies bytes 1..3.
+        let _ = s.jump_from_cursor_impl("main.typ", "main.typ", 2);
+        let _ = s.jump_from_cursor_impl("main.typ", "main.typ", 9_999);
     }
 
     #[test]

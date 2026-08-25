@@ -19,6 +19,7 @@ crate-type = ["cdylib", "rlib"]
 typst = { workspace = true }
 typst-ide = { workspace = true }
 typst-layout = { workspace = true }
+comemo = { workspace = true }
 ecow = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }

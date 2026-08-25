@@ -3396,6 +3396,7 @@ dependencies = [
 name = "typst-ide-wasm"
 version = "0.15.0"
 dependencies = [
+ "comemo",
  "ecow",
  "rustc-hash",
  "serde",
