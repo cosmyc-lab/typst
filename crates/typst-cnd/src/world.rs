@@ -28,6 +28,7 @@ pub struct CndWorld {
 
 fn build_library() -> Library {
     let mut library = Library::builder().build();
+    // DEPRECATED — see crate::cnd's module doc. Removal tracked for the next release.
     library.global.scope_mut().define("cnd", crate::cnd::module());
     library
 }

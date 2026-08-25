@@ -1,3 +1,7 @@
+//! DEPRECATED: superseded by the pure-Typst authoring package shipped in cnd-sdk (src/cnd/typst/cnd.typ, ADR 0023 there).
+//! The global injection below is kept for one release so existing fixtures keep compiling, then removed.
+//! New documents should `#import` the package instead.
+//!
 //! CND Typst module for metadata flags and authoring helpers.
 //!
 //! This module is the "CND authoring SDK" surface: native functions
