@@ -1,0 +1,35 @@
+[package]
+name = "typst-ide-wasm"
+description = "Browser (wasm-bindgen) bindings for typst-ide."
+version = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+readme = { workspace = true }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+typst = { workspace = true }
+typst-ide = { workspace = true }
+typst-layout = { workspace = true }
+ecow = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+
+[dev-dependencies]
+typst-assets = { workspace = true, features = ["fonts"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
