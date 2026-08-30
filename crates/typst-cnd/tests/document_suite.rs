@@ -1129,3 +1129,29 @@ fn example_files_exist() {
         );
     }
 }
+
+#[test]
+fn heading_show_rules_do_not_duplicate_headings_as_paragraphs() {
+    // A show rule that re-emits `it.body` inside fresh markup realizes an
+    // extra paragraph carrying the heading's own text; the emitter must
+    // keep exactly the author's paragraphs.
+    let cnd = cnd_for_example("heading_show_rules.typ");
+    let headings = heading_texts(&cnd.nodes);
+    assert_eq!(
+        headings,
+        vec!["1. Overview", "1.1 Details", "2. Operations"],
+        "headings should survive custom show rules"
+    );
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    assert_eq!(
+        paragraphs.len(),
+        3,
+        "exactly the three authored paragraphs, got: {paragraphs:?}"
+    );
+    for heading in &headings {
+        assert!(
+            !paragraphs.iter().any(|p| p == heading),
+            "heading {heading:?} duplicated as a paragraph: {paragraphs:?}"
+        );
+    }
+}

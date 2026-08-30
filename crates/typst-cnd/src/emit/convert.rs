@@ -349,6 +349,12 @@ fn build_skip_ranges(engine: &Engine, introspector: &dyn Introspector) -> Vec<So
         EnumElem::ELEM.select(),
         TermsElem::ELEM.select(),
         FigureElem::ELEM.select(),
+        // A heading show rule that re-emits `it.body` inside fresh markup
+        // (`it => [ … #text(…, it.body) … ]`) realizes an extra ParElem
+        // whose span is the heading's own body — inside the heading's
+        // source range, so this selector catches it the same way a quote's
+        // body paragraph is caught by the quote's range.
+        HeadingElem::ELEM.select(),
     ];
     let mut ranges = Vec::new();
     for selector in selectors {
@@ -464,6 +470,18 @@ fn build_skip_paragraph_texts(introspector: &dyn Introspector) -> FxHashSet<Stri
         if let Some(caption) = figure.caption.get_cloned(StyleChain::default()) {
             push_text_key(&mut skip, &extract::extract_text(&caption.body));
         }
+    }
+
+    // Heading bodies, as the text-key net behind the range check above: a
+    // show rule can hand the body to synthesized content whose spans are
+    // detached (no source range to contain), yet the re-emitted paragraph
+    // still reads as the heading's own text. Same prefix-tolerant matching
+    // (and the same accepted trade-off) as every other kind here.
+    for elem in introspector.query(&HeadingElem::ELEM.select()) {
+        let Some(heading) = elem.to_packed::<HeadingElem>() else {
+            continue;
+        };
+        push_text_key(&mut skip, &extract::extract_text(&heading.body));
     }
 
     skip
