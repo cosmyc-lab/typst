@@ -12,6 +12,7 @@ use typst_library::model::{
     ListItem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
+use typst_library::visualize::ImageElem;
 use typst_syntax::{FileId, Span};
 use uuid::Uuid;
 
@@ -106,6 +107,7 @@ fn doc_selector() -> Selector {
         ListElem::ELEM.select(),
         EnumElem::ELEM.select(),
         TermsElem::ELEM.select(),
+        ImageElem::ELEM.select(),
     ])
 }
 
@@ -537,6 +539,32 @@ pub fn convert_from_introspector(
         items.push((loc, elem));
     }
 
+    // Bare images only: the CND model's "bare image outside any figure is
+    // an ImageNode with no wrapper". An image inside a figure is emitted as
+    // that figure's child (figure::from_figure); one inside a table cell or
+    // any other skipped container belongs to its container's text.
+    let image_skip_ranges: Vec<SourceRange> = {
+        let mut ranges = skip_ranges.clone();
+        for elem in introspector.query(&TableElem::ELEM.select()) {
+            if let Some(range) = source_range(engine, elem.span()) {
+                ranges.push(range);
+            }
+        }
+        ranges
+    };
+    for elem in introspector.query(&ImageElem::ELEM.select()) {
+        let Some(loc) = elem.location() else { continue };
+        if let Some(range) = source_range(engine, elem.span()) {
+            if image_skip_ranges
+                .iter()
+                .any(|outer| range_contains(*outer, range))
+            {
+                continue;
+            }
+        }
+        items.push((loc, elem));
+    }
+
     for elem in introspector.query(&HeadingElem::ELEM.select()) {
         let Some(loc) = elem.location() else { continue };
         items.push((loc, elem));
@@ -652,6 +680,10 @@ fn dispatch(
         let (node, record) = math::convert(engine, introspector, equation, styles)?;
         ctx.register(node.base.id, record);
         push_node(CndNode::Math(node), ctx, stack);
+    } else if let Some(image) = content.to_packed::<ImageElem>() {
+        let (node, record) = figure::bare_image(engine, introspector, content, image, styles)?;
+        ctx.register(node.base.id, record);
+        push_node(CndNode::Image(node), ctx, stack);
     } else if let Some(figure) = content.to_packed::<FigureElem>() {
         if let Some(table_content) = table::table_content_in(content) {
             if let Some(table_elem) = table_content.to_packed::<TableElem>() {

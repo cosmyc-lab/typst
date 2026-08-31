@@ -69,6 +69,27 @@ pub fn from_figure(
     Ok((node, records))
 }
 
+/// Convert a bare `#image(...)` outside any figure into a standalone
+/// `ImageNode` — the "bare image outside any figure is an `ImageNode` with
+/// no wrapper" shape the CND model allows. Images inside figures never
+/// reach this: `convert`'s collection loop skips any image whose source
+/// range falls inside a figure (or other container), and the figure emits
+/// it as its own child instead.
+pub fn bare_image(
+    engine: &mut Engine,
+    introspector: &dyn Introspector,
+    content: &Content,
+    image: &Packed<ImageElem>,
+    styles: StyleChain,
+) -> typst_library::diag::SourceResult<(ImageNode, NodeRecord)> {
+    let record = convert::make_record(engine, introspector, content, &[])?;
+    let id = Uuid::new_v4();
+    let mut node = ImageNode::new(id, placeholder_location());
+    node.alt = image.alt.get_cloned(styles).map(Into::into);
+    node.path = image_path(image);
+    Ok((node, record))
+}
+
 /// A record carrying only a location, for a figure's synthetic child node —
 /// nothing else is inherited from the wrapper (ADR 0010).
 fn minimal_record(content: &Content) -> NodeRecord {
