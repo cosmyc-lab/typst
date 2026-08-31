@@ -835,6 +835,47 @@ fn image_figure_carries_path_and_alt() {
 }
 
 #[test]
+fn bare_image_emits_a_standalone_image_node() {
+    // "A bare image outside any figure is an ImageNode with no wrapper"
+    // (the CND model's own words) — not silence. Regression: the emitter
+    // used to extract images only inside `#figure`, so a document whose
+    // only visual was a bare `#image(...)` indexed with no image node at
+    // all, and nothing downstream could ever find or show it.
+    let cnd = cnd_for_example("bare_image.typ");
+    let mut stats = NodeStats::default();
+    walk_nodes(&cnd.nodes, &mut stats);
+    assert_eq!(stats.images, 1, "the bare image is a standalone ImageNode");
+    assert_eq!(stats.figures, 0, "no figure wrapper is invented for it");
+    assert_eq!(stats.paragraphs, 2, "the two authored paragraphs survive");
+
+    fn find_image(nodes: &[CndNode]) -> Option<&typst_cnd::ImageNode> {
+        nodes.iter().find_map(|n| match n {
+            CndNode::Image(img) => Some(img),
+            CndNode::Heading(h) => find_image(&h.children),
+            _ => None,
+        })
+    }
+    let image = find_image(&cnd.nodes).expect("standalone image node under the heading");
+    assert!(
+        image.path.as_deref().is_some_and(|p| p.contains("newsletter-cover.png")),
+        "image path preserved: {:?}",
+        image.path
+    );
+    assert_eq!(image.alt.as_deref(), Some("Cover art, bare"));
+}
+
+#[test]
+fn figure_wrapped_image_is_not_also_emitted_bare() {
+    // The bare-image collection must not double-emit an image that a
+    // figure already carries as its child.
+    let cnd = cnd_for_example("image_figure.typ");
+    let mut stats = NodeStats::default();
+    walk_nodes(&cnd.nodes, &mut stats);
+    assert_eq!(stats.images, 1, "exactly the figure's child, no bare twin");
+    assert_eq!(stats.figures, 1);
+}
+
+#[test]
 fn footnotes_pool_and_edges() {
     let cnd = cnd_for_example("footnotes.typ");
 
@@ -1118,6 +1159,7 @@ fn example_files_exist() {
         "rich.typ",
         "terms.typ",
         "image_figure.typ",
+        "bare_image.typ",
         "footnotes.typ",
         "citations.typ",
         "nonflat_markers.typ",
@@ -1126,6 +1168,32 @@ fn example_files_exist() {
         assert!(
             example_path(name).is_file(),
             "missing example file: {name}"
+        );
+    }
+}
+
+#[test]
+fn heading_show_rules_do_not_duplicate_headings_as_paragraphs() {
+    // A show rule that re-emits `it.body` inside fresh markup realizes an
+    // extra paragraph carrying the heading's own text; the emitter must
+    // keep exactly the author's paragraphs.
+    let cnd = cnd_for_example("heading_show_rules.typ");
+    let headings = heading_texts(&cnd.nodes);
+    assert_eq!(
+        headings,
+        vec!["1. Overview", "1.1 Details", "2. Operations"],
+        "headings should survive custom show rules"
+    );
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    assert_eq!(
+        paragraphs.len(),
+        3,
+        "exactly the three authored paragraphs, got: {paragraphs:?}"
+    );
+    for heading in &headings {
+        assert!(
+            !paragraphs.iter().any(|p| p == heading),
+            "heading {heading:?} duplicated as a paragraph: {paragraphs:?}"
         );
     }
 }
