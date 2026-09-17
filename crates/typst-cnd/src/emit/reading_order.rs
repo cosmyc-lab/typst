@@ -5,8 +5,6 @@
 //! column-major for LTR text — top-to-bottom within a column, then the next
 //! column to the right.
 
-use std::cmp::Ordering;
-
 use typst_library::foundations::Selector;
 use typst_library::introspection::{Introspector, Location};
 use typst_library::layout::Abs;
@@ -55,17 +53,6 @@ fn reading_key(
 fn abs_key(value: Abs) -> i64 {
     // Fixed-point key stable across Abs representations.
     (value.to_pt() * 1_000.0).round() as i64
-}
-
-/// Compare two locations in reading order (useful for tests).
-pub fn compare_locations(
-    introspector: &dyn Introspector,
-    doc_selector: &Selector,
-    left: Location,
-    right: Location,
-) -> Ordering {
-    reading_key(introspector, doc_selector, left)
-        .cmp(&reading_key(introspector, doc_selector, right))
 }
 
 #[cfg(test)]
