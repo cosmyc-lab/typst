@@ -1270,4 +1270,11 @@ fn layout_container_content_is_not_lost() {
         !joined.contains("RUNNING FOOTER"),
         "page furniture leaked into the document body: {paragraphs:?}"
     );
+
+    // A hard line break carries no text of its own; without a separator the
+    // words on either side of it run together.
+    assert!(
+        paragraphs.iter().any(|p| p.contains("first line second line")),
+        "hard line break did not separate the lines, got {paragraphs:?}"
+    );
 }

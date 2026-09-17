@@ -2,6 +2,7 @@ use ecow::EcoString;
 use typst_library::foundations::{Content, Label, PlainText, Value};
 use typst_library::introspection::{Location, Tag, TagElem};
 use typst_library::model::{CitationForm, CiteElem, FootnoteElem, LinkMarker, RefElem};
+use typst_library::text::LinebreakElem;
 
 /// Extract plain text from content without duplicating inline code.
 ///
@@ -109,6 +110,18 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
     if content.to_packed::<FootnoteElem>().is_some()
         || content.to_packed::<CiteElem>().is_some()
     {
+        return;
+    }
+
+    // A hard line break (`\\`) renders as a new line but carries no text, so
+    // `PlainText` yields nothing for it and the words on either side would be
+    // run together ("Plateforme de calcul \\ de coût" -> "calculde coût").
+    // A node's `text` is one flat string, so the break becomes a space.
+    if content.to_packed::<LinebreakElem>().is_some() {
+        if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+            out.push(' ');
+            ctx.pos += 1;
+        }
         return;
     }
 

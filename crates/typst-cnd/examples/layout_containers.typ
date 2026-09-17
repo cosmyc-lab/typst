@@ -43,3 +43,5 @@ A paragraph where #chip[idem] repeats a word the sentence itself uses: idem.
 )
 
 #place(bottom + left, block(width: 100%)[Placed punch line at the bottom.])
+
+Hard break here: first line \ second line.
