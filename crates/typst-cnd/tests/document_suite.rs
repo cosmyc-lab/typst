@@ -394,15 +394,28 @@ fn newsletter_dashing_dept_news_template() {
 
     let sixtus = find_heading(&cnd.nodes, "Sixtus Award").expect("sixtus heading");
     let CndNode::Heading(sixtus) = sixtus else { panic!() };
-    assert!(
-        sixtus
-            .children
-            .iter()
-            .filter(|c| matches!(c, CndNode::Paragraph(_)))
-            .count()
-            >= 5,
-        "award section should contain multiple paragraphs"
+    let sixtus_paragraphs: Vec<&str> = sixtus
+        .children
+        .iter()
+        .filter_map(|c| match c {
+            CndNode::Paragraph(p) => Some(p.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sixtus_paragraphs.len(),
+        4,
+        "award section has exactly four prose paragraphs, got {sixtus_paragraphs:?}"
     );
+    // The quote's attribution and the figure's caption belong to the
+    // QuoteNode and FigureNode respectively; they must not also surface as
+    // paragraphs of the section.
+    for leaked in ["Prof. Herzog", "Our new department rectangle"] {
+        assert!(
+            !sixtus_paragraphs.iter().any(|p| p.contains(leaked)),
+            "container content {leaked:?} leaked into a paragraph: {sixtus_paragraphs:?}"
+        );
+    }
 }
 
 #[test]
@@ -1196,4 +1209,65 @@ fn heading_show_rules_do_not_duplicate_headings_as_paragraphs() {
             "heading {heading:?} duplicated as a paragraph: {paragraphs:?}"
         );
     }
+}
+
+/// Text carried by a layout-only container — a `block`, a grid cell, a
+/// `place`, a user function's output — must reach the CND.
+///
+/// Typst does not build a `ParElem` for a fragment body that is entirely
+/// inline, so such text is laid out but never located, and the emit pipeline
+/// (which reads `Introspector::query`) cannot see it. `Feature::CndSemantics`
+/// forces the paragraph to exist; `emit::ancestry` then keeps the extra
+/// paragraphs that creates from duplicating text that is already emitted.
+#[test]
+fn layout_container_content_is_not_lost() {
+    let cnd = cnd_for_example("layout_containers.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    let joined = paragraphs.join("\n");
+
+    for expected in [
+        // `block(..)[..]` emitted by a user function, both of whose blocks
+        // hold nothing but inline content.
+        "KICKER LINE",
+        "Title inside a block",
+        // A card: the title, then one block per item, inside a grid cell.
+        "LEFT CARD",
+        "Left item one",
+        "Left item two",
+        "RIGHT CARD",
+        "Right item one",
+        "Right item two",
+        // A `place`d block.
+        "Placed punch line at the bottom.",
+    ] {
+        assert!(
+            paragraphs.iter().any(|p| p.contains(expected)),
+            "container content {expected:?} missing from the CND, got {paragraphs:?}"
+        );
+    }
+
+    // An inline `box` is part of its enclosing paragraph, which already
+    // renders its text — it must not also become a paragraph of its own.
+    for chip in ["FIRST CHIP", "SECOND CHIP"] {
+        assert_eq!(
+            joined.matches(chip).count(),
+            1,
+            "inline box content {chip:?} was emitted more than once: {paragraphs:?}"
+        );
+    }
+
+    // Dedup keys off the *nearest* enclosing paragraph only, and must not
+    // swallow words the surrounding sentence uses in its own right.
+    assert!(
+        paragraphs
+            .iter()
+            .any(|p| p == "A paragraph where idem repeats a word the sentence itself uses: idem."),
+        "a box whose text recurs in its own sentence lost content, got {paragraphs:?}"
+    );
+
+    // A running footer is page furniture, repeated on every page.
+    assert!(
+        !joined.contains("RUNNING FOOTER"),
+        "page furniture leaked into the document body: {paragraphs:?}"
+    );
 }

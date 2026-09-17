@@ -274,10 +274,28 @@ pub enum Feature {
     Html,
     Bundle,
     A11yExtras,
+    /// Fork-local (CND export): force every fully-inline fragment body to be
+    /// realized into a real `ParElem` instead of being flattened into loose
+    /// inline content.
+    ///
+    /// Typst normally skips building a `ParElem` when a fragment (the body of
+    /// a `block`, a grid cell, a `place`, a `box`, …) turns out to be entirely
+    /// inline — see `is_fully_inline_or_neutral` in `typst-realize`. Such text
+    /// is laid out correctly but never gets a `Location`, so it is invisible
+    /// to `Introspector::query` and therefore missing from the CND export.
+    ///
+    /// This is deliberately **not** listed in [`Feature::all`]: unlike the
+    /// other variants it is not a feature to trial, it changes layout (an
+    /// inline fragment becomes `FlowMode::Block`) and must never be switched
+    /// on for PDF/HTML/SVG output. It is enabled only by `typst-cnd`'s own
+    /// world, whose sole output is the CND semantic tree.
+    CndSemantics,
 }
 
 impl Feature {
     /// Iterates over all available features.
+    ///
+    /// Excludes [`Feature::CndSemantics`] on purpose — see its docs.
     pub fn all() -> impl Iterator<Item = Self> {
         [Self::Html, Self::Bundle, Self::A11yExtras].into_iter()
     }

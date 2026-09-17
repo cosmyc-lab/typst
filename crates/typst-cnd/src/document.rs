@@ -9,6 +9,7 @@ use typst_library::introspection::Introspector;
 use typst_library::model::{Document, DocumentInfo};
 use typst_syntax::Span;
 
+use crate::emit::ancestry::Ancestry;
 use crate::emit::convert::{self, ConvertContext};
 use crate::emit::{pools, refs};
 use crate::location::LocationAssigner;
@@ -68,12 +69,18 @@ impl Output for CndDocument {
         let introspector = paged.introspector().clone();
         let info = paged.info().clone();
 
+        // Containment is read off the laid-out frames: `Introspector::query`
+        // returns a flat list, but the emit pipeline must know which located
+        // elements sit inside a paragraph or inside page furniture.
+        let ancestry = Ancestry::from_document(&paged);
+
         let mut ctx = realize_and_convert(
             engine,
             introspector.as_ref(),
             content,
             styles,
             &info,
+            &ancestry,
         )?;
         refs::rebuild_label_index(&mut ctx, introspector.as_ref());
         convert::apply_metadata(&mut ctx);
@@ -116,6 +123,7 @@ fn realize_and_convert(
     _content: &Content,
     styles: StyleChain,
     info: &DocumentInfo,
+    ancestry: &Ancestry,
 ) -> SourceResult<ConvertContext> {
     let mut ctx = ConvertContext::default();
     crate::emit::convert::convert_from_introspector(
@@ -123,6 +131,7 @@ fn realize_and_convert(
         introspector,
         styles,
         doc_lang_from_info(info),
+        ancestry,
         &mut ctx,
     )?;
     Ok(ctx)

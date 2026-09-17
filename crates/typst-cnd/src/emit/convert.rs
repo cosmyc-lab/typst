@@ -16,6 +16,7 @@ use typst_library::visualize::ImageElem;
 use typst_syntax::{FileId, Span};
 use uuid::Uuid;
 
+use crate::emit::ancestry::Ancestry;
 use crate::emit::extract::{ExtractedMarker, MarkerKind};
 use crate::emit::{code, extract, figure, heading, list, math, paragraph, quote, reading_order, table};
 use crate::model::{CndNode, HeadingNode};
@@ -517,6 +518,7 @@ pub fn convert_from_introspector(
     introspector: &dyn Introspector,
     styles: StyleChain,
     doc_lang: Option<EcoString>,
+    ancestry: &Ancestry,
     ctx: &mut ConvertContext,
 ) -> typst_library::diag::SourceResult<()> {
     let skip_ranges = build_skip_ranges(engine, introspector);
@@ -617,11 +619,29 @@ pub fn convert_from_introspector(
     for elem in introspector.query(&ParElem::ELEM.select()) {
         let Some(par) = elem.to_packed::<ParElem>() else { continue };
         let Some(loc) = elem.location() else { continue };
+        // A paragraph whose text an enclosing paragraph already carries is
+        // the body of an inline `box`; emitting it would duplicate the text.
+        if ancestry.is_covered_by_par(loc) {
+            continue;
+        }
+        // Likewise for a paragraph inside a list, table, code block or
+        // equation: that container is emitted as its own node and renders
+        // this text itself.
+        if ancestry.is_in_emitted_container(loc) {
+            continue;
+        }
         if should_skip_paragraph(engine, par, &elem, &skip_ranges, &skip_texts) {
             continue;
         }
         items.push((loc, elem));
     }
+
+    // Page furniture (running headers and footers, page decorations) is
+    // marked as a PDF artifact by Typst's accessibility model, which defines
+    // it as not being document content. It is repeated on every page, so
+    // emitting it would add one copy of the footer — and one page number —
+    // per page.
+    items.retain(|(loc, _)| !ancestry.is_artifact(*loc));
 
     reading_order::sort_by_reading_order(&mut items, introspector, &doc_selector);
 
