@@ -283,15 +283,16 @@ fn find_labeled_table(ctx: &ConvertContext) -> Option<Uuid> {
 fn last_paragraph_under_heading(nodes: &[CndNode], heading_id: Uuid) -> Option<Uuid> {
     fn walk(nodes: &[CndNode], target: Uuid, last: &mut Option<Uuid>) -> bool {
         for node in nodes {
-            match node {
-                CndNode::Heading(n) if n.base.id == target => {
-                    find_last_paragraph(&n.children, last);
-                    return true;
-                }
-                CndNode::Heading(n) if walk(&n.children, target, last) => {
-                    return true;
-                }
-                _ => {}
+            // Not a `match` with a guard: the recursive descent writes through
+            // `last`, and a side-effecting guard would run — or not — by arm
+            // order alone.
+            let CndNode::Heading(n) = node else { continue };
+            if n.base.id == target {
+                find_last_paragraph(&n.children, last);
+                return true;
+            }
+            if walk(&n.children, target, last) {
+                return true;
             }
         }
         false
