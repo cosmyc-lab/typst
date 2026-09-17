@@ -26,8 +26,11 @@ pub fn sort_by_reading_order(
     doc_selector: &Selector,
 ) {
     items.sort_by(|(loc_a, _), (loc_b, _)| {
-        reading_key(introspector, doc_selector, *loc_a)
-            .cmp(&reading_key(introspector, doc_selector, *loc_b))
+        reading_key(introspector, doc_selector, *loc_a).cmp(&reading_key(
+            introspector,
+            doc_selector,
+            *loc_b,
+        ))
     });
 }
 
@@ -36,10 +39,7 @@ fn reading_key(
     doc_selector: &Selector,
     location: Location,
 ) -> ReadingKey {
-    let page = introspector
-        .page(location)
-        .map(|page| page.get() as u32)
-        .unwrap_or(1);
+    let page = introspector.page(location).map(|page| page.get() as u32).unwrap_or(1);
     let (x, y) = introspector
         .position(location)
         .map(|pos| pos.as_paged_or_default().point)

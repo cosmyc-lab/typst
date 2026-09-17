@@ -1,14 +1,20 @@
 mod common;
 
 use common::{
-    all_example_files, assert_json_roundtrip, assert_cnd_contract,
-    assert_labels_globally_unique, assert_pool_refs_resolve,
-    assert_refs_resolve, assert_tag_sequence, assert_unique_ids, codepoint_slice, compile_example,
-    example_path, find_by_label, find_lists, heading_texts, incoming_count, label_exists,
-    cnd_for_example, paragraph_texts_in_order, table_stats, tags_under_heading, walk_nodes,
-    NodeStats,
+    NodeStats, all_example_files, assert_cnd_contract, assert_json_roundtrip,
+    assert_labels_globally_unique, assert_pool_refs_resolve, assert_refs_resolve,
+    assert_tag_sequence, assert_unique_ids, cnd_for_example, codepoint_slice,
+    compile_example, example_path, find_by_label, find_lists, heading_texts,
+    incoming_count, label_exists, paragraph_texts_in_order, table_stats,
+    tags_under_heading, walk_nodes,
 };
 use typst_cnd::{CndNode, TableKind};
+
+/// `(bibliography key, citation form, supplement)` on one node.
+type CiteTuple = (String, Option<String>, Option<String>);
+
+/// `(node text, bibliography key, citation form, the marker's text span)`.
+type CiteSpanTuple = (String, String, Option<String>, Option<Vec<i64>>);
 
 #[test]
 fn all_examples_compile() {
@@ -24,8 +30,7 @@ fn all_examples_compile() {
         let doc = compile_example(&name);
         assert!(
             !doc.nodes().is_empty() || name == "minimal.typ",
-            "{} produced no nodes",
-            name
+            "{name} produced no nodes"
         );
     }
 }
@@ -63,10 +68,7 @@ fn structured_cross_references() {
     let CndNode::Figure(figure) = figure else {
         panic!("expected figure node");
     };
-    assert_eq!(
-        figure.caption.as_deref(),
-        Some("Paramètres nominaux de fonctionnement.")
-    );
+    assert_eq!(figure.caption.as_deref(), Some("Paramètres nominaux de fonctionnement."));
     assert!(figure.number.as_deref().is_some_and(|n| n.contains('1')));
     let table = figure
         .children
@@ -76,7 +78,13 @@ fn structured_cross_references() {
             _ => None,
         })
         .expect("table child");
-    assert!(table.raw.as_ref().map(|r| r.value.as_str()).is_some_and(|r| r.contains("table(")));
+    assert!(
+        table
+            .raw
+            .as_ref()
+            .map(|r| r.value.as_str())
+            .is_some_and(|r| r.contains("table("))
+    );
     assert!(
         incoming_count(&cnd.nodes, figure.base.label.as_deref().expect("label")) > 0,
         "the captioned figure is a cross-reference target"
@@ -96,10 +104,7 @@ fn comprehensive_document_structure() {
         .iter()
         .filter(|n| matches!(n, CndNode::Paragraph(_)))
         .count();
-    assert_eq!(
-        root_paragraphs, 1,
-        "expected one pre-heading paragraph at document root"
-    );
+    assert_eq!(root_paragraphs, 1, "expected one pre-heading paragraph at document root");
     assert!(stats.paragraphs >= 8);
     assert!(stats.max_heading_level >= 3);
     assert_eq!(stats.tables, 4);
@@ -109,7 +114,8 @@ fn comprehensive_document_structure() {
     assert_eq!(tables.with_fig_number, 4);
     assert_eq!(tables.with_label, 4);
 
-    let arch = find_by_label(&cnd.nodes, "ch-architecture").expect("architecture heading");
+    let arch =
+        find_by_label(&cnd.nodes, "ch-architecture").expect("architecture heading");
     let CndNode::Heading(arch) = arch else {
         panic!("expected heading");
     };
@@ -121,8 +127,14 @@ fn comprehensive_document_structure() {
     let CndNode::Paragraph(para) = para else {
         panic!("expected paragraph");
     };
-    assert_eq!(para.base.state_metadata.get("revision").and_then(|v| v.as_str()), Some("4.2"));
-    assert_eq!(para.base.state_metadata.get("status").and_then(|v| v.as_str()), Some("approved"));
+    assert_eq!(
+        para.base.state_metadata.get("revision").and_then(|v| v.as_str()),
+        Some("4.2")
+    );
+    assert_eq!(
+        para.base.state_metadata.get("status").and_then(|v| v.as_str()),
+        Some("approved")
+    );
 
     assert_refs_resolve(&cnd.nodes);
 }
@@ -133,7 +145,11 @@ fn complex_multipage_spans_pages() {
     let mut stats = NodeStats::default();
     walk_nodes(&cnd.nodes, &mut stats);
 
-    assert!(stats.pages.len() >= 2, "expected content on multiple pages: {:?}", stats.pages);
+    assert!(
+        stats.pages.len() >= 2,
+        "expected content on multiple pages: {:?}",
+        stats.pages
+    );
     assert!(stats.headings >= 5);
     assert_eq!(stats.tables, 2);
 
@@ -145,11 +161,16 @@ fn complex_multipage_spans_pages() {
         .children
         .iter()
         .find_map(|n| match n {
-            CndNode::Paragraph(p) if p.base.state_metadata.contains_key("zone") => Some(p),
+            CndNode::Paragraph(p) if p.base.state_metadata.contains_key("zone") => {
+                Some(p)
+            }
             _ => None,
         })
         .expect("paragraph with zone metadata");
-    assert_eq!(para.base.state_metadata.get("criticality").and_then(|v| v.as_str()), Some("high"));
+    assert_eq!(
+        para.base.state_metadata.get("criticality").and_then(|v| v.as_str()),
+        Some("high")
+    );
 
     let tables = table_stats(&cnd.nodes);
     assert_eq!(tables.with_caption, 2);
@@ -182,7 +203,9 @@ fn complex_refs_dense_graph() {
     let CndNode::Figure(signaux) = signaux else {
         panic!("expected figure");
     };
-    assert!(incoming_count(&cnd.nodes, signaux.base.label.as_deref().expect("label")) >= 2);
+    assert!(
+        incoming_count(&cnd.nodes, signaux.base.label.as_deref().expect("label")) >= 2
+    );
 
     let regulation = find_by_label(&cnd.nodes, "sec-regulation").expect("regulation");
     let CndNode::Heading(regulation) = regulation else {
@@ -193,7 +216,8 @@ fn complex_refs_dense_graph() {
         .iter()
         .find_map(|n| match n {
             CndNode::Paragraph(p)
-                if p.base.state_metadata.get("domain").and_then(|v| v.as_str()) == Some("regulation") =>
+                if p.base.state_metadata.get("domain").and_then(|v| v.as_str())
+                    == Some("regulation") =>
             {
                 Some(p)
             }
@@ -216,7 +240,8 @@ fn complex_tables_standalone_and_figure_variants() {
     assert!(label_exists(&cnd.nodes, "tab-plages-a"));
     assert!(label_exists(&cnd.nodes, "tab-plages-b"));
 
-    let standalone = find_by_label(&cnd.nodes, "tab-config-standalone").expect("standalone");
+    let standalone =
+        find_by_label(&cnd.nodes, "tab-config-standalone").expect("standalone");
     let CndNode::Table(_standalone) = standalone else {
         panic!("expected bare table (standalone is not figure-wrapped)");
     };
@@ -263,8 +288,8 @@ fn complex_columns_reading_order_flatten() {
     assert_tag_sequence(
         &cnd.nodes,
         &[
-            "INTRO", "L1", "L2", "M1", "M2", "R1", "OUT-L", "IN-L1", "IN-R1", "OUT-R", "PC1",
-            "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "POST",
+            "INTRO", "L1", "L2", "M1", "M2", "R1", "OUT-L", "IN-L1", "IN-R1", "OUT-R",
+            "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "POST",
         ],
     );
 
@@ -284,9 +309,7 @@ fn complex_columns_reading_order_flatten() {
     );
     assert_eq!(
         tags_under_heading(&cnd.nodes, "ch-page-cols"),
-        (1..=8)
-            .map(|i| format!("PC{i}"))
-            .collect::<Vec<_>>()
+        (1..=8).map(|i| format!("PC{i}")).collect::<Vec<_>>()
     );
 
     let three_cols = find_by_label(&cnd.nodes, "sec-three-cols").expect("three cols");
@@ -386,10 +409,9 @@ fn newsletter_dashing_dept_news_template() {
     }
 
     fn find_heading<'a>(nodes: &'a [CndNode], needle: &str) -> Option<&'a CndNode> {
-        nodes.iter().find_map(|n| match n {
-            CndNode::Heading(h) if h.text.contains(needle) => Some(n),
-            _ => None,
-        })
+        nodes
+            .iter()
+            .find(|n| matches!(n, CndNode::Heading(h) if h.text.contains(needle)))
     }
 
     let sixtus = find_heading(&cnd.nodes, "Sixtus Award").expect("sixtus heading");
@@ -527,7 +549,9 @@ fn complex_semantic_all_node_types_and_xrefs() {
     let CndNode::Figure(signals) = signals else {
         panic!("expected figure");
     };
-    assert!(incoming_count(&cnd.nodes, signals.base.label.as_deref().expect("label")) >= 2);
+    assert!(
+        incoming_count(&cnd.nodes, signals.base.label.as_deref().expect("label")) >= 2
+    );
 
     let corpus = find_by_label(&cnd.nodes, "ch-corpus").expect("corpus");
     let CndNode::Heading(corpus) = corpus else {
@@ -586,7 +610,9 @@ fn complex_semantic_all_node_types_and_xrefs() {
     let lists = find_lists(&cnd.nodes);
     let bullet = lists
         .iter()
-        .find(|list| !list.ordered && list.items.iter().any(|item| !item.children.is_empty()))
+        .find(|list| {
+            !list.ordered && list.items.iter().any(|item| !item.children.is_empty())
+        })
         .expect("bullet list with nested children");
     assert_eq!(bullet.items.len(), 3);
     assert_eq!(bullet.items[1].children.len(), 2);
@@ -646,7 +672,8 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
     assert_tag_sequence(
         &cnd.nodes,
         &[
-            "HC-0", "HC-L1", "HC-R1", "HC-R2", "HC-NL", "HC-IL", "HC-IR", "TAIL-1", "TAIL-3",
+            "HC-0", "HC-L1", "HC-R1", "HC-R2", "HC-NL", "HC-IL", "HC-IR", "TAIL-1",
+            "TAIL-3",
         ],
     );
 
@@ -838,7 +865,10 @@ fn image_figure_carries_path_and_alt() {
         })
         .expect("image child");
     assert!(
-        image.path.as_deref().is_some_and(|p| p.contains("newsletter-cover.png")),
+        image
+            .path
+            .as_deref()
+            .is_some_and(|p| p.contains("newsletter-cover.png")),
         "image path preserved: {:?}",
         image.path
     );
@@ -870,7 +900,10 @@ fn bare_image_emits_a_standalone_image_node() {
     }
     let image = find_image(&cnd.nodes).expect("standalone image node under the heading");
     assert!(
-        image.path.as_deref().is_some_and(|p| p.contains("newsletter-cover.png")),
+        image
+            .path
+            .as_deref()
+            .is_some_and(|p| p.contains("newsletter-cover.png")),
         "image path preserved: {:?}",
         image.path
     );
@@ -908,13 +941,9 @@ fn footnotes_pool_and_edges() {
     fn walk(nodes: &[CndNode], out: &mut Vec<Vec<String>>) {
         for node in nodes {
             match node {
-                CndNode::Paragraph(p) => out.push(
-                    p.base
-                        .footnotes
-                        .iter()
-                        .map(|r| r.label.clone())
-                        .collect(),
-                ),
+                CndNode::Paragraph(p) => {
+                    out.push(p.base.footnotes.iter().map(|r| r.label.clone()).collect());
+                }
                 CndNode::Heading(h) => walk(&h.children, out),
                 _ => {}
             }
@@ -924,14 +953,19 @@ fn footnotes_pool_and_edges() {
     // The middle paragraph carries two markers (note 2 and the re-reference
     // to note 3); the last paragraph declares note 3.
     assert!(
-        edges.iter().any(|e| e.len() == 2 && e.contains(&"2".to_string()) && e.contains(&"3".to_string())),
+        edges.iter().any(|e| e.len() == 2
+            && e.contains(&"2".to_string())
+            && e.contains(&"3".to_string())),
         "a paragraph should carry both note 2 and the re-referenced note 3: {edges:?}"
     );
     assert!(edges.iter().any(|e| e == &vec!["1".to_string()]));
 
     // Text spans (ADR 0013): a footnote marker renders its ordinal digit
     // into the node text, so its span is 1 code point wide over that digit.
-    fn footnote_spans(nodes: &[CndNode], out: &mut Vec<(String, String, Option<Vec<i64>>)>) {
+    fn footnote_spans(
+        nodes: &[CndNode],
+        out: &mut Vec<(String, String, Option<Vec<i64>>)>,
+    ) {
         for node in nodes {
             match node {
                 CndNode::Paragraph(p) => {
@@ -986,27 +1020,22 @@ fn citations_bibliography_pool_and_cite_edges() {
         smith.formatted.as_deref().is_some_and(|f| !f.is_empty()),
         "formatted reference string present"
     );
-    assert!(
-        smith.fields.get("title").is_some(),
-        "fields carries the full source entry"
-    );
+    assert!(smith.fields.get("title").is_some(), "fields carries the full source entry");
 
     assert!(cnd.bibliography.iter().any(|b| b.label == "jones2022"));
 
     assert_pool_refs_resolve(&cnd);
 
     // Collect cite edges per paragraph.
-    let mut cites: Vec<Vec<(String, Option<String>, Option<String>)>> = Vec::new();
-    fn walk(nodes: &[CndNode], out: &mut Vec<Vec<(String, Option<String>, Option<String>)>>) {
+    let mut cites: Vec<Vec<CiteTuple>> = Vec::new();
+    fn walk(nodes: &[CndNode], out: &mut Vec<Vec<CiteTuple>>) {
         for node in nodes {
             match node {
                 CndNode::Paragraph(p) => out.push(
                     p.base
                         .cites
                         .iter()
-                        .map(|c| {
-                            (c.label.clone(), c.form.clone(), c.supplement.clone())
-                        })
+                        .map(|c| (c.label.clone(), c.form.clone(), c.supplement.clone()))
                         .collect(),
                 ),
                 CndNode::Heading(h) => walk(&h.children, out),
@@ -1019,16 +1048,24 @@ fn citations_bibliography_pool_and_cite_edges() {
 
     // Supplement, prose form, and suppressed (form: none) citation captured.
     assert!(
-        all.iter().any(|(k, f, s)| k == "smith2024" && f.as_deref() == Some("normal") && s.as_deref() == Some("p. 104")),
+        all.iter().any(|(k, f, s)| k == "smith2024"
+            && f.as_deref() == Some("normal")
+            && s.as_deref() == Some("p. 104")),
         "page-specific supplement captured: {all:?}"
     );
-    assert!(all.iter().any(|(k, f, _)| k == "jones2022" && f.as_deref() == Some("prose")));
-    assert!(all.iter().any(|(k, f, _)| k == "jones2022" && f.as_deref() == Some("none")));
+    assert!(
+        all.iter()
+            .any(|(k, f, _)| k == "jones2022" && f.as_deref() == Some("prose"))
+    );
+    assert!(
+        all.iter()
+            .any(|(k, f, _)| k == "jones2022" && f.as_deref() == Some("none"))
+    );
 
     // Text spans (ADR 0013): the rendered citation marker slices out of the
     // node text; a suppressed (form: none) citation has no marker, no span.
-    let mut spans: Vec<(String, String, Option<String>, Option<Vec<i64>>)> = Vec::new();
-    fn cite_spans(nodes: &[CndNode], out: &mut Vec<(String, String, Option<String>, Option<Vec<i64>>)>) {
+    let mut spans: Vec<CiteSpanTuple> = Vec::new();
+    fn cite_spans(nodes: &[CndNode], out: &mut Vec<CiteSpanTuple>) {
         for node in nodes {
             match node {
                 CndNode::Paragraph(p) => {
@@ -1054,9 +1091,9 @@ fn citations_bibliography_pool_and_cite_edges() {
         "the normal smith2024 citation's text_span slices to \"[1]\": {spans:?}"
     );
     assert!(
-        spans
-            .iter()
-            .any(|(_, k, f, sp)| k == "jones2022" && f.as_deref() == Some("none") && sp.is_none()),
+        spans.iter().any(|(_, k, f, sp)| k == "jones2022"
+            && f.as_deref() == Some("none")
+            && sp.is_none()),
         "a suppressed (form: none) citation has a null text_span"
     );
 
@@ -1094,11 +1131,7 @@ fn ref_text_spans_are_codepoint_offsets() {
             if let CndNode::Paragraph(p) = node {
                 for reference in &p.base.refs {
                     if let Some(span) = &reference.text_span {
-                        out.push((
-                            p.text.clone(),
-                            reference.label.clone(),
-                            span.clone(),
-                        ));
+                        out.push((p.text.clone(), reference.label.clone(), span.clone()));
                     }
                 }
             }
@@ -1178,10 +1211,7 @@ fn example_files_exist() {
         "nonflat_markers.typ",
         "newsletter/main.typ",
     ] {
-        assert!(
-            example_path(name).is_file(),
-            "missing example file: {name}"
-        );
+        assert!(example_path(name).is_file(), "missing example file: {name}");
     }
 }
 
@@ -1259,9 +1289,8 @@ fn layout_container_content_is_not_lost() {
     // Dedup keys off the *nearest* enclosing paragraph only, and must not
     // swallow words the surrounding sentence uses in its own right.
     assert!(
-        paragraphs
-            .iter()
-            .any(|p| p == "A paragraph where idem repeats a word the sentence itself uses: idem."),
+        paragraphs.iter().any(|p| p
+            == "A paragraph where idem repeats a word the sentence itself uses: idem."),
         "a box whose text recurs in its own sentence lost content, got {paragraphs:?}"
     );
 

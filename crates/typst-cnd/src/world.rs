@@ -47,9 +47,7 @@ impl CndWorld {
             .canonicalize()
             .map_err(|err| FileError::from_io(err, input))?;
 
-        let input = input
-            .canonicalize()
-            .map_err(|err| FileError::from_io(err, input))?;
+        let input = input.canonicalize().map_err(|err| FileError::from_io(err, input))?;
 
         let main = RootedPath::new(
             VirtualRoot::Project,

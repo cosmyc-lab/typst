@@ -16,7 +16,9 @@
 use typst_library::Category;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
-use typst_library::foundations::{Args, Construct, Content, Dict, Module, NativeFunc, Scope, Str, Value};
+use typst_library::foundations::{
+    Args, Construct, Content, Dict, Module, NativeFunc, Scope, Str, Value,
+};
 use typst_library::introspection::{State, StateUpdate};
 use typst_library::model::TableElem;
 
@@ -86,7 +88,8 @@ fn cnd_table(engine: &mut Engine, args: &mut Args) -> SourceResult<Content> {
     };
 
     let state = metadata_state();
-    let set_fn = cnd_set_content_kind::func().with(&mut Args::new(span, [Value::Str(kind)]));
+    let set_fn =
+        cnd_set_content_kind::func().with(&mut Args::new(span, [Value::Str(kind)]));
     let unset_fn = cnd_unset_content_kind::func();
 
     let before = state.clone().update(span, StateUpdate::Func(set_fn));

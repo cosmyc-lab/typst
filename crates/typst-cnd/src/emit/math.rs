@@ -22,7 +22,7 @@ pub fn convert(
     let mut equation = equation.clone();
     equation.synthesize(engine, styles)?;
 
-    let text: EcoString = extract_text(&equation.body);
+    let text = extract_text(&equation.body);
     let block = equation.block.get(styles);
     let numbering: Option<EcoString> = equation.numbering().and_then(|numbering| {
         let location = equation.location()?;

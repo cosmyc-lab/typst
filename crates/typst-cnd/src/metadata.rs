@@ -6,8 +6,8 @@ use comemo::Track;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Repr, Value};
-use typst_library::introspection::{Introspector, state_value_at};
 use typst_library::introspection::Location;
+use typst_library::introspection::{Introspector, state_value_at};
 
 use crate::cnd::metadata_state;
 
@@ -28,7 +28,9 @@ fn dict_value_to_metadata(value: &Value) -> HashMap<String, serde_json::Value> {
     };
 
     dict.iter()
-        .filter_map(|(key, value)| value_to_json(value).map(|json| (key.to_string(), json)))
+        .filter_map(|(key, value)| {
+            value_to_json(value).map(|json| (key.to_string(), json))
+        })
         .collect()
 }
 

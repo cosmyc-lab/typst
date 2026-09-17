@@ -13,7 +13,9 @@ use crate::emit::ancestry::Ancestry;
 use crate::emit::convert::{self, ConvertContext};
 use crate::emit::{pools, refs};
 use crate::location::LocationAssigner;
-use crate::model::{BibEntry, CND_VERSION, Cnd, DocDate, DocMetadata, Footnote, SourceInfo};
+use crate::model::{
+    BibEntry, CND_VERSION, Cnd, DocDate, DocMetadata, Footnote, SourceInfo,
+};
 
 /// A compiled CND document before JSON serialization.
 #[derive(Debug, Clone)]
@@ -103,13 +105,7 @@ impl Output for CndDocument {
         let mut assigner = LocationAssigner::new(introspector.clone(), ctx.records);
         assigner.assign_all(&mut nodes);
 
-        Ok(Self {
-            info,
-            nodes,
-            bibliography,
-            footnotes,
-            introspector,
-        })
+        Ok(Self { info, nodes, bibliography, footnotes, introspector })
     }
 
     fn introspector(&self) -> &dyn Introspector {
@@ -210,9 +206,6 @@ fn datetime_to_doc_date(dt: Datetime) -> DocDate {
 /// Serialize a CND to pretty JSON.
 pub fn cnd_to_json(cnd: &Cnd) -> SourceResult<String> {
     serde_json::to_string_pretty(cnd).map_err(|err| {
-        eco_vec![error!(
-            Span::detached(),
-            "failed to serialize CND: {err}"
-        )]
+        eco_vec![error!(Span::detached(), "failed to serialize CND: {err}")]
     })
 }

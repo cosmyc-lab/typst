@@ -21,8 +21,8 @@ use typst_library::introspection::{Location, Tag};
 use typst_library::layout::{Frame, FrameItem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    EnumElem, FigureElem, FootnoteEntry, HeadingElem, ListElem, ParElem, QuoteElem, TableElem,
-    TermsElem,
+    EnumElem, FigureElem, FootnoteEntry, HeadingElem, ListElem, ParElem, QuoteElem,
+    TableElem, TermsElem,
 };
 use typst_library::pdf::ArtifactElem;
 use typst_library::text::RawElem;
@@ -187,7 +187,8 @@ fn covered_by_enclosing_par(stack: &[Open], inner: &Content) -> bool {
     if text.is_empty() {
         return false;
     }
-    let Some(nearest) = stack.iter().rev().find_map(|open| open.par_text.as_deref()) else {
+    let Some(nearest) = stack.iter().rev().find_map(|open| open.par_text.as_deref())
+    else {
         return false;
     };
     collapse_whitespace(nearest).contains(&text)

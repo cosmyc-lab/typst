@@ -36,17 +36,16 @@ impl LocationAssigner {
     }
 
     pub fn assign_all(&mut self, nodes: &mut [CndNode]) {
-        let mut locations = rustc_hash::FxHashMap::<Uuid, NodeLocation>::default();
-        for (id, record) in &self.records {
-            if let Some(loc) = record.location {
-                let page = self
-                    .introspector
-                    .page(loc)
-                    .map(|p| p.get() as i32)
-                    .unwrap_or(1);
-                locations.insert(*id, NodeLocation { page });
-            }
-        }
+        let locations: rustc_hash::FxHashMap<Uuid, NodeLocation> = self
+            .records
+            .iter()
+            .filter_map(|(id, record)| {
+                let loc = record.location?;
+                let page =
+                    self.introspector.page(loc).map(|p| p.get() as i32).unwrap_or(1);
+                Some((*id, NodeLocation { page }))
+            })
+            .collect();
         assign_locations(nodes, &locations);
     }
 }

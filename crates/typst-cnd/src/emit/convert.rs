@@ -4,12 +4,14 @@ use ecow::{EcoString, eco_vec};
 use rustc_hash::FxHashSet;
 use typst_library::WorldExt;
 use typst_library::engine::Engine;
-use typst_library::foundations::{Content, Label, NativeElement, Packed, Selector, StyleChain};
+use typst_library::foundations::{
+    Content, Label, NativeElement, Packed, Selector, StyleChain,
+};
 use typst_library::introspection::{Introspector, Location, Tag, TagElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    CiteElem, EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteElem, HeadingElem, ListElem,
-    ListItem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
+    CiteElem, EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteElem, HeadingElem,
+    ListElem, ListItem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_library::visualize::ImageElem;
@@ -18,7 +20,9 @@ use uuid::Uuid;
 
 use crate::emit::ancestry::Ancestry;
 use crate::emit::extract::{ExtractedMarker, MarkerKind};
-use crate::emit::{code, extract, figure, heading, list, math, paragraph, quote, reading_order, table};
+use crate::emit::{
+    code, extract, figure, heading, list, math, paragraph, quote, reading_order, table,
+};
 use crate::model::{CndNode, HeadingNode};
 
 /// A citation marker occurring in a node's content, captured for
@@ -78,6 +82,19 @@ pub struct ConvertContext {
 }
 
 impl ConvertContext {
+    /// The records, ordered by node id.
+    ///
+    /// `records` is a hash map, whose iteration order is unspecified. Every
+    /// pass that builds edges out of it pushes them in the order it visits
+    /// the nodes, and those edges are then deduplicated first-wins — so the
+    /// order has to come from the data, not from the map.
+    pub fn records_sorted(&self) -> Vec<(Uuid, &NodeRecord)> {
+        let mut records: Vec<(Uuid, &NodeRecord)> =
+            self.records.iter().map(|(id, record)| (*id, record)).collect();
+        records.sort_unstable_by_key(|(id, _)| *id);
+        records
+    }
+
     pub fn register(&mut self, id: Uuid, record: NodeRecord) {
         if let Some(label) = record.label {
             self.label_to_id.insert(label, id);
@@ -122,11 +139,7 @@ struct SourceRange {
 fn source_range(engine: &Engine, span: Span) -> Option<SourceRange> {
     let file = span.id()?;
     let range = engine.world.range(span)?;
-    Some(SourceRange {
-        file,
-        start: range.start,
-        end: range.end,
-    })
+    Some(SourceRange { file, start: range.start, end: range.end })
 }
 
 fn range_contains(outer: SourceRange, inner: SourceRange) -> bool {
@@ -137,7 +150,10 @@ fn is_strictly_nested(inner: SourceRange, outer: SourceRange) -> bool {
     range_contains(outer, inner) && inner != outer
 }
 
-fn build_list_enum_ranges(engine: &Engine, introspector: &dyn Introspector) -> Vec<SourceRange> {
+fn build_list_enum_ranges(
+    engine: &Engine,
+    introspector: &dyn Introspector,
+) -> Vec<SourceRange> {
     let mut ranges = Vec::new();
     for selector in [ListElem::ELEM.select(), EnumElem::ELEM.select()] {
         for elem in introspector.query(&selector) {
@@ -174,7 +190,12 @@ fn build_inline_nested_list_enum_locations(
             continue;
         };
         for item in &list.children {
-            collect_inline_list_enum_locations(engine, introspector, &item.body, &mut locations);
+            collect_inline_list_enum_locations(
+                engine,
+                introspector,
+                &item.body,
+                &mut locations,
+            );
         }
     }
 
@@ -183,7 +204,12 @@ fn build_inline_nested_list_enum_locations(
             continue;
         };
         for item in &enum_.children {
-            collect_inline_list_enum_locations(engine, introspector, &item.body, &mut locations);
+            collect_inline_list_enum_locations(
+                engine,
+                introspector,
+                &item.body,
+                &mut locations,
+            );
         }
     }
 
@@ -205,7 +231,12 @@ fn collect_inline_list_enum_locations(
         }
         if let Some(list) = list.to_packed::<ListElem>() {
             for item in &list.children {
-                collect_inline_list_enum_locations(engine, introspector, &item.body, locations);
+                collect_inline_list_enum_locations(
+                    engine,
+                    introspector,
+                    &item.body,
+                    locations,
+                );
             }
         }
     }
@@ -218,7 +249,12 @@ fn collect_inline_list_enum_locations(
         }
         if let Some(enum_) = enum_.to_packed::<EnumElem>() {
             for item in &enum_.children {
-                collect_inline_list_enum_locations(engine, introspector, &item.body, locations);
+                collect_inline_list_enum_locations(
+                    engine,
+                    introspector,
+                    &item.body,
+                    locations,
+                );
             }
         }
     }
@@ -247,10 +283,10 @@ fn is_nested_list_or_enum(
     list_enum_ranges: &[SourceRange],
     inline_nested_locations: &FxHashSet<Location>,
 ) -> bool {
-    if let Some(loc) = content.location() {
-        if inline_nested_locations.contains(&loc) {
-            return true;
-        }
+    if let Some(loc) = content.location()
+        && inline_nested_locations.contains(&loc)
+    {
+        return true;
     }
     if is_inline_nested_list_or_enum(engine, introspector, content) {
         return true;
@@ -258,10 +294,7 @@ fn is_nested_list_or_enum(
     let Some(inner) = source_range(engine, content.span()) else {
         return false;
     };
-    if list_enum_ranges
-        .iter()
-        .any(|outer| is_strictly_nested(inner, *outer))
-    {
+    if list_enum_ranges.iter().any(|outer| is_strictly_nested(inner, *outer)) {
         return true;
     }
     is_list_or_enum_inside_item(engine, introspector, inner)
@@ -301,7 +334,11 @@ fn is_inline_nested_list_or_enum(
     false
 }
 
-fn inline_list_or_enum_in_body(engine: &Engine, body: &Content, target: SourceRange) -> bool {
+fn inline_list_or_enum_in_body(
+    engine: &Engine,
+    body: &Content,
+    target: SourceRange,
+) -> bool {
     for selector in [ListElem::ELEM.select(), EnumElem::ELEM.select()] {
         if let Some(found) = body.query_first_naive(&selector) {
             if source_range(engine, found.span()) == Some(target) {
@@ -345,7 +382,10 @@ fn is_list_or_enum_inside_item(
     false
 }
 
-fn build_skip_ranges(engine: &Engine, introspector: &dyn Introspector) -> Vec<SourceRange> {
+fn build_skip_ranges(
+    engine: &Engine,
+    introspector: &dyn Introspector,
+) -> Vec<SourceRange> {
     let selectors = [
         QuoteElem::ELEM.select(),
         ListElem::ELEM.select(),
@@ -377,13 +417,10 @@ fn should_skip_paragraph(
     skip_ranges: &[SourceRange],
     skip_texts: &FxHashSet<String>,
 ) -> bool {
-    if let Some(par_range) = source_range(engine, content.span()) {
-        if skip_ranges
-            .iter()
-            .any(|outer| range_contains(*outer, par_range))
-        {
-            return true;
-        }
+    if let Some(par_range) = source_range(engine, content.span())
+        && skip_ranges.iter().any(|outer| range_contains(*outer, par_range))
+    {
+        return true;
     }
     skip_texts.contains(&normalize_paragraph_key(&extract::extract_text(&par.body)))
         || paragraph_text_is_skipped(
@@ -397,9 +434,17 @@ fn normalize_paragraph_key(text: &str) -> String {
         .filter(|ch| {
             !matches!(
                 ch,
-                '\u{201c}' | '\u{201d}' | '\u{2018}' | '\u{2019}' | '"'
-                    | '\u{00ab}' | '\u{00bb}' | '\u{2039}' | '\u{203a}'
-                    | '\u{202f}' | '\u{a0}'
+                '\u{201c}'
+                    | '\u{201d}'
+                    | '\u{2018}'
+                    | '\u{2019}'
+                    | '"'
+                    | '\u{00ab}'
+                    | '\u{00bb}'
+                    | '\u{2039}'
+                    | '\u{203a}'
+                    | '\u{202f}'
+                    | '\u{a0}'
             )
         })
         .collect::<String>()
@@ -416,9 +461,9 @@ fn paragraph_text_is_skipped(key: &str, skip_texts: &FxHashSet<String>) -> bool 
     if skip_texts.contains(key) {
         return true;
     }
-    skip_texts.iter().any(|skip| {
-        skip.starts_with(key) || (key.len() >= 10 && key.starts_with(skip))
-    })
+    skip_texts
+        .iter()
+        .any(|skip| skip.starts_with(key) || (key.len() >= 10 && key.starts_with(skip)))
 }
 
 fn push_text_key(skip: &mut FxHashSet<String>, text: &str) {
@@ -492,22 +537,22 @@ fn build_skip_paragraph_texts(introspector: &dyn Introspector) -> FxHashSet<Stri
 
 fn collect_list_item_texts(item: &Packed<ListItem>, skip: &mut FxHashSet<String>) {
     push_text_key(skip, &extract::extract_text(&item.body));
-    if let Some(nested) = item.body.query_first_naive(&ListElem::ELEM.select()) {
-        if let Some(list) = nested.to_packed::<ListElem>() {
-            for child in &list.children {
-                collect_list_item_texts(child, skip);
-            }
+    if let Some(nested) = item.body.query_first_naive(&ListElem::ELEM.select())
+        && let Some(list) = nested.to_packed::<ListElem>()
+    {
+        for child in &list.children {
+            collect_list_item_texts(child, skip);
         }
     }
 }
 
 fn collect_enum_item_texts(item: &Packed<EnumItem>, skip: &mut FxHashSet<String>) {
     push_text_key(skip, &extract::extract_text(&item.body));
-    if let Some(nested) = item.body.query_first_naive(&EnumElem::ELEM.select()) {
-        if let Some(list) = nested.to_packed::<EnumElem>() {
-            for child in &list.children {
-                collect_enum_item_texts(child, skip);
-            }
+    if let Some(nested) = item.body.query_first_naive(&EnumElem::ELEM.select())
+        && let Some(list) = nested.to_packed::<EnumElem>()
+    {
+        for child in &list.children {
+            collect_enum_item_texts(child, skip);
         }
     }
 }
@@ -524,7 +569,8 @@ pub fn convert_from_introspector(
     let skip_ranges = build_skip_ranges(engine, introspector);
     let skip_texts = build_skip_paragraph_texts(introspector);
     let list_enum_ranges = build_list_enum_ranges(engine, introspector);
-    let inline_nested_locations = build_inline_nested_list_enum_locations(engine, introspector);
+    let inline_nested_locations =
+        build_inline_nested_list_enum_locations(engine, introspector);
     let doc_selector = doc_selector();
     let mut items: Vec<(Location, Content)> = Vec::new();
 
@@ -556,13 +602,10 @@ pub fn convert_from_introspector(
     };
     for elem in introspector.query(&ImageElem::ELEM.select()) {
         let Some(loc) = elem.location() else { continue };
-        if let Some(range) = source_range(engine, elem.span()) {
-            if image_skip_ranges
-                .iter()
-                .any(|outer| range_contains(*outer, range))
-            {
-                continue;
-            }
+        if let Some(range) = source_range(engine, elem.span())
+            && image_skip_ranges.iter().any(|outer| range_contains(*outer, range))
+        {
+            continue;
         }
         items.push((loc, elem));
     }
@@ -578,7 +621,13 @@ pub fn convert_from_introspector(
     }
 
     for elem in introspector.query(&ListElem::ELEM.select()) {
-        if is_nested_list_or_enum(engine, introspector, &elem, &list_enum_ranges, &inline_nested_locations) {
+        if is_nested_list_or_enum(
+            engine,
+            introspector,
+            &elem,
+            &list_enum_ranges,
+            &inline_nested_locations,
+        ) {
             continue;
         }
         let Some(loc) = elem.location() else { continue };
@@ -586,7 +635,13 @@ pub fn convert_from_introspector(
     }
 
     for elem in introspector.query(&EnumElem::ELEM.select()) {
-        if is_nested_list_or_enum(engine, introspector, &elem, &list_enum_ranges, &inline_nested_locations) {
+        if is_nested_list_or_enum(
+            engine,
+            introspector,
+            &elem,
+            &list_enum_ranges,
+            &inline_nested_locations,
+        ) {
             continue;
         }
         let Some(loc) = elem.location() else { continue };
@@ -673,11 +728,13 @@ fn dispatch(
     if let Some(heading) = content.to_packed::<HeadingElem>() {
         emit_heading(engine, introspector, heading, styles, ctx, stack)?;
     } else if let Some(par) = content.to_packed::<ParElem>() {
-        let (node, record) = paragraph::convert(engine, introspector, par, styles, doc_lang)?;
+        let (node, record) =
+            paragraph::convert(engine, introspector, par, styles, doc_lang)?;
         ctx.register(node.base.id, record);
         push_node(CndNode::Paragraph(node), ctx, stack);
     } else if let Some(quote) = content.to_packed::<QuoteElem>() {
-        let (node, record) = quote::convert(engine, introspector, quote, styles, doc_lang)?;
+        let (node, record) =
+            quote::convert(engine, introspector, quote, styles, doc_lang)?;
         ctx.register(node.base.id, record);
         push_node(CndNode::Quote(node), ctx, stack);
     } else if let Some(list) = content.to_packed::<ListElem>() {
@@ -701,7 +758,8 @@ fn dispatch(
         ctx.register(node.base.id, record);
         push_node(CndNode::Math(node), ctx, stack);
     } else if let Some(image) = content.to_packed::<ImageElem>() {
-        let (node, record) = figure::bare_image(engine, introspector, content, image, styles)?;
+        let (node, record) =
+            figure::bare_image(engine, introspector, content, image, styles)?;
         ctx.register(node.base.id, record);
         push_node(CndNode::Image(node), ctx, stack);
     } else if let Some(figure) = content.to_packed::<FigureElem>() {
@@ -773,16 +831,16 @@ fn emit_heading(
 
     let (node, record) = heading::convert(engine, introspector, heading, styles, stack)?;
     ctx.register(node.base.id, record);
-    stack.push(HeadingFrame {
-        level,
-        path: node.heading_path.clone(),
-        node,
-    });
+    stack.push(HeadingFrame { level, path: node.heading_path.clone(), node });
 
     Ok(())
 }
 
-fn attach_heading(frame: HeadingFrame, ctx: &mut ConvertContext, stack: &mut [HeadingFrame]) {
+fn attach_heading(
+    frame: HeadingFrame,
+    ctx: &mut ConvertContext,
+    stack: &mut [HeadingFrame],
+) {
     let node = CndNode::Heading(frame.node);
     if let Some(parent) = stack.last_mut() {
         parent.node.children.push(node);
@@ -822,7 +880,8 @@ pub fn metadata_at(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     location: Location,
-) -> typst_library::diag::SourceResult<std::collections::HashMap<String, serde_json::Value>> {
+) -> typst_library::diag::SourceResult<std::collections::HashMap<String, serde_json::Value>>
+{
     crate::metadata::metadata_at(engine, introspector, location)
 }
 
@@ -844,8 +903,10 @@ pub fn make_record(
     ref_targets.dedup_by_key(|label| label.resolve());
 
     // Span lookups from the flat-text walk (empty for non-flat nodes).
-    let mut cite_span: rustc_hash::FxHashMap<Location, (i64, i64)> = Default::default();
-    let mut footnote_span: rustc_hash::FxHashMap<Location, (i64, i64)> = Default::default();
+    let mut cite_span: rustc_hash::FxHashMap<Location, (i64, i64)> =
+        rustc_hash::FxHashMap::default();
+    let mut footnote_span: rustc_hash::FxHashMap<Location, (i64, i64)> =
+        rustc_hash::FxHashMap::default();
     let mut ref_markers: Vec<(Label, (i64, i64))> = Vec::new();
     for marker in markers {
         match &marker.kind {
@@ -855,7 +916,9 @@ pub fn make_record(
             MarkerKind::Footnote(loc) => {
                 footnote_span.entry(*loc).or_insert((marker.start, marker.end));
             }
-            MarkerKind::Ref(label) => ref_markers.push((*label, (marker.start, marker.end))),
+            MarkerKind::Ref(label) => {
+                ref_markers.push((*label, (marker.start, marker.end)));
+            }
         }
     }
 
@@ -892,25 +955,17 @@ pub fn make_record(
 fn collect_cite_markers(content: &Content) -> Vec<CiteMarker> {
     let mut markers = Vec::new();
     let _ = content.traverse(&mut |element| {
-        if let Some(tag) = element.to_packed::<TagElem>() {
-            if let Tag::Start(inner, _) = &tag.tag {
-                if let Some(cite) = inner.to_packed::<CiteElem>() {
-                    if let Some(loc) = inner.location() {
-                        let form = extract::citation_form_str(cite.form.get(StyleChain::default()));
-                        let supplement = cite
-                            .supplement
-                            .get_cloned(StyleChain::default())
-                            .map(|c| extract::extract_text(&c).into());
-                        markers.push(CiteMarker {
-                            key: cite.key,
-                            loc,
-                            form,
-                            supplement,
-                            span: None,
-                        });
-                    }
-                }
-            }
+        if let Some(tag) = element.to_packed::<TagElem>()
+            && let Tag::Start(inner, _) = &tag.tag
+            && let Some(cite) = inner.to_packed::<CiteElem>()
+            && let Some(loc) = inner.location()
+        {
+            let form = extract::citation_form_str(cite.form.get(StyleChain::default()));
+            let supplement = cite
+                .supplement
+                .get_cloned(StyleChain::default())
+                .map(|c| extract::extract_text(&c).into());
+            markers.push(CiteMarker { key: cite.key, loc, form, supplement, span: None });
         }
         ControlFlow::<()>::Continue(())
     });
@@ -927,16 +982,13 @@ fn collect_cite_markers(content: &Content) -> Vec<CiteMarker> {
 fn collect_footnote_locs(content: &Content) -> Vec<Location> {
     let mut locs = Vec::new();
     let _ = content.traverse(&mut |element| {
-        if let Some(tag) = element.to_packed::<TagElem>() {
-            if let Tag::Start(inner, _) = &tag.tag {
-                if inner.to_packed::<FootnoteElem>().is_some() {
-                    if let Some(loc) = inner.location() {
-                        if !locs.contains(&loc) {
-                            locs.push(loc);
-                        }
-                    }
-                }
-            }
+        if let Some(tag) = element.to_packed::<TagElem>()
+            && let Tag::Start(inner, _) = &tag.tag
+            && inner.to_packed::<FootnoteElem>().is_some()
+            && let Some(loc) = inner.location()
+            && !locs.contains(&loc)
+        {
+            locs.push(loc);
         }
         ControlFlow::<()>::Continue(())
     });
@@ -1018,7 +1070,9 @@ pub fn figure_counter_label(
     // counter at all, so a label for it would be a word nothing precedes.
     figure.numbering.get_ref(styles).as_ref()?;
     match figure.supplement.get_ref(styles) {
-        typst_library::foundations::Smart::Custom(Some(Supplement::Content(supplement))) => {
+        typst_library::foundations::Smart::Custom(Some(Supplement::Content(
+            supplement,
+        ))) => {
             let text = extract::extract_text(supplement);
             (!text.is_empty()).then_some(text)
         }

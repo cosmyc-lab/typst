@@ -12,6 +12,9 @@ use uuid::Uuid;
 use crate::emit::convert::ConvertContext;
 use crate::model::{CndNode, NodeRef};
 
+/// `(source node, target node, the target's label, the marker's text span)`.
+type RefEdge = (Uuid, Uuid, Option<String>, Option<(i64, i64)>);
+
 fn doc_selector() -> Selector {
     Selector::Or(eco_vec![
         HeadingElem::ELEM.select(),
@@ -39,7 +42,7 @@ pub fn resolve_refs(
     // populated only on the primary path, from the source node's flat-text
     // `ref_markers` (ADR 0013); it runs first, so it wins the dedup-by-
     // target-id in `set_ref` and the fallback path's `None` never clobbers it.
-    let mut edges: Vec<(Uuid, Uuid, Option<String>, Option<(i64, i64)>)> = Vec::new();
+    let mut edges: Vec<RefEdge> = Vec::new();
     let _selector = doc_selector();
 
     // Primary path: a flat node's own `ref_markers` — the marker is in that
@@ -48,8 +51,9 @@ pub fn resolve_refs(
     // any node that carries markers, which is where refs actually resolve
     // (the realized content keeps only the rendered link, not a bare
     // RefElem, so `ref_targets` is empty for flat nodes).
-    let mut ref_marker_sources: rustc_hash::FxHashSet<Uuid> = Default::default();
-    for (source_id, record) in &ctx.records {
+    let mut ref_marker_sources: rustc_hash::FxHashSet<Uuid> =
+        rustc_hash::FxHashSet::default();
+    for (source_id, record) in ctx.records_sorted() {
         // `ref_markers` first: these carry spans, and `set_ref` dedups
         // first-wins per target, so the spanned edge must be pushed before
         // the span-less `ref_targets` edge for the same target (today
@@ -59,10 +63,10 @@ pub fn resolve_refs(
             if ctx.bib_key_to_id.contains_key(label) {
                 continue;
             }
-            if let Some(target_id) = resolve_label(label, ctx, introspector) {
-                ref_marker_sources.insert(*source_id);
+            if let Some(target_id) = resolve_label(*label, ctx, introspector) {
+                ref_marker_sources.insert(source_id);
                 edges.push((
-                    *source_id,
+                    source_id,
                     target_id,
                     Some(label.resolve().as_str().into()),
                     Some(*span),
@@ -75,8 +79,13 @@ pub fn resolve_refs(
             if ctx.bib_key_to_id.contains_key(label) {
                 continue;
             }
-            if let Some(target_id) = resolve_label(label, ctx, introspector) {
-                edges.push((*source_id, target_id, Some(label.resolve().as_str().into()), None));
+            if let Some(target_id) = resolve_label(*label, ctx, introspector) {
+                edges.push((
+                    source_id,
+                    target_id,
+                    Some(label.resolve().as_str().into()),
+                    None,
+                ));
             }
         }
     }
@@ -101,14 +110,24 @@ pub fn resolve_refs(
         if ref_marker_sources.contains(&source_id) {
             continue;
         }
-        if let Some(target_id) = resolve_label(&label, ctx, introspector) {
-            edges.push((source_id, target_id, Some(label.resolve().as_str().into()), None));
-            if matches!(source_kind, RefSourceKind::Heading) {
-                if let Some(paragraph_id) = last_paragraph_under_heading(&ctx.roots, source_id) {
-                    if !ref_marker_sources.contains(&paragraph_id) {
-                        edges.push((paragraph_id, target_id, Some(label.resolve().as_str().into()), None));
-                    }
-                }
+        if let Some(target_id) = resolve_label(label, ctx, introspector) {
+            edges.push((
+                source_id,
+                target_id,
+                Some(label.resolve().as_str().into()),
+                None,
+            ));
+            if matches!(source_kind, RefSourceKind::Heading)
+                && let Some(paragraph_id) =
+                    last_paragraph_under_heading(&ctx.roots, source_id)
+                && !ref_marker_sources.contains(&paragraph_id)
+            {
+                edges.push((
+                    paragraph_id,
+                    target_id,
+                    Some(label.resolve().as_str().into()),
+                    None,
+                ));
             }
         }
     }
@@ -136,8 +155,8 @@ enum RefSourceKind {
 fn ref_edges_from_content(content: &Content) -> Vec<(RefSourceKind, usize, Label)> {
     let mut out = Vec::new();
     let mut current: Option<(RefSourceKind, usize)> = None;
-    let mut par_index = 0usize;
-    let mut heading_index = 0usize;
+    let mut par_index = 0_usize;
+    let mut heading_index = 0_usize;
     let _ = content.traverse(&mut |element| {
         if element.to_packed::<ParElem>().is_some() {
             current = Some((RefSourceKind::Paragraph, par_index));
@@ -145,10 +164,10 @@ fn ref_edges_from_content(content: &Content) -> Vec<(RefSourceKind, usize, Label
         } else if element.to_packed::<HeadingElem>().is_some() {
             current = Some((RefSourceKind::Heading, heading_index));
             heading_index += 1;
-        } else if let Some(reference) = element.to_packed::<RefElem>() {
-            if let Some((kind, index)) = current {
-                out.push((kind, index, reference.target));
-            }
+        } else if let Some(reference) = element.to_packed::<RefElem>()
+            && let Some((kind, index)) = current
+        {
+            out.push((kind, index, reference.target));
         }
         ControlFlow::<()>::Continue(())
     });
@@ -193,49 +212,47 @@ fn walk_heading_ids(nodes: &[CndNode], out: &mut Vec<Uuid>) {
     }
 }
 
+/// The id of the node carrying `label`, searched in id order so two nodes
+/// sharing a label — ill-formed, but possible — always resolve the same way.
+fn find_by_label(ctx: &ConvertContext, label: Label) -> Option<Uuid> {
+    ctx.records_sorted()
+        .into_iter()
+        .find(|(_, record)| record.label == Some(label))
+        .map(|(id, _)| id)
+}
+
 fn resolve_label(
-    label: &Label,
+    label: Label,
     ctx: &ConvertContext,
     introspector: &dyn Introspector,
 ) -> Option<Uuid> {
-    if let Some(id) = ctx.label_to_id.get(label).copied() {
+    if let Some(id) = ctx.label_to_id.get(&label).copied() {
         return Some(id);
     }
 
-    let content = introspector.query_label(*label).ok()?;
-    if let Some(loc) = content.location() {
-        if let Some(id) = ctx.location_to_id.get(&loc).copied() {
+    let content = introspector.query_label(label).ok()?;
+    if let Some(loc) = content.location()
+        && let Some(id) = ctx.location_to_id.get(&loc).copied()
+    {
+        return Some(id);
+    }
+
+    for elem in introspector.query(&FigureElem::ELEM.select()) {
+        if elem.label() != Some(label) {
+            continue;
+        }
+        if let Some(loc) = elem.location()
+            && let Some(id) = ctx.location_to_id.get(&loc).copied()
+        {
             return Some(id);
         }
     }
 
-    for elem in introspector.query(&FigureElem::ELEM.select()) {
-        if elem.label() != Some(*label) {
-            continue;
-        }
-        if let Some(loc) = elem.location() {
-            if let Some(id) = ctx.location_to_id.get(&loc).copied() {
-                return Some(id);
-            }
-        }
-    }
-
     if content.to_packed::<FigureElem>().is_some() {
-        for (id, record) in &ctx.records {
-            if record.label.as_ref() == Some(label) {
-                return Some(*id);
-            }
-        }
-        return find_labeled_table(ctx);
+        return find_by_label(ctx, label).or_else(|| find_labeled_table(ctx));
     }
 
-    for (id, record) in &ctx.records {
-        if record.label.as_ref() == Some(label) {
-            return Some(*id);
-        }
-    }
-
-    None
+    find_by_label(ctx, label)
 }
 
 fn find_labeled_table(ctx: &ConvertContext) -> Option<Uuid> {
@@ -271,10 +288,8 @@ fn last_paragraph_under_heading(nodes: &[CndNode], heading_id: Uuid) -> Option<U
                     find_last_paragraph(&n.children, last);
                     return true;
                 }
-                CndNode::Heading(n) => {
-                    if walk(&n.children, target, last) {
-                        return true;
-                    }
+                CndNode::Heading(n) if walk(&n.children, target, last) => {
+                    return true;
                 }
                 _ => {}
             }
@@ -310,10 +325,10 @@ fn node_label(ctx: &ConvertContext, id: Uuid) -> Option<String> {
             if node.id() == id {
                 return node.base().label.clone();
             }
-            if let CndNode::Heading(h) = node {
-                if let Some(label) = walk(&h.children, id) {
-                    return Some(label);
-                }
+            if let CndNode::Heading(h) = node
+                && let Some(label) = walk(&h.children, id)
+            {
+                return Some(label);
             }
         }
         None
@@ -334,10 +349,7 @@ fn set_ref(
         // globally unique (ADR 0017), so this is the same dedup the target
         // id used to give.
         if !refs.iter().any(|reference| reference.label == label) {
-            refs.push(NodeRef {
-                label,
-                text_span: span.map(|(s, e)| vec![s, e]),
-            });
+            refs.push(NodeRef { label, text_span: span.map(|(s, e)| vec![s, e]) });
         }
     }
 }
@@ -347,10 +359,10 @@ pub fn find_node_mut(nodes: &mut [CndNode], id: Uuid) -> Option<&mut CndNode> {
         if node.id() == id {
             return Some(node);
         }
-        if let Some(children) = node.children_mut() {
-            if let Some(found) = find_node_mut(children, id) {
-                return Some(found);
-            }
+        if let Some(children) = node.children_mut()
+            && let Some(found) = find_node_mut(children, id)
+        {
+            return Some(found);
         }
     }
     None
@@ -358,16 +370,17 @@ pub fn find_node_mut(nodes: &mut [CndNode], id: Uuid) -> Option<&mut CndNode> {
 
 /// Build label lookup from records and labelled introspector elements.
 pub fn rebuild_label_index(ctx: &mut ConvertContext, introspector: &dyn Introspector) {
+    let labelled: Vec<(Label, Uuid)> = ctx
+        .records_sorted()
+        .into_iter()
+        .filter_map(|(id, record)| record.label.map(|label| (label, id)))
+        .collect();
     ctx.label_to_id.clear();
-    for (id, record) in &ctx.records {
-        if let Some(label) = record.label {
-            ctx.label_to_id.insert(label, *id);
-        }
-    }
+    ctx.label_to_id.extend(labelled);
 
     for elem in introspector.query_labelled() {
         let Some(label) = elem.label() else { continue };
-        let Some(id) = resolve_label(&label, ctx, introspector) else { continue };
+        let Some(id) = resolve_label(label, ctx, introspector) else { continue };
         ctx.label_to_id.insert(label, id);
         if let Some(record) = ctx.records.get_mut(&id) {
             record.label = Some(label);
