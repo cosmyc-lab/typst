@@ -6,10 +6,20 @@
 # error there — `cargo check` alone will never reproduce it. This script
 # sets the same environment.
 #
+# CI runs the `tests`, `checks` and `docs` jobs on Rust 1.98; if your
+# toolchain is older, a lint that CI reports may not exist for you yet.
+#
 # Left out, because they need a toolchain or tooling the workflow installs:
-# the miri and fuzz jobs, and the `min-version` job (same command as
-# `check`, on Rust 1.92 — install it with `rustup toolchain install 1.92`
-# and re-run with `RUST_TOOLCHAIN=+1.92 dev/ci-checks.sh check`).
+# the miri and fuzz jobs, the `docs` job (`cargo docit`), and the
+# `min-version` job (same command as `check`, on Rust 1.92 — install it
+# with `rustup toolchain install 1.92` and re-run with
+# `RUST_TOOLCHAIN=+1.92 dev/ci-checks.sh check`).
+#
+# The `checks` job also ends with `git diff --exit-code`, to catch a
+# command having rewritten a tracked file. That is not mirrored here: CI
+# runs it on a clean checkout, whereas locally it cannot tell your own
+# uncommitted edits from a file a gate rewrote, so it would always fail.
+# `cargo fmt --check` above already covers the case that actually bites.
 #
 # Usage:
 #   dev/ci-checks.sh              # everything below, stopping at the first failure
@@ -39,10 +49,17 @@ run() {
 
 gate() {
     case $1 in
-    check) run check cargo $TC check --workspace --all-targets ;;
+    # Mirrors the `min-version` job, which gained `--all-targets
+    # --all-features` upstream in #8804.
+    check) run check cargo $TC check --workspace --all-targets --all-features ;;
     clippy) run clippy cargo $TC clippy --workspace --all-targets --all-features ;;
+    # Upstream replaced the single workspace-wide `--no-default-features`
+    # run with one per crate that has cargo features: feature unification
+    # across the workspace was masking errors.
     clippy-no-default)
-        run clippy-no-default cargo $TC clippy --workspace --all-targets --no-default-features
+        for p in typst-cli typst-kit typst-timing; do
+            run "clippy-no-default($p)" cargo $TC clippy --package "$p" --no-default-features || return 1
+        done
         ;;
     fmt) run fmt cargo $TC fmt --check --all ;;
     doc) run doc cargo $TC doc --workspace --no-deps --document-private-items ;;
