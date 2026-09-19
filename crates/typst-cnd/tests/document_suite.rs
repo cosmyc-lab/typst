@@ -1144,22 +1144,28 @@ fn ref_text_spans_are_codepoint_offsets() {
     assert!(!spans.is_empty(), "cross-reference markers should carry text spans");
 
     // Every span slices to the rendered reference text, and the `\u{a0}`
-    // inside "Chapitre 11" / "Tableau 1" is the codepoint-vs-byte canary: a
+    // inside "Section 11" / "Tableau 1" is the codepoint-vs-byte canary: a
     // byte offset would land mid-character here.
-    let mut saw_chapitre_11 = false;
+    //
+    // The supplement is whatever `translations/fr.txt` gives for `heading`
+    // (upstream #8728 changed it from "Chapitre" to "Section"). If this
+    // assertion fails on a word, check that file before suspecting the
+    // offsets — the invariant under test is the offset arithmetic, not the
+    // wording.
+    let mut saw_numbered_heading_ref = false;
     for (text, label, span) in &spans {
         let slice = codepoint_slice(text, span);
         assert!(
             slice.contains('\u{a0}'),
             "ref {label} span {span:?} slices to a numbered reference: {slice:?}"
         );
-        if label == "sec-detail" && slice == "Chapitre\u{a0}11" {
-            saw_chapitre_11 = true;
+        if label == "sec-detail" && slice == "Section\u{a0}11" {
+            saw_numbered_heading_ref = true;
         }
     }
     assert!(
-        saw_chapitre_11,
-        "expected a ref rendering \"Chapitre\\u{{a0}}11\" (11 code points, 12 bytes): {spans:?}"
+        saw_numbered_heading_ref,
+        "expected a ref rendering \"Section\\u{{a0}}11\" (10 code points, 11 bytes): {spans:?}"
     );
 
     assert_refs_resolve(&cnd.nodes);
