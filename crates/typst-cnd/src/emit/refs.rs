@@ -212,13 +212,19 @@ fn walk_heading_ids(nodes: &[CndNode], out: &mut Vec<Uuid>) {
     }
 }
 
-/// The id of the node carrying `label`, searched in id order so two nodes
-/// sharing a label — ill-formed, but possible — always resolve the same way.
+/// The id of the node carrying `label`.
+///
+/// Two nodes sharing a label is ill-formed but possible, and then the
+/// smallest id wins rather than whichever the hash map happened to yield
+/// first — so the two calls this makes per labelled element agree with each
+/// other. `min_by_key` rather than sorting: this runs once per labelled
+/// element, and sorting the whole map each time would be quadratic.
 fn find_by_label(ctx: &ConvertContext, label: Label) -> Option<Uuid> {
-    ctx.records_sorted()
-        .into_iter()
-        .find(|(_, record)| record.label == Some(label))
-        .map(|(id, _)| id)
+    ctx.records
+        .iter()
+        .filter(|(_, record)| record.label == Some(label))
+        .map(|(id, _)| *id)
+        .min()
 }
 
 fn resolve_label(
