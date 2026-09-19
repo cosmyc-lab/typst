@@ -515,6 +515,9 @@ fn default_one() -> i32 {
     1
 }
 
+// `skip_serializing_if` hands the predicate a reference — taking these by
+// value, as clippy suggests for small Copy types, does not typecheck there.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_one(v: &i32) -> bool {
     *v == 1
 }
@@ -523,10 +526,12 @@ fn default_true() -> bool {
     true
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_true(v: &bool) -> bool {
     *v
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_table_kind(kind: &TableKind) -> bool {
     *kind == TableKind::Table
 }

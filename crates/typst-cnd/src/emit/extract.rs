@@ -2,6 +2,7 @@ use ecow::EcoString;
 use typst_library::foundations::{Content, Label, PlainText, Value};
 use typst_library::introspection::{Location, Tag, TagElem};
 use typst_library::model::{CitationForm, CiteElem, FootnoteElem, LinkMarker, RefElem};
+use typst_library::text::LinebreakElem;
 
 /// Extract plain text from content without duplicating inline code.
 ///
@@ -65,8 +66,8 @@ struct MarkerCtx {
     /// Zero-width `RefElem` tags awaiting the `LinkMarker` that renders the
     /// reference text. A ref tag is a point marker; its rendered supplement
     /// + number is wrapped in a following `LinkMarker` starting at the same
-    /// position (this fork's realization — cites/footnotes differ, their own
-    /// tag brackets the text).
+    ///   position (this fork's realization — cites/footnotes differ, their own
+    ///   tag brackets the text).
     pending_refs: Vec<PendingRef>,
     /// `LinkMarker` frames currently bracketing a pending ref's text.
     link_for_ref: Vec<LinkFrame>,
@@ -112,6 +113,18 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
         return;
     }
 
+    // A hard line break (`\\`) renders as a new line but carries no text, so
+    // `PlainText` yields nothing for it and the words on either side would be
+    // run together ("Plateforme de calcul \\ de coût" -> "calculde coût").
+    // A node's `text` is one flat string, so the break becomes a space.
+    if content.to_packed::<LinebreakElem>().is_some() {
+        if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+            out.push(' ');
+            ctx.pos += 1;
+        }
+        return;
+    }
+
     if let Some(textable) = content.with::<dyn PlainText>() {
         let before = out.len();
         textable.plain_text(out);
@@ -130,14 +143,19 @@ fn open_tag(inner: &Content, ctx: &mut MarkerCtx) {
 
     if let Some(reference) = inner.to_packed::<RefElem>() {
         // Point marker — defer until its LinkMarker renders the text.
-        ctx.pending_refs.push(PendingRef { label: reference.target, start: pos });
+        ctx.pending_refs
+            .push(PendingRef { label: reference.target, start: pos });
         return;
     }
     if inner.to_packed::<LinkMarker>().is_some() {
         // Pair with the pending ref that starts here, if any.
         if let Some(index) = ctx.pending_refs.iter().position(|r| r.start == pos) {
             let pending = ctx.pending_refs.remove(index);
-            ctx.link_for_ref.push(LinkFrame { marker_loc, label: pending.label, start: pending.start });
+            ctx.link_for_ref.push(LinkFrame {
+                marker_loc,
+                label: pending.label,
+                start: pending.start,
+            });
         }
         return;
     }
@@ -150,11 +168,16 @@ fn close_tag(ctx: &mut MarkerCtx, loc: Location) {
     // A cite/footnote tag closes its own bracketed span.
     if let Some(index) = ctx.open.iter().position(|frame| frame.marker_loc == loc) {
         let frame = ctx.open.remove(index);
-        ctx.done.push(ExtractedMarker { kind: frame.kind, start: frame.start, end: ctx.pos });
+        ctx.done.push(ExtractedMarker {
+            kind: frame.kind,
+            start: frame.start,
+            end: ctx.pos,
+        });
         return;
     }
     // A LinkMarker closing finishes the pending ref it wraps.
-    if let Some(index) = ctx.link_for_ref.iter().position(|frame| frame.marker_loc == loc) {
+    if let Some(index) = ctx.link_for_ref.iter().position(|frame| frame.marker_loc == loc)
+    {
         let frame = ctx.link_for_ref.remove(index);
         ctx.done.push(ExtractedMarker {
             kind: MarkerKind::Ref(frame.label),
@@ -187,10 +210,18 @@ fn open_frame(inner: &Content, start: i64) -> Option<OpenFrame> {
         // rendered group ("[1], [2]") and later members get a zero-width
         // span at the group's end. Typst does not expose per-member
         // sub-spans; emit what the tags give us.
-        return Some(OpenFrame { marker_loc, kind: MarkerKind::Cite(marker_loc), start });
+        return Some(OpenFrame {
+            marker_loc,
+            kind: MarkerKind::Cite(marker_loc),
+            start,
+        });
     }
     if inner.to_packed::<FootnoteElem>().is_some() {
-        return Some(OpenFrame { marker_loc, kind: MarkerKind::Footnote(marker_loc), start });
+        return Some(OpenFrame {
+            marker_loc,
+            kind: MarkerKind::Footnote(marker_loc),
+            start,
+        });
     }
     None
 }

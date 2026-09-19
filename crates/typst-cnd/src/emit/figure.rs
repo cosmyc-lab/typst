@@ -1,5 +1,7 @@
 use typst_library::engine::Engine;
-use typst_library::foundations::{Content, NativeElement, Packed, Smart, StyleChain, Synthesize};
+use typst_library::foundations::{
+    Content, NativeElement, Packed, Smart, StyleChain, Synthesize,
+};
 use typst_library::introspection::Introspector;
 use typst_library::loading::DataSource;
 use typst_library::model::{FigureElem, FigureKind};
@@ -40,8 +42,7 @@ pub fn from_figure(
     let mut node = FigureNode::new(id, location);
     node.caption = caption;
     node.number = fig_number;
-    node.counter_label =
-        convert::figure_counter_label(&figure, styles).map(Into::into);
+    node.counter_label = convert::figure_counter_label(&figure, styles).map(Into::into);
     node.kind = figure_kind(&figure, styles);
 
     let mut records = vec![(id, record)];
@@ -55,13 +56,13 @@ pub fn from_figure(
             records.push((child_id, minimal_record(content)));
             node.children.push(CndNode::Image(child));
         }
-    } else if let Some(raw) = content.query_first_naive(&RawElem::ELEM.select()) {
-        if let Some(raw) = raw.to_packed::<RawElem>() {
-            let (child, child_record) = code::convert(engine, introspector, raw, styles)?;
-            let child_id = child.base.id;
-            records.push((child_id, child_record));
-            node.children.push(CndNode::Code(child));
-        }
+    } else if let Some(raw) = content.query_first_naive(&RawElem::ELEM.select())
+        && let Some(raw) = raw.to_packed::<RawElem>()
+    {
+        let (child, child_record) = code::convert(engine, introspector, raw, styles)?;
+        let child_id = child.base.id;
+        records.push((child_id, child_record));
+        node.children.push(CndNode::Code(child));
     }
 
     node.raw = table::raw_typst_for_label(engine, content.label()).map(RawSource::typst);
@@ -109,7 +110,10 @@ fn minimal_record(content: &Content) -> NodeRecord {
 /// image) or an author-supplied custom string — instead of recomputing a
 /// cruder image-only guess. `kind` is always `Smart::Custom` after
 /// `synthesize()`; the `None` arm only guards a future Typst change.
-pub(crate) fn figure_kind(figure: &Packed<FigureElem>, styles: StyleChain) -> Option<String> {
+pub(crate) fn figure_kind(
+    figure: &Packed<FigureElem>,
+    styles: StyleChain,
+) -> Option<String> {
     match figure.kind.get_cloned(styles) {
         Smart::Custom(FigureKind::Elem(func)) => Some(func.name().to_string()),
         Smart::Custom(FigureKind::Name(name)) => Some(name.to_string()),
@@ -123,6 +127,6 @@ fn image_path(image: &Packed<ImageElem>) -> Option<String> {
             .resolve_if_some(image.span().id())
             .ok()
             .map(|resolved| resolved.vpath().get_without_slash().to_string()),
-        _ => None,
+        DataSource::Bytes(_) => None,
     }
 }

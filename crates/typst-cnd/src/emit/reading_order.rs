@@ -5,8 +5,6 @@
 //! column-major for LTR text — top-to-bottom within a column, then the next
 //! column to the right.
 
-use std::cmp::Ordering;
-
 use typst_library::foundations::Selector;
 use typst_library::introspection::{Introspector, Location};
 use typst_library::layout::Abs;
@@ -28,8 +26,11 @@ pub fn sort_by_reading_order(
     doc_selector: &Selector,
 ) {
     items.sort_by(|(loc_a, _), (loc_b, _)| {
-        reading_key(introspector, doc_selector, *loc_a)
-            .cmp(&reading_key(introspector, doc_selector, *loc_b))
+        reading_key(introspector, doc_selector, *loc_a).cmp(&reading_key(
+            introspector,
+            doc_selector,
+            *loc_b,
+        ))
     });
 }
 
@@ -38,10 +39,7 @@ fn reading_key(
     doc_selector: &Selector,
     location: Location,
 ) -> ReadingKey {
-    let page = introspector
-        .page(location)
-        .map(|page| page.get() as u32)
-        .unwrap_or(1);
+    let page = introspector.page(location).map(|page| page.get() as u32).unwrap_or(1);
     let (x, y) = introspector
         .position(location)
         .map(|pos| pos.as_paged_or_default().point)
@@ -55,17 +53,6 @@ fn reading_key(
 fn abs_key(value: Abs) -> i64 {
     // Fixed-point key stable across Abs representations.
     (value.to_pt() * 1_000.0).round() as i64
-}
-
-/// Compare two locations in reading order (useful for tests).
-pub fn compare_locations(
-    introspector: &dyn Introspector,
-    doc_selector: &Selector,
-    left: Location,
-    right: Location,
-) -> Ordering {
-    reading_key(introspector, doc_selector, left)
-        .cmp(&reading_key(introspector, doc_selector, right))
 }
 
 #[cfg(test)]

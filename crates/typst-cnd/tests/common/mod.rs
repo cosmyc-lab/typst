@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use typst_cnd::{
-    CndDocument, Cnd, CndNode, ListNode, cnd_from_document, cnd_to_json,
+    Cnd, CndDocument, CndNode, ListNode, cnd_from_document, cnd_to_json,
     world::{CndWorld, built_at_now, source_info},
 };
 
@@ -51,9 +51,9 @@ pub fn compile_example(name: &str) -> CndDocument {
     for warning in &warned.warnings {
         eprintln!("warning: {warning:?}");
     }
-    warned
-        .output
-        .unwrap_or_else(|errors| panic!("compile failed for {}: {errors:?}", path.display()))
+    warned.output.unwrap_or_else(|errors| {
+        panic!("compile failed for {}: {errors:?}", path.display())
+    })
 }
 
 pub fn cnd_for_example(name: &str) -> Cnd {
@@ -175,7 +175,8 @@ pub fn table_stats(nodes: &[CndNode]) -> TableStats {
                     }
                 }
                 CndNode::Figure(figure) => {
-                    let has_caption = figure.caption.as_ref().is_some_and(|c| !c.is_empty());
+                    let has_caption =
+                        figure.caption.as_ref().is_some_and(|c| !c.is_empty());
                     let has_fig_number =
                         figure.number.as_ref().is_some_and(|n| !n.is_empty());
                     for child in &figure.children {
@@ -237,11 +238,7 @@ pub fn assert_unique_ids(nodes: &[CndNode]) {
         + stats.images
         + stats.lists
         + stats.terms;
-    assert_eq!(
-        stats.ids.len(),
-        total,
-        "duplicate node ids detected"
-    );
+    assert_eq!(stats.ids.len(), total, "duplicate node ids detected");
 }
 
 /// Slice a string by `[start, end)` Unicode code-point offsets — the
@@ -425,15 +422,15 @@ pub fn find_by_label<'a>(nodes: &'a [CndNode], label: &str) -> Option<&'a CndNod
         if node_label == Some(label) {
             return Some(node);
         }
-        if let CndNode::Heading(h) = node {
-            if let Some(found) = find_by_label(&h.children, label) {
-                return Some(found);
-            }
+        if let CndNode::Heading(h) = node
+            && let Some(found) = find_by_label(&h.children, label)
+        {
+            return Some(found);
         }
-        if let CndNode::Figure(f) = node {
-            if let Some(found) = find_by_label(&f.children, label) {
-                return Some(found);
-            }
+        if let CndNode::Figure(f) = node
+            && let Some(found) = find_by_label(&f.children, label)
+        {
+            return Some(found);
         }
     }
     None

@@ -8,7 +8,7 @@ use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
-use typst::{Library, LibraryExt, World};
+use typst::{Feature, Features, Library, LibraryExt, World};
 
 use crate::model::SourceInfo;
 use typst_kit::datetime::Time;
@@ -27,7 +27,13 @@ pub struct CndWorld {
 }
 
 fn build_library() -> Library {
-    let mut library = Library::builder().build();
+    // `Feature::CndSemantics` makes every fully-inline fragment body (a
+    // `block[…]`, a grid cell, a `place`, a `box`) realize into a real,
+    // locatable `ParElem`. Without it that text is laid out but never
+    // located, so `Introspector::query` — the only source the CND emit
+    // pipeline reads — cannot see it and the content is silently dropped.
+    let features = Features::from_iter([Feature::CndSemantics]);
+    let mut library = Library::builder().with_features(features).build();
     // DEPRECATED — see crate::cnd's module doc. Removal tracked for the next release.
     library.global.scope_mut().define("cnd", crate::cnd::module());
     library
@@ -41,9 +47,7 @@ impl CndWorld {
             .canonicalize()
             .map_err(|err| FileError::from_io(err, input))?;
 
-        let input = input
-            .canonicalize()
-            .map_err(|err| FileError::from_io(err, input))?;
+        let input = input.canonicalize().map_err(|err| FileError::from_io(err, input))?;
 
         let main = RootedPath::new(
             VirtualRoot::Project,

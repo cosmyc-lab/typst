@@ -57,11 +57,8 @@ pub fn resolve_footnotes(
         };
         let id = *ctx.footnote_loc_to_id.entry(own_loc).or_insert_with(Uuid::new_v4);
         if !ctx.footnotes.iter().any(|f| f.id == id) {
-            let text = footnote
-                .body_content()
-                .map(extract_text)
-                .unwrap_or_default()
-                .into();
+            let text =
+                footnote.body_content().map(extract_text).unwrap_or_default().into();
             let numbering = footnote.numbering.get_ref(styles);
             let label = counter
                 .display_at(engine, own_loc, styles, numbering, footnote.span())
@@ -129,9 +126,8 @@ pub fn build_bibliography_pool(
             // Recover the source key and hayagriva entry (rendered order may
             // differ from source order — match by the key we retained).
             let key_str = entry.key.as_str();
-            let Some((label, source)) = database
-                .iter()
-                .find(|(label, _)| label.resolve().as_str() == key_str)
+            let Some((label, source)) =
+                database.iter().find(|(label, _)| label.resolve().as_str() == key_str)
             else {
                 continue;
             };
@@ -178,15 +174,14 @@ fn rendered_string(entry: &RenderedEntry) -> String {
     match &entry.prefix {
         Some(prefix) => {
             let prefix = extract_text(prefix);
-            if prefix.is_empty() {
-                body.to_string()
-            } else {
-                format!("{prefix} {body}")
-            }
+            if prefix.is_empty() { body.to_string() } else { format!("{prefix} {body}") }
         }
         None => body.to_string(),
     }
 }
+
+/// `(source node, footnote pool entry, the marker's text span)`.
+type FootnoteEdge = (Uuid, Uuid, Option<(i64, i64)>);
 
 /// Resolve every node's citation markers to `CiteRef` edges pointing at the
 /// bibliography pool. A key with no pool entry is dropped silently. The
@@ -195,20 +190,17 @@ fn rendered_string(entry: &RenderedEntry) -> String {
 /// (ADR 0013 / proposal 0004).
 pub fn resolve_cite_edges(ctx: &mut ConvertContext) {
     let mut edges: Vec<(Uuid, CiteRef)> = Vec::new();
-    for (node_id, record) in &ctx.records {
+    for (node_id, record) in ctx.records_sorted() {
         for marker in &record.cite_markers {
             // The edge names its target by label now, but the lookup still
             // gates it: a `@key` with no bibliography entry must not
             // produce an unresolvable `cites` edge.
             if ctx.bib_key_to_id.contains_key(&marker.key) {
                 let suppressed = marker.form.as_deref() == Some("none");
-                let text_span = if suppressed {
-                    None
-                } else {
-                    marker.span.map(|(s, e)| vec![s, e])
-                };
+                let text_span =
+                    if suppressed { None } else { marker.span.map(|(s, e)| vec![s, e]) };
                 edges.push((
-                    *node_id,
+                    node_id,
                     CiteRef {
                         label: marker.key.resolve().to_string(),
                         text_span,
@@ -237,17 +229,14 @@ pub fn resolve_cite_edges(ctx: &mut ConvertContext) {
 /// footnote) is dropped. Dedup is by the full edge (id + span), so two
 /// markers of the same note in one node become two positioned entries.
 fn resolve_footnote_edges(ctx: &mut ConvertContext) {
-    let labels: rustc_hash::FxHashMap<Uuid, String> = ctx
-        .footnotes
-        .iter()
-        .map(|f| (f.id, f.label.clone()))
-        .collect();
+    let labels: rustc_hash::FxHashMap<Uuid, String> =
+        ctx.footnotes.iter().map(|f| (f.id, f.label.clone())).collect();
 
-    let mut edges: Vec<(Uuid, Uuid, Option<(i64, i64)>)> = Vec::new();
-    for (node_id, record) in &ctx.records {
+    let mut edges: Vec<FootnoteEdge> = Vec::new();
+    for (node_id, record) in ctx.records_sorted() {
         for (marker_loc, span) in &record.footnote_locs {
             if let Some(pool_id) = ctx.footnote_loc_to_id.get(marker_loc).copied() {
-                edges.push((*node_id, pool_id, *span));
+                edges.push((node_id, pool_id, *span));
             }
         }
     }
@@ -257,10 +246,7 @@ fn resolve_footnote_edges(ctx: &mut ConvertContext) {
         // ordinal), so this lookup cannot fail; skipping rather than
         // unwrapping keeps an unresolvable edge from ever being emitted.
         let Some(label) = labels.get(&pool_id).cloned() else { continue };
-        let reference = FootnoteRef {
-            label,
-            text_span: span.map(|(s, e)| vec![s, e]),
-        };
+        let reference = FootnoteRef { label, text_span: span.map(|(s, e)| vec![s, e]) };
         if let Some(node) = find_node_mut(&mut ctx.roots, node_id) {
             let footnotes = node.footnotes_mut();
             if !footnotes.contains(&reference) {

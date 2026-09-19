@@ -14,6 +14,8 @@ use bumpalo::collections::{CollectIn, String as BumpString, Vec as BumpVec};
 use comemo::Track;
 use ecow::EcoString;
 use typst_html::HtmlElem;
+use typst_library::Feature;
+use typst_library::World;
 use typst_library::diag::{At, SourceResult, bail, warning};
 use typst_library::engine::Engine;
 use typst_library::foundations::{
@@ -1171,6 +1173,13 @@ fn in_non_par_grouping(s: &mut State) -> bool {
 /// spans the whole sink (with the exception of leading tags and neutral
 /// elements).
 fn is_fully_inline_or_neutral(s: &State) -> bool {
+    // CND export needs every fragment body to become a real, locatable
+    // `ParElem`; flattening it to loose inline content makes the text
+    // invisible to `Introspector::query`. See `Feature::CndSemantics`.
+    if s.engine.world.library().features.is_enabled(Feature::CndSemantics) {
+        return false;
+    }
+
     if let RealizationKind::Fragment { .. } = s.kind
         && !s.saw_parbreak
         && let [grouping] = s.groupings.as_slice()

@@ -17,7 +17,7 @@ use typst_library::pdf::ArtifactKind;
 use typst_library::routines::Pair;
 use typst_library::text::{LocalName, TextElem};
 use typst_library::visualize::Paint;
-use typst_library::{Library, World};
+use typst_library::{Feature, Library, World};
 use typst_utils::{LazyHash, Numeric, Protected};
 
 use crate::flow::{FlowMode, layout_flow};
@@ -198,6 +198,17 @@ fn layout_page_run_impl(
         FlowMode::Root,
     )?;
 
+    // Fork-local (CND export): upstream marks the header, the footer and the
+    // background as PDF artifacts, but not the foreground. That asymmetry is
+    // invisible until `Feature::CndSemantics` turns every fully-inline
+    // fragment body into a locatable `ParElem` — the foreground then becomes
+    // a paragraph the CND exporter emits once per page, which for the usual
+    // `foreground: rotate(45deg)[DRAFT]` stamp is one junk chunk per page.
+    // Marking it unconditionally would change PDF tagging for everyone, so it
+    // is gated on the feature only the CND exporter enables.
+    let mark_foreground =
+        engine.world.library().features.is_enabled(Feature::CndSemantics);
+
     // Layouts a single marginal.
     let mut layout_marginal = |content: &Option<Content>, area, align| {
         let Some(content) = content else { return Ok(None) };
@@ -218,6 +229,13 @@ fn layout_page_run_impl(
     let header = header.clone().map(|h| h.artifact(ArtifactKind::Header));
     let footer = footer.clone().map(|f| f.artifact(ArtifactKind::Footer));
     let background = background.clone().map(|b| b.artifact(ArtifactKind::Background));
+    let foreground = foreground.clone();
+    let foreground = match mark_foreground {
+        // `Watermark` is the kind PDF gives "text or graphics in the back- or
+        // foreground of all pages" — what a foreground marginal is.
+        true => foreground.map(|f| f.artifact(ArtifactKind::Watermark)),
+        false => foreground,
+    };
 
     for inner in fragment {
         let header_size = Size::new(inner.width(), margin.top - header_ascent);
@@ -232,7 +250,7 @@ fn layout_page_run_impl(
             header: layout_marginal(&header, header_size, Alignment::BOTTOM)?,
             footer: layout_marginal(&footer, footer_size, Alignment::TOP)?,
             background: layout_marginal(&background, full_size, mid)?,
-            foreground: layout_marginal(foreground, full_size, mid)?,
+            foreground: layout_marginal(&foreground, full_size, mid)?,
             margin,
             margin_two_sided,
             bleed,

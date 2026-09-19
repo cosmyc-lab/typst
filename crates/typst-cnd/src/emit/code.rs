@@ -1,4 +1,3 @@
-use ecow::EcoString;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Packed, StyleChain};
 use typst_library::introspection::Introspector;
@@ -16,7 +15,7 @@ pub fn convert(
     styles: StyleChain,
 ) -> typst_library::diag::SourceResult<(CodeNode, NodeRecord)> {
     let block = raw.block.get(styles);
-    let text: EcoString = extract_text(&raw.clone().pack());
+    let text = extract_text(&raw.clone().pack());
     let lang = raw.lang.get_cloned(styles).map(Into::into);
 
     let id = uuid::Uuid::new_v4();

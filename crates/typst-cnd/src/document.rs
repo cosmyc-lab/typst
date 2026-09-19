@@ -9,10 +9,13 @@ use typst_library::introspection::Introspector;
 use typst_library::model::{Document, DocumentInfo};
 use typst_syntax::Span;
 
+use crate::emit::ancestry::Ancestry;
 use crate::emit::convert::{self, ConvertContext};
 use crate::emit::{pools, refs};
 use crate::location::LocationAssigner;
-use crate::model::{BibEntry, CND_VERSION, Cnd, DocDate, DocMetadata, Footnote, SourceInfo};
+use crate::model::{
+    BibEntry, CND_VERSION, Cnd, DocDate, DocMetadata, Footnote, SourceInfo,
+};
 
 /// A compiled CND document before JSON serialization.
 #[derive(Debug, Clone)]
@@ -68,12 +71,18 @@ impl Output for CndDocument {
         let introspector = paged.introspector().clone();
         let info = paged.info().clone();
 
+        // Containment is read off the laid-out frames: `Introspector::query`
+        // returns a flat list, but the emit pipeline must know which located
+        // elements sit inside a paragraph or inside page furniture.
+        let ancestry = Ancestry::from_document(&paged, engine);
+
         let mut ctx = realize_and_convert(
             engine,
             introspector.as_ref(),
             content,
             styles,
             &info,
+            &ancestry,
         )?;
         refs::rebuild_label_index(&mut ctx, introspector.as_ref());
         convert::apply_metadata(&mut ctx);
@@ -96,13 +105,7 @@ impl Output for CndDocument {
         let mut assigner = LocationAssigner::new(introspector.clone(), ctx.records);
         assigner.assign_all(&mut nodes);
 
-        Ok(Self {
-            info,
-            nodes,
-            bibliography,
-            footnotes,
-            introspector,
-        })
+        Ok(Self { info, nodes, bibliography, footnotes, introspector })
     }
 
     fn introspector(&self) -> &dyn Introspector {
@@ -116,6 +119,7 @@ fn realize_and_convert(
     _content: &Content,
     styles: StyleChain,
     info: &DocumentInfo,
+    ancestry: &Ancestry,
 ) -> SourceResult<ConvertContext> {
     let mut ctx = ConvertContext::default();
     crate::emit::convert::convert_from_introspector(
@@ -123,6 +127,7 @@ fn realize_and_convert(
         introspector,
         styles,
         doc_lang_from_info(info),
+        ancestry,
         &mut ctx,
     )?;
     Ok(ctx)
@@ -201,9 +206,6 @@ fn datetime_to_doc_date(dt: Datetime) -> DocDate {
 /// Serialize a CND to pretty JSON.
 pub fn cnd_to_json(cnd: &Cnd) -> SourceResult<String> {
     serde_json::to_string_pretty(cnd).map_err(|err| {
-        eco_vec![error!(
-            Span::detached(),
-            "failed to serialize CND: {err}"
-        )]
+        eco_vec![error!(Span::detached(), "failed to serialize CND: {err}")]
     })
 }

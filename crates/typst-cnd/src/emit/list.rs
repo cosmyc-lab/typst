@@ -6,7 +6,9 @@ use typst_library::model::{EnumElem, EnumItem, ListElem, ListItem, TermItem, Ter
 use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
-use crate::model::{ListItem as CndListItem, ListNode, TermItem as CndTermItem, TermsNode};
+use crate::model::{
+    ListItem as CndListItem, ListNode, TermItem as CndTermItem, TermsNode,
+};
 
 pub fn from_list(
     engine: &mut Engine,
@@ -22,11 +24,7 @@ pub fn from_list(
     let mut node = ListNode::new(id, location);
     node.ordered = false;
     node.tight = list.tight.get(styles);
-    node.items = list
-        .children
-        .iter()
-        .map(|item| list_item(item, false, styles))
-        .collect();
+    node.items = list.children.iter().map(list_item).collect();
 
     Ok((node, record))
 }
@@ -83,13 +81,11 @@ fn term_item(item: &Packed<TermItem>) -> CndTermItem {
     }
 }
 
-fn list_item(item: &Packed<ListItem>, ordered: bool, styles: StyleChain) -> CndListItem {
-    let nested = if let Some(list) = item.body.query_first_naive(&ListElem::ELEM.select()) {
+fn list_item(item: &Packed<ListItem>) -> CndListItem {
+    let nested = if let Some(list) = item.body.query_first_naive(&ListElem::ELEM.select())
+    {
         if let Some(list) = list.to_packed::<ListElem>() {
-            list.children
-                .iter()
-                .map(|child| list_item(child, ordered, styles))
-                .collect()
+            list.children.iter().map(list_item).collect()
         } else {
             Vec::new()
         }
@@ -107,10 +103,11 @@ fn list_item(item: &Packed<ListItem>, ordered: bool, styles: StyleChain) -> CndL
 fn enum_item(item: &Packed<EnumItem>, index: usize, styles: StyleChain) -> CndListItem {
     let number = match item.number.get(styles) {
         Smart::Custom(n) => Some(n as i32),
-        _ => Some((index + 1) as i32),
+        Smart::Auto => Some((index + 1) as i32),
     };
 
-    let nested = if let Some(list) = item.body.query_first_naive(&EnumElem::ELEM.select()) {
+    let nested = if let Some(list) = item.body.query_first_naive(&EnumElem::ELEM.select())
+    {
         if let Some(list) = list.to_packed::<EnumElem>() {
             list.children
                 .iter()

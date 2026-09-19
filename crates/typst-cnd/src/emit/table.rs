@@ -1,12 +1,16 @@
 use ecow::EcoString;
-use typst_library::engine::Engine;
 use typst_library::World;
 use typst_library::WorldExt;
-use typst_library::foundations::{Content, Label, NativeElement, Packed, StyleChain, Synthesize};
+use typst_library::engine::Engine;
+use typst_library::foundations::{
+    Content, Label, NativeElement, Packed, StyleChain, Synthesize,
+};
 use typst_library::introspection::Introspector;
 use typst_library::layout::GridElem;
 use typst_library::layout::grid::resolve::{CellGrid, Entry};
-use typst_library::model::{FigureCaption, FigureElem, TableChild, TableElem, TableHeader, TableItem};
+use typst_library::model::{
+    FigureCaption, FigureElem, TableChild, TableElem, TableHeader, TableItem,
+};
 use typst_syntax::Span;
 use uuid::Uuid;
 
@@ -18,7 +22,8 @@ use crate::model::{CndNode, FigureNode, RawSource, TableCell, TableKind, TableNo
 
 /// Find a table element nested inside realized figure (or other) content.
 pub fn table_in_content(content: &Content) -> Option<Packed<TableElem>> {
-    table_content_in(content).and_then(|table| table.to_packed().cloned())
+    let table = table_content_in(content)?;
+    table.to_packed().cloned()
 }
 
 /// Like [`table_in_content`], but keeps the introspector [`Content`] (with location).
@@ -28,9 +33,8 @@ pub fn table_content_in(content: &Content) -> Option<Content> {
 
 /// Find a grid element nested inside figure content.
 pub fn grid_in_content(content: &Content) -> Option<Packed<GridElem>> {
-    content
-        .query_first_naive(&GridElem::ELEM.select())
-        .and_then(|grid| grid.to_packed().cloned())
+    let grid = content.query_first_naive(&GridElem::ELEM.select())?;
+    grid.to_packed().cloned()
 }
 
 /// Public alias used by figure emission.
@@ -43,7 +47,7 @@ pub fn is_table_in_figure(introspector: &dyn Introspector, table: &Content) -> b
     let Some(table_packed) = table.to_packed::<TableElem>() else {
         return false;
     };
-    let fingerprint = table_fingerprint(&table_packed);
+    let fingerprint = table_fingerprint(table_packed);
     introspector
         .query(&FigureElem::ELEM.select())
         .into_iter()
@@ -85,7 +89,6 @@ pub fn from_figure(
         .or_else(|| caption_from_source(engine, figure.span()))
         .or_else(|| caption_from_source(engine, Span::detached()));
     let fig_number = convert::figure_number(engine, &figure, styles)
-        .map(Into::into)
         .or_else(|| figure_number_fallback(introspector, content));
     let wrapper_record = convert::make_record(engine, introspector, content, &[])?;
 
@@ -215,7 +218,9 @@ pub fn convert(
 /// typed field — the one `cnd.core.node_text`'s "auto"/"inline" rendering
 /// actually reads. Only a string value is accepted; anything else (wrong
 /// type, or simply absent) leaves the hint unset rather than guessing.
-fn content_kind_from_metadata(metadata: &std::collections::HashMap<String, serde_json::Value>) -> Option<String> {
+fn content_kind_from_metadata(
+    metadata: &std::collections::HashMap<String, serde_json::Value>,
+) -> Option<String> {
     match metadata.get("content_kind") {
         Some(serde_json::Value::String(s)) => Some(s.clone()),
         _ => None,
@@ -223,7 +228,7 @@ fn content_kind_from_metadata(metadata: &std::collections::HashMap<String, serde
 }
 
 fn count_header_rows(table: &Packed<TableElem>) -> i32 {
-    let mut rows = 0usize;
+    let mut rows = 0_usize;
     for child in &table.children {
         if let TableChild::Header(header) = child {
             rows += count_header_items(header);
@@ -236,7 +241,7 @@ fn count_header_rows(table: &Packed<TableElem>) -> i32 {
 }
 
 fn count_header_items(header: &Packed<TableHeader>) -> usize {
-    let mut max_row = 0usize;
+    let mut max_row = 0_usize;
     for item in &header.children {
         if let TableItem::Cell(cell) = item {
             max_row = max_row.max(1);
@@ -310,16 +315,16 @@ fn raw_typst_from_label(engine: &Engine, label: Option<Label>) -> Option<String>
 }
 
 fn extract_table_snippet(text: &str) -> String {
-    if let Some(start) = text.find("table(") {
-        if let Some(end) = matching_paren_end(&text[start..]) {
-            return text[start..start + end].trim().to_string();
-        }
+    if let Some(start) = text.find("table(")
+        && let Some(end) = matching_paren_end(&text[start..])
+    {
+        return text[start..start + end].trim().to_string();
     }
     text.trim().to_string()
 }
 
 fn matching_paren_end(text: &str) -> Option<usize> {
-    let mut depth = 0usize;
+    let mut depth = 0_usize;
     for (idx, ch) in text.char_indices() {
         match ch {
             '(' => depth += 1,
@@ -345,10 +350,10 @@ fn figure_number_fallback(
 }
 
 fn caption_from_source(engine: &Engine, span: Span) -> Option<EcoString> {
-    if let Some(snippet) = raw_typst_from_span(engine, span) {
-        if let Some(caption) = parse_caption(&snippet) {
-            return Some(caption);
-        }
+    if let Some(snippet) = raw_typst_from_span(engine, span)
+        && let Some(caption) = parse_caption(&snippet)
+    {
+        return Some(caption);
     }
     let main = engine.world.main();
     let source = engine.world.source(main).ok()?;
@@ -362,7 +367,7 @@ fn parse_caption(text: &str) -> Option<EcoString> {
     if !rest.starts_with('[') {
         return None;
     }
-    let mut depth = 0usize;
+    let mut depth = 0_usize;
     let mut end = None;
     for (idx, ch) in rest.char_indices() {
         match ch {
@@ -387,10 +392,10 @@ mod tests {
 
     #[test]
     fn parse_caption_from_figure_block() {
-        let text = r#"#figure(
+        let text = "#figure(
   table(columns: 2),
   caption: [Paramètres nominaux de fonctionnement.],
-) <tab-params>"#;
+) <tab-params>";
         let caption = parse_caption(text).unwrap();
         assert_eq!(caption.as_str(), "Paramètres nominaux de fonctionnement.");
     }
