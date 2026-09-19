@@ -33,7 +33,14 @@ fn build_library() -> Library {
     // located, so `Introspector::query` — the only source the CND emit
     // pipeline reads — cannot see it and the content is silently dropped.
     let features = Features::from_iter([Feature::CndSemantics]);
-    let mut library = Library::builder().with_features(features).build();
+    // Upstream #8496 made every export format opt-in: a format's bindings
+    // (`pdf.embed`, `pdf.header-cell`, …) now exist only if the format is
+    // registered here. Before it, `pdf` was defined unconditionally, so
+    // omitting it would reject documents the CND exporter used to accept.
+    // The other formats were never reachable from this world, so they stay
+    // unregistered — CND is this world's only output.
+    let mut library =
+        Library::builder([typst_pdf::FORMAT]).with_features(features).build();
     // DEPRECATED — see crate::cnd's module doc. Removal tracked for the next release.
     library.global.scope_mut().define("cnd", crate::cnd::module());
     library

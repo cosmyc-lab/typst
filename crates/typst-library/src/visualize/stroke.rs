@@ -49,7 +49,7 @@ use crate::visualize::{Color, Gradient, Paint, Tiling};
 /// constructor function. For example, `{(2pt + blue).thickness}` is `{2pt}`.
 /// Meanwhile, `{stroke(red).cap}` is `{auto}` because it's unspecified. Fields
 /// set to `{auto}` are inherited.
-#[ty(scope, cast)]
+#[ty(scope, cast, since = "forever")]
 #[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]
 pub struct Stroke<T: Numeric = Length> {
     /// The stroke's paint.
@@ -96,7 +96,7 @@ impl Stroke {
     /// #my-func(red) \
     /// #my-func(stroke(cap: "round", thickness: 1pt))
     /// ```
-    #[func(constructor)]
+    #[func(constructor, since = "forever")]
     pub fn construct(
         args: &mut Args,
 
@@ -316,7 +316,7 @@ impl<T: Numeric + Repr> Repr for Stroke<T> {
                 }
                 (Smart::Custom(paint), Smart::Auto) => r.push_str(&paint.repr()),
                 (Smart::Auto, Smart::Custom(thickness)) => r.push_str(&thickness.repr()),
-                (Smart::Auto, Smart::Auto) => r.push_str("1pt + black"),
+                (Smart::Auto, Smart::Auto) => r.push_str("stroke()"),
             }
         } else {
             r.push('(');

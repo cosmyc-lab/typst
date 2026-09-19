@@ -4,6 +4,7 @@ use ecow::eco_vec;
 use typst_layout::{PagedIntrospector, layout_document};
 use typst_library::diag::{SourceResult, error};
 use typst_library::engine::Engine;
+use typst_library::format::DocumentFormatOptions;
 use typst_library::foundations::{Content, Datetime, Output, Smart, StyleChain, Target};
 use typst_library::introspection::Introspector;
 use typst_library::model::{Document, DocumentInfo};
@@ -25,6 +26,10 @@ pub struct CndDocument {
     bibliography: Vec<BibEntry>,
     footnotes: Vec<Footnote>,
     introspector: Arc<PagedIntrospector>,
+    /// Format options set by the document (upstream #8496). CND exports none
+    /// of these formats, but `Document` requires them and they are carried
+    /// through unchanged from the paged layout this document is built on.
+    options: DocumentFormatOptions,
 }
 
 impl CndDocument {
@@ -55,6 +60,10 @@ impl Document for CndDocument {
     fn info(&self) -> &DocumentInfo {
         &self.info
     }
+
+    fn options(&self) -> &DocumentFormatOptions {
+        &self.options
+    }
 }
 
 impl Output for CndDocument {
@@ -70,6 +79,7 @@ impl Output for CndDocument {
         let paged = layout_document(engine, content, styles)?;
         let introspector = paged.introspector().clone();
         let info = paged.info().clone();
+        let options = paged.options().clone();
 
         // Containment is read off the laid-out frames: `Introspector::query`
         // returns a flat list, but the emit pipeline must know which located
@@ -105,7 +115,14 @@ impl Output for CndDocument {
         let mut assigner = LocationAssigner::new(introspector.clone(), ctx.records);
         assigner.assign_all(&mut nodes);
 
-        Ok(Self { info, nodes, bibliography, footnotes, introspector })
+        Ok(Self {
+            info,
+            nodes,
+            bibliography,
+            footnotes,
+            introspector,
+            options,
+        })
     }
 
     fn introspector(&self) -> &dyn Introspector {
