@@ -52,7 +52,13 @@ impl BrowserWorld {
         // infallible by construction.
         let main = file_id(DEFAULT_MAIN).expect("`main.typ` is a valid virtual path");
         Self {
-            library: LazyHash::new(Library::builder().build()),
+            // No export formats are registered: this world only ever
+            // serves IDE queries, never exports. Upstream #8496 made the
+            // format bindings (`pdf.*`, `html.*`) conditional on
+            // registration, and pulling `typst-pdf` in would bloat the wasm
+            // bundle for completions the CND pipeline is the real authority
+            // on.
+            library: LazyHash::new(Library::builder([]).build()),
             book: LazyHash::new(FontBook::new()),
             fonts: Vec::new(),
             sources: FxHashMap::default(),
@@ -164,8 +170,23 @@ impl IdeWorld for BrowserWorld {
         self
     }
 
-    fn files(&self) -> Vec<FileId> {
-        self.sources.keys().chain(self.assets.keys()).copied().collect()
+    fn files(&self, base: FileId, prefix: Option<&str>) -> Vec<VirtualPath> {
+        // Upstream widened this in #8699: the IDE now asks for virtual paths
+        // relative to the file being completed, optionally narrowed by what
+        // the user has already typed.
+        let dir = base.vpath().parent();
+        self.sources
+            .keys()
+            .chain(self.assets.keys())
+            .map(|id| id.vpath().clone())
+            .filter(|path| {
+                prefix.is_none_or(|prefix| {
+                    dir.as_ref()
+                        .map(|dir| path.relative_from(dir))
+                        .is_none_or(|relative| relative.starts_with(prefix))
+                })
+            })
+            .collect()
     }
 
     fn packages(&self) -> &[(PackageSpec, Option<EcoString>)] {

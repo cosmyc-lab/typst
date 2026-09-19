@@ -24,10 +24,9 @@ use typst_library::introspection::{Location, Tag};
 use typst_library::layout::{Frame, FrameItem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    BibliographyElem, EnumElem, FigureElem, FootnoteEntry, HeadingElem, ListElem,
-    OutlineElem, ParElem, QuoteElem, TableElem, TermsElem,
+    ArtifactElem, BibliographyElem, EnumElem, FigureElem, FootnoteEntry, HeadingElem,
+    ListElem, OutlineElem, ParElem, QuoteElem, TableElem, TermsElem,
 };
-use typst_library::pdf::ArtifactElem;
 use typst_library::text::RawElem;
 use typst_syntax::{FileId, Span};
 

@@ -19,6 +19,7 @@ typst-kit = { workspace = true, features = ["embedded-fonts", "scan-fonts", "sys
 typst-layout = { workspace = true }
 typst-library = { workspace = true }
 typst-macros = { workspace = true }
+typst-pdf = { workspace = true }
 typst-syntax = { workspace = true }
 typst-timing = { workspace = true }
 typst-utils = { workspace = true }
