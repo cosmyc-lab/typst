@@ -74,7 +74,7 @@ impl Output for CndDocument {
         // Containment is read off the laid-out frames: `Introspector::query`
         // returns a flat list, but the emit pipeline must know which located
         // elements sit inside a paragraph or inside page furniture.
-        let ancestry = Ancestry::from_document(&paged);
+        let ancestry = Ancestry::from_document(&paged, engine);
 
         let mut ctx = realize_and_convert(
             engine,

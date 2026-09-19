@@ -87,7 +87,13 @@ impl ConvertContext {
     /// `records` is a hash map, whose iteration order is unspecified. Every
     /// pass that builds edges out of it pushes them in the order it visits
     /// the nodes, and those edges are then deduplicated first-wins — so the
-    /// order has to come from the data, not from the map.
+    /// result must not depend on the map's internal layout.
+    ///
+    /// This does *not* make a CND reproducible across runs: node ids are
+    /// `Uuid::new_v4()`, so the order is freshly arbitrary every time. It
+    /// buys one thing only — the order is a function of the ids, so two
+    /// passes over the same map agree, and an unrelated insertion cannot
+    /// silently reshuffle which edge wins.
     pub fn records_sorted(&self) -> Vec<(Uuid, &NodeRecord)> {
         let mut records: Vec<(Uuid, &NodeRecord)> =
             self.records.iter().map(|(id, record)| (*id, record)).collect();
@@ -671,12 +677,19 @@ pub fn convert_from_introspector(
         items.push((loc, elem));
     }
 
+    // Paragraphs skipped as part of an enclosing one, kept so that enclosing
+    // paragraph can absorb their edges.
+    let mut absorbed: Vec<(Location, Content)> = Vec::new();
+
     for elem in introspector.query(&ParElem::ELEM.select()) {
         let Some(par) = elem.to_packed::<ParElem>() else { continue };
         let Some(loc) = elem.location() else { continue };
-        // A paragraph whose text an enclosing paragraph already carries is
-        // the body of an inline `box`; emitting it would duplicate the text.
-        if ancestry.is_covered_by_par(loc) {
+        // The body of an inline `box`, realized into a paragraph of its own.
+        // The paragraph containing the box renders that text itself, so this
+        // one is a duplicate — but it is the only copy that carries the
+        // box's footnote and citation tags, which are absorbed below.
+        if let Some(parent) = ancestry.covering_par(loc) {
+            absorbed.push((parent, elem.clone()));
             continue;
         }
         // Likewise for a paragraph inside a list, table, code block or
@@ -712,8 +725,48 @@ pub fn convert_from_introspector(
             &mut stack,
         )?;
     }
+    absorb_covered_paragraphs(ctx, &absorbed);
     finalize_headings(ctx, &mut stack);
     Ok(())
+}
+
+/// Move the footnote and citation edges of a paragraph that was skipped as
+/// part of an enclosing one onto that enclosing paragraph.
+///
+/// The enclosing paragraph's own content holds the box body *unrealized*, so
+/// a footnote or citation written inside the box is a bare element there —
+/// which `collect_footnote_locs` and `collect_cite_markers` deliberately
+/// ignore, since they read the introspection tags that only realized content
+/// carries. Skipping the realized paragraph without this would take the edge
+/// with it.
+///
+/// The absorbed markers carry no text span: their offsets index the skipped
+/// paragraph's text, not the text the surviving node exposes. A span-less
+/// edge is what a list item or a table cell already produces.
+fn absorb_covered_paragraphs(ctx: &mut ConvertContext, absorbed: &[(Location, Content)]) {
+    for (parent, nested) in absorbed {
+        let Some(id) = ctx.location_to_id.get(parent).copied() else { continue };
+        let footnotes = collect_footnote_locs(nested);
+        let cites = collect_cite_markers(nested);
+        let refs = collect_ref_targets(nested);
+        let Some(record) = ctx.records.get_mut(&id) else { continue };
+
+        for loc in footnotes {
+            if record.footnote_locs.iter().all(|(known, _)| *known != loc) {
+                record.footnote_locs.push((loc, None));
+            }
+        }
+        for marker in cites {
+            if record.cite_markers.iter().all(|known| known.loc != marker.loc) {
+                record.cite_markers.push(marker);
+            }
+        }
+        for label in refs {
+            if !record.ref_targets.contains(&label) {
+                record.ref_targets.push(label);
+            }
+        }
+    }
 }
 
 fn dispatch(

@@ -1286,8 +1286,9 @@ fn layout_container_content_is_not_lost() {
         );
     }
 
-    // Dedup keys off the *nearest* enclosing paragraph only, and must not
-    // swallow words the surrounding sentence uses in its own right.
+    // The box is dropped because it is written inside this paragraph, not
+    // because its text matches — a word the sentence uses in its own right
+    // must survive on both sides of the box.
     assert!(
         paragraphs.iter().any(|p| p
             == "A paragraph where idem repeats a word the sentence itself uses: idem."),
@@ -1306,4 +1307,112 @@ fn layout_container_content_is_not_lost() {
         paragraphs.iter().any(|p| p.contains("first line second line")),
         "hard line break did not separate the lines, got {paragraphs:?}"
     );
+}
+
+#[test]
+fn inline_boxes_are_absorbed_and_floats_are_not() {
+    let cnd = cnd_for_example("inline_boxes_and_floats.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    let joined = paragraphs.join("\n");
+
+    // The body of an inline `box` is realized into a paragraph of its own,
+    // which the paragraph holding the box already renders.
+    assert_eq!(
+        paragraphs.iter().filter(|p| p.contains("boxed")).count(),
+        1,
+        "an inline box became a paragraph of its own: {paragraphs:?}"
+    );
+    assert!(
+        !joined.contains("see Section"),
+        "a box holding a cross-reference was emitted twice: {paragraphs:?}"
+    );
+
+    // A float written inside a paragraph is deferred to wherever it fits,
+    // and its tags can land inside a *later* paragraph's still-open range.
+    // It is not part of that paragraph and must survive.
+    assert_eq!(
+        paragraphs.iter().filter(|p| p.contains("FLOATED BODY TEXT")).count(),
+        1,
+        "the float body was dropped or duplicated: {paragraphs:?}"
+    );
+
+    // Page furniture. Upstream marks the header, the footer and the
+    // background as artifacts but not the foreground; without that the stamp
+    // is one paragraph per page.
+    assert!(
+        !joined.contains("DRAFT STAMP"),
+        "the page foreground leaked into the document: {paragraphs:?}"
+    );
+
+    // A rendered bibliography entry: its text belongs to the pool, and with
+    // `title: none` no generated heading's source range hides it.
+    assert!(
+        !joined.contains("Context-native pipelines"),
+        "a bibliography entry leaked as prose: {paragraphs:?}"
+    );
+    assert!(
+        cnd.bibliography.iter().any(|entry| entry.label == "smith2024"),
+        "the bibliography pool lost its entry"
+    );
+
+    // Dropping the box's paragraph must not drop the edges only it carries:
+    // the enclosing paragraph holds the box body *unrealized*, so the
+    // footnote and citation tags exist nowhere else.
+    let edges = paragraph_edges(&cnd.nodes, "A sentence with");
+    assert!(
+        edges.footnotes.contains(&"1".to_string()),
+        "the footnote written inside a box lost its edge: {edges:?}"
+    );
+    assert!(
+        edges.cites.contains(&"smith2024".to_string()),
+        "the citation written inside a box lost its edge: {edges:?}"
+    );
+    assert!(
+        edges.refs.contains(&"sec".to_string()),
+        "the reference written inside a box lost its edge: {edges:?}"
+    );
+    assert_eq!(
+        edges.refs.len(),
+        1,
+        "absorbing the box's reference duplicated an edge the host already had: {edges:?}"
+    );
+
+    assert_cnd_contract(&cnd);
+    assert_pool_refs_resolve(&cnd);
+}
+
+#[derive(Debug, Default)]
+struct ParagraphEdges {
+    refs: Vec<String>,
+    cites: Vec<String>,
+    footnotes: Vec<String>,
+}
+
+/// The out-of-tree edges of the first paragraph whose text contains `needle`.
+fn paragraph_edges(nodes: &[CndNode], needle: &str) -> ParagraphEdges {
+    fn walk(nodes: &[CndNode], needle: &str, out: &mut Option<ParagraphEdges>) {
+        for node in nodes {
+            if out.is_some() {
+                return;
+            }
+            if let CndNode::Paragraph(p) = node
+                && p.text.contains(needle)
+            {
+                *out = Some(ParagraphEdges {
+                    refs: p.base.refs.iter().map(|r| r.label.clone()).collect(),
+                    cites: p.base.cites.iter().map(|c| c.label.clone()).collect(),
+                    footnotes: p.base.footnotes.iter().map(|f| f.label.clone()).collect(),
+                });
+                return;
+            }
+            match node {
+                CndNode::Heading(h) => walk(&h.children, needle, out),
+                CndNode::Figure(f) => walk(&f.children, needle, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = None;
+    walk(nodes, needle, &mut out);
+    out.unwrap_or_default()
 }
