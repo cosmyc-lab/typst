@@ -102,27 +102,30 @@ pub fn extract_with_markers(content: &Content) -> (EcoString, Vec<ExtractedMarke
     // turns that into `text_span: None`.
     //
     // This is `Link`-only on purpose: cite/footnote frames are NOT flushed
-    // here. Their own tags always bracket their own rendered text within one
-    // node by construction (a citation/footnote marker's rendered text is a
-    // few characters the tag itself produces, never a body that can split
-    // flow), and existing fixtures pin today's silent-drop behavior for
-    // them — flushing those too would be an unrequested behavior change.
+    // here. Cite/footnote already have their own universal,
+    // `TagElem`-unwrapping collectors (`convert::collect_cite_markers`/
+    // `collect_footnote_locs`) that capture their locations regardless of
+    // node flatness — flushing them here too would duplicate that path and
+    // is an unrequested behavior change beyond this task's scope.
     //
-    // Verified limit, not a hypothetical one: this flush does **not**
-    // rescue a body that forces its own paragraph break — `#link(url)[first
-    // \n\n second]`, `#link(url)[#block[..]]`, and `#link(url)[#image(..)]`
-    // all behave the same way, confirmed against real compiles of all
-    // three. `typst-realize`'s paragraph-grouping hoists a tag pair that
-    // straddles a group boundary *out of both* resulting groups (see the
-    // "tags that are closed within or at the end boundary..." handling in
-    // `typst-realize/src/lib.rs`'s grouping code), so in each of those three
-    // cases **neither** `Tag::Start` nor `Tag::End` ever appears in *any*
-    // single node's walk — there is no open frame for this flush, or any
-    // per-node fix, to reach. That gap is a real, currently-uncovered loss
-    // of these links, not something this function can close; a fix would
-    // need to watch for orphaned tag pairs at the document level (in the
-    // spirit of `convert::absorb_covered_paragraphs`), which is a bigger
-    // change than this task's scope.
+    // What this flush does and does not reach (verified against real
+    // compiles, not derived from reading alone): it rescues a link whose
+    // `Tag::Start` is *interior* to the enclosing paragraph group's trigger
+    // range — e.g. `Leading text #link(url)[body that continues onto a
+    // second paragraph.]`, where "Leading text" and the link open in the
+    // same group. It does **not** reach a *paragraph-initial* link, whose
+    // `Tag::Start` sits immediately before any group's trigger range: per
+    // `typst-realize/src/lib.rs::finish_grouping`, `PAR` grouping keeps tags
+    // (`tags: true`) and includes a tag when it is interior to the trigger
+    // range, or its partner is within the range or in the immediately
+    // adjacent run of tags — a paragraph-initial link's `Tag::End` (on the
+    // far side of a paragraph break) satisfies neither, so both tags stay
+    // in the outer flow and never enter any node's walk at all. A
+    // `#block`/`#image` body is a separate case with the same visible
+    // effect for a different reason: `BlockElem`/`ImageElem` are
+    // `Interrupt` for `PAR`, so no paragraph group forms around the link at
+    // the flow level in the first place, and the block's own inner
+    // paragraph is realized without ever seeing the link's tags.
     let MarkerCtx { open, mut done, .. } = ctx;
     for frame in open {
         if matches!(frame.kind, MarkerKind::Link(_)) {

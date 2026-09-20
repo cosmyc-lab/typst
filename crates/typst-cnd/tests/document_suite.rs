@@ -1597,13 +1597,16 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
         list_link.text_span
     );
 
-    // A body that splits into two paragraphs (Critical 1's finding): the
-    // `LinkElem`'s `Tag::Start`/`Tag::End` straddle the paragraph-break
-    // boundary, so `typst-realize`'s grouping hoists the pair out of *both*
-    // resulting groups — neither paragraph's own walk ever sees either tag.
-    // This currently drops the link entirely rather than null-spanning it
-    // on either paragraph; pinning that as today's (uncovered) behavior,
-    // not as something this test claims is correct.
+    // A paragraph-initial body that splits into two paragraphs (Critical 1's
+    // finding): the link opens the block with no leading text before it, so
+    // its `Tag::Start` sits before any paragraph group's trigger range and
+    // both tags stay in the outer flow — neither paragraph's own walk ever
+    // sees either tag, and the null-span flush in `extract.rs` has no open
+    // frame to catch. This currently drops the link entirely rather than
+    // null-spanning it on either paragraph; pinning that as today's
+    // (uncovered) behavior for this one shape, not as something this test
+    // claims is correct. A link with leading text before it in the same
+    // paragraph does not have this problem (see the other assertions above).
     let first_half = find_paragraph(&cnd.nodes, "First half of a multi-paragraph")
         .expect("the first half of the split link body");
     let CndNode::Paragraph(first_half) = first_half else { unreachable!() };

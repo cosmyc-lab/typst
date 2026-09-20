@@ -28,16 +28,17 @@ A link to a label with a custom body: #link(<sec-overview>)[see the overview].
 
 An empty-bodied link carries no rendered text: #link("https://example.com/cover")[].
 
-// A body that splits into two paragraphs. Verified against a real compile:
-// this link produces NO `links` entry on either resulting paragraph, not a
-// null-spanned one — a known, currently-uncovered gap, not the outcome the
-// null-span flush in `extract.rs` was hoped to fix. `typst-realize`'s
-// paragraph grouping hoists a `Tag::Start`/`Tag::End` pair that straddles a
-// paragraph-break boundary *out of both* resulting groups, so neither tag
-// ever appears in either paragraph's own walk — there is no open frame in
-// either one for the flush to catch. The same is true of `#block[..]` and
-// `#image(..)` bodies (see `extract.rs::extract_with_markers`'s doc
-// comment): all three land in the gap between nodes.
+// A paragraph-initial body that splits into two paragraphs (the link opens
+// the block, with no leading text before it). Verified against a real
+// compile: this link produces NO `links` entry on either resulting
+// paragraph, not a null-spanned one. This is the one shape the null-span
+// flush in `extract.rs::extract_with_markers` cannot reach: a
+// paragraph-initial link's `Tag::Start` sits before any paragraph group's
+// trigger range, so both its tags stay in the outer flow and never enter
+// either paragraph's own walk. A link with leading text before it in the
+// same paragraph (see the other cases in this file) does not have this
+// problem — the flush rescues those. See that doc comment for the exact
+// rule and for the separate `#block`/`#image` case.
 #link("https://example.com/multipart")[First half of a multi-paragraph link body.
 
 Second half of the same link body.]
