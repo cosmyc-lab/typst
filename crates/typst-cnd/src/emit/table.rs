@@ -157,6 +157,8 @@ pub fn from_figure_grid(
         footnote_locs: Vec::new(),
         cite_markers: Vec::new(),
         ref_markers: Vec::new(),
+        link_targets: Vec::new(),
+        link_markers: Vec::new(),
         state_metadata: std::collections::HashMap::new(),
     };
 

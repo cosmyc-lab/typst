@@ -1422,3 +1422,176 @@ fn paragraph_edges(nodes: &[CndNode], needle: &str) -> ParagraphEdges {
     walk(nodes, needle, &mut out);
     out.unwrap_or_default()
 }
+
+/// The first paragraph whose text contains `needle`, anywhere in the tree.
+fn find_paragraph<'a>(nodes: &'a [CndNode], needle: &str) -> Option<&'a CndNode> {
+    for node in nodes {
+        if let CndNode::Paragraph(p) = node
+            && p.text.contains(needle)
+        {
+            return Some(node);
+        }
+        match node {
+            CndNode::Heading(h) => {
+                if let Some(found) = find_paragraph(&h.children, needle) {
+                    return Some(found);
+                }
+            }
+            CndNode::Figure(f) => {
+                if let Some(found) = find_paragraph(&f.children, needle) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `#link` capture (ADR 0024): the three-row mapping (URL -> `links`,
+/// label/location -> `refs`, position -> dropped), the nested-marker
+/// pairing, and the null-span rules for a non-textual body and a
+/// non-flat (list item) node.
+#[test]
+fn link_capture_maps_dest_kinds_and_pins_marker_pairing() {
+    let cnd = cnd_for_example("links.typ");
+
+    // Nested case: a link whose body begins with a ref to the very heading
+    // it sits under. This is the case that pins the marker pairing: with
+    // position-keyed pairing, the link's own `LinkMarker` (opening at the
+    // same position as the ref's point marker) can be mispaired with the
+    // ref's pending entry.
+    let nested = find_paragraph(&cnd.nodes, "and more text")
+        .expect("the nested link+ref paragraph");
+    let CndNode::Paragraph(nested) = nested else { unreachable!() };
+
+    let link = nested
+        .base
+        .links
+        .iter()
+        .find(|l| l.href == "https://example.com")
+        .unwrap_or_else(|| panic!("expected a links entry in {:?}", nested.base.links));
+    let link_span = link
+        .text_span
+        .as_ref()
+        .unwrap_or_else(|| panic!("expected a non-null span for {link:?}"));
+
+    let reference = nested
+        .base
+        .refs
+        .iter()
+        .find(|r| r.label == "sec-overview")
+        .unwrap_or_else(|| panic!("expected a refs entry in {:?}", nested.base.refs));
+    let ref_span = reference
+        .text_span
+        .as_ref()
+        .unwrap_or_else(|| panic!("expected a non-null span for {reference:?}"));
+
+    assert!(
+        link_span[0] <= ref_span[0] && ref_span[1] <= link_span[1],
+        "the link's span {link_span:?} must contain the ref's span {ref_span:?}"
+    );
+    let link_slice = codepoint_slice(&nested.text, link_span);
+    let ref_slice = codepoint_slice(&nested.text, ref_span);
+    assert!(
+        link_slice.contains(&ref_slice),
+        "the link's rendered text {link_slice:?} must contain the ref's {ref_slice:?}"
+    );
+    assert!(
+        link_slice.contains("and more text"),
+        "the link's span must cover the whole body, got {link_slice:?}"
+    );
+
+    // Row 1: a plain URL link — `links` entry, href verbatim, span slicing
+    // to the rendered (auto) body text.
+    let plain =
+        find_paragraph(&cnd.nodes, "in running text").expect("the plain-url paragraph");
+    let CndNode::Paragraph(plain) = plain else { unreachable!() };
+    let plain_link = plain
+        .base
+        .links
+        .iter()
+        .find(|l| l.href == "https://example.com/docs")
+        .unwrap_or_else(|| panic!("expected a links entry in {:?}", plain.base.links));
+    let plain_span = plain_link.text_span.as_ref().expect("non-null span");
+    assert_eq!(codepoint_slice(&plain.text, plain_span), "https://example.com/docs");
+
+    // Row 2: `#link(<label>)[body]` is a cross-reference with a custom
+    // body — a `refs` entry, not a `links` entry.
+    let labelled = find_paragraph(&cnd.nodes, "see the overview")
+        .expect("the link-to-label paragraph");
+    let CndNode::Paragraph(labelled) = labelled else { unreachable!() };
+    let labelled_ref = labelled
+        .base
+        .refs
+        .iter()
+        .find(|r| r.label == "sec-overview")
+        .unwrap_or_else(|| panic!("expected a refs entry in {:?}", labelled.base.refs));
+    assert_eq!(
+        codepoint_slice(&labelled.text, labelled_ref.text_span.as_ref().unwrap()),
+        "see the overview"
+    );
+    assert!(
+        labelled.base.links.is_empty(),
+        "a link-to-label must not also surface as a links entry: {:?}",
+        labelled.base.links
+    );
+
+    // Non-textual body (an empty-bodied link): a `links` entry with a null
+    // span — the marker opens and closes with no rendered text in between,
+    // not a degenerate `[n, n]`.
+    let empty_body_paragraph = find_paragraph(&cnd.nodes, "carries no rendered text")
+        .expect("the empty-bodied-link paragraph");
+    let CndNode::Paragraph(empty_body_paragraph) = empty_body_paragraph else {
+        unreachable!()
+    };
+    let empty_body_link = empty_body_paragraph
+        .base
+        .links
+        .iter()
+        .find(|l| l.href == "https://example.com/cover")
+        .unwrap_or_else(|| {
+            panic!("expected a links entry in {:?}", empty_body_paragraph.base.links)
+        });
+    assert!(
+        empty_body_link.text_span.is_none(),
+        "an empty-bodied link renders no text: expected a null span, got {:?}",
+        empty_body_link.text_span
+    );
+
+    // Row 3: a page/point position has no label and is not durable — no
+    // `links` entry, no `refs` entry.
+    let position_link_paragraph =
+        find_paragraph(&cnd.nodes, "Go to top").expect("the position-link paragraph");
+    let CndNode::Paragraph(position_link_paragraph) = position_link_paragraph else {
+        unreachable!()
+    };
+    assert!(
+        position_link_paragraph.base.links.is_empty(),
+        "a position destination must be dropped, not emitted as a links entry: {:?}",
+        position_link_paragraph.base.links
+    );
+    assert!(
+        position_link_paragraph.base.refs.is_empty(),
+        "a position destination must be dropped, not emitted as a refs entry: {:?}",
+        position_link_paragraph.base.refs
+    );
+
+    // Non-flat node (a list item): the span fallback rule ("nodes whose
+    // text is not a single flat string emit `text_span: None`") now also
+    // applies to `links` — generalised from the same rule already in force
+    // for `refs` (refs.rs).
+    let lists = find_lists(&cnd.nodes);
+    let list = lists.first().expect("the bullet list");
+    let list_link = list
+        .base
+        .links
+        .iter()
+        .find(|l| l.href == "https://example.com/list")
+        .unwrap_or_else(|| panic!("expected a links entry in {:?}", list.base.links));
+    assert!(
+        list_link.text_span.is_none(),
+        "a link inside a non-flat node must carry a null span, got {:?}",
+        list_link.text_span
+    );
+}

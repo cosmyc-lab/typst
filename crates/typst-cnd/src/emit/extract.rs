@@ -1,7 +1,10 @@
 use ecow::EcoString;
 use typst_library::foundations::{Content, Label, PlainText, Value};
 use typst_library::introspection::{Location, Tag, TagElem};
-use typst_library::model::{CitationForm, CiteElem, FootnoteElem, LinkMarker, RefElem};
+use typst_library::model::{
+    CitationForm, CiteElem, Destination, FootnoteElem, LinkElem, LinkMarker, LinkTarget,
+    RefElem,
+};
 use typst_library::text::LinebreakElem;
 
 /// Extract plain text from content without duplicating inline code.
@@ -36,6 +39,42 @@ pub enum MarkerKind {
     Cite(Location),
     /// Footnote; payload is the marker's own location.
     Footnote(Location),
+    /// `LinkElem` (ADR 0024, cnd-sdk); payload is the narrowed destination
+    /// (see [`LinkDest`]). The marker's own `Tag::Start`/`Tag::End` bracket
+    /// the whole link body, so this is captured like `Cite`/`Footnote`
+    /// (`open_frame`) — never through the ref/`LinkMarker` pending
+    /// mechanism, which is a different marker's rendered text.
+    Link(LinkDest),
+}
+
+/// A `LinkElem`'s destination, narrowed to what a CND can durably point at
+/// (the three-row mapping in ADR 0024): a URL (a `links` edge), or a
+/// label/location naming another node in this document (a `refs` edge,
+/// with a custom body). A page/point position has no label and is dropped
+/// by [`link_dest`] before it ever becomes a marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkDest {
+    Url(EcoString),
+    Label(Label),
+    Location(Location),
+}
+
+/// Map a `LinkElem`'s raw (unresolved) `dest` field to what this fork
+/// carries forward. `dest` is a `LinkTarget`, not a resolved `Destination`:
+/// resolution (`LinkTarget::resolve_early`) happens inside `LinkElem`'s show
+/// rule, not on the tag this reads from, so a `#link(<label>)[..]` is seen
+/// here as `LinkTarget::Label` directly, not yet turned into a `Location`.
+pub(crate) fn link_dest(target: &LinkTarget) -> Option<LinkDest> {
+    match target {
+        LinkTarget::Label(label) => Some(LinkDest::Label(*label)),
+        LinkTarget::Dest(Destination::Url(url)) => {
+            Some(LinkDest::Url(url.clone().into_inner()))
+        }
+        LinkTarget::Dest(Destination::Location(loc)) => Some(LinkDest::Location(*loc)),
+        // Not durable: a page/point position carries no label to survive a
+        // rebuild, and is dropped rather than emitted (design's row 3).
+        LinkTarget::Dest(Destination::Position(_)) => None,
+    }
 }
 
 /// Extract plain text and, in the same walk, the code-point spans of any
@@ -199,9 +238,10 @@ fn walk_value(value: Value, out: &mut EcoString, ctx: &mut MarkerCtx) {
     }
 }
 
-/// Open a cite/footnote marker frame for a `Tag::Start`'s inner element —
-/// these tags bracket their own rendered marker text. Refs and link markers
-/// are handled separately in [`open_tag`].
+/// Open a cite/footnote/link marker frame for a `Tag::Start`'s inner
+/// element — these tags bracket their own rendered marker text. Refs and
+/// (a ref's own rendering) `LinkMarker`s are handled separately in
+/// [`open_tag`], since a ref is a zero-width point marker.
 fn open_frame(inner: &Content, start: i64) -> Option<OpenFrame> {
     let marker_loc = inner.location()?;
     if inner.to_packed::<CiteElem>().is_some() {
@@ -222,6 +262,17 @@ fn open_frame(inner: &Content, start: i64) -> Option<OpenFrame> {
             kind: MarkerKind::Footnote(marker_loc),
             start,
         });
+    }
+    if let Some(link) = inner.to_packed::<LinkElem>() {
+        // `LinkElem` is `Locatable`, so its own `Tag::Start`/`Tag::End`
+        // already bracket the realized `LinkMarker` (and, in turn, the
+        // link's body) at this same location — unlike a ref, which is a
+        // zero-width point marker that must wait for a *different*
+        // element's `LinkMarker` to learn its rendered span. A destination
+        // that carries no label (a page/point position) yields no frame at
+        // all here, so it never gets a marker or a span.
+        let dest = link_dest(&link.dest)?;
+        return Some(OpenFrame { marker_loc, kind: MarkerKind::Link(dest), start });
     }
     None
 }

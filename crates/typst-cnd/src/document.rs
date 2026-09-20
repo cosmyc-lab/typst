@@ -102,6 +102,11 @@ impl Output for CndDocument {
         pools::build_bibliography_pool(engine, introspector.as_ref(), &mut ctx)?;
         refs::resolve_refs(&mut ctx, introspector.as_ref(), content);
 
+        // `links` (ADR 0024, cnd-sdk): a label/location `LinkElem` folds
+        // into the same `refs` edges above; needs `ctx.label_to_id`/
+        // `ctx.location_to_id`, already built by `rebuild_label_index`.
+        refs::resolve_links(&mut ctx, introspector.as_ref());
+
         // Out-of-tree typed edges (proposal 0004): footnote + citation
         // markers were captured per node during conversion (as introspection
         // tags, since the realized flow keeps only rendered markers); resolve

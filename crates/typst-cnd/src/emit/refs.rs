@@ -10,7 +10,8 @@ use typst_library::text::RawElem;
 use uuid::Uuid;
 
 use crate::emit::convert::ConvertContext;
-use crate::model::{CndNode, NodeRef};
+use crate::emit::extract::LinkDest;
+use crate::model::{CndNode, NodeLink, NodeRef};
 
 /// `(source node, target node, the target's label, the marker's text span)`.
 type RefEdge = (Uuid, Uuid, Option<String>, Option<(i64, i64)>);
@@ -143,6 +144,102 @@ pub fn resolve_refs(
             continue;
         };
         set_ref(ctx, source, label, span);
+    }
+}
+
+/// Resolve `LinkElem` markers (ADR 0024, cnd-sdk) into `links` and `refs`
+/// edges: a URL destination becomes a `links` edge — `href` has no
+/// resolution domain, so it is pushed directly, never dropped. A
+/// label/location destination *is* a cross-reference (with a custom body)
+/// and is folded into the same `set_ref` dedup-by-label machinery as
+/// `resolve_refs`, so a node naming the same target both ways (`@fig-1`
+/// and `#link(<fig-1>)[...]`) still yields one `refs` edge.
+///
+/// Call after `resolve_refs`: label/location resolution needs
+/// `ctx.label_to_id`/`ctx.location_to_id`, already built by
+/// `rebuild_label_index` and unaffected by `resolve_refs` itself.
+pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) {
+    // (source, href, span) for a `links` edge.
+    let mut links: Vec<(Uuid, String, Option<(i64, i64)>)> = Vec::new();
+    // Same shape as `RefEdge` in `resolve_refs`, resolved through the same
+    // `set_ref` dedup below.
+    let mut ref_edges: Vec<RefEdge> = Vec::new();
+
+    for (source_id, record) in ctx.records_sorted() {
+        for (dest, span) in &record.link_markers {
+            collect_link_edge(
+                ctx,
+                introspector,
+                source_id,
+                dest,
+                Some(*span),
+                &mut links,
+                &mut ref_edges,
+            );
+        }
+        for dest in &record.link_targets {
+            collect_link_edge(
+                ctx,
+                introspector,
+                source_id,
+                dest,
+                None,
+                &mut links,
+                &mut ref_edges,
+            );
+        }
+    }
+
+    for (source_id, href, span) in links {
+        if let Some(node) = find_node_mut(&mut ctx.roots, source_id) {
+            node.links_mut()
+                .push(NodeLink { href, text_span: normalize_link_span(span) });
+        }
+    }
+
+    for (source, target, marker_label, span) in ref_edges {
+        let Some(label) = node_label(ctx, target).or(marker_label) else { continue };
+        set_ref(ctx, source, label, span);
+    }
+}
+
+fn collect_link_edge(
+    ctx: &ConvertContext,
+    introspector: &dyn Introspector,
+    source_id: Uuid,
+    dest: &LinkDest,
+    span: Option<(i64, i64)>,
+    links: &mut Vec<(Uuid, String, Option<(i64, i64)>)>,
+    ref_edges: &mut Vec<RefEdge>,
+) {
+    match dest {
+        LinkDest::Url(href) => links.push((source_id, href.to_string(), span)),
+        LinkDest::Label(label) => {
+            if let Some(target_id) = resolve_label(*label, ctx, introspector) {
+                ref_edges.push((
+                    source_id,
+                    target_id,
+                    Some(label.resolve().as_str().into()),
+                    span,
+                ));
+            }
+        }
+        LinkDest::Location(loc) => {
+            if let Some(target_id) = ctx.location_to_id.get(loc).copied() {
+                ref_edges.push((source_id, target_id, None, span));
+            }
+        }
+    }
+}
+
+/// A marker that opened and closed at the same code-point position rendered
+/// no text (e.g. an image link's body) — null the span rather than emit a
+/// degenerate `[n, n]` (design's null-span rule, generalised from the
+/// `refs` fallback below to `links`).
+fn normalize_link_span(span: Option<(i64, i64)>) -> Option<Vec<i64>> {
+    match span {
+        Some((start, end)) if start != end => Some(vec![start, end]),
+        _ => None,
     }
 }
 
