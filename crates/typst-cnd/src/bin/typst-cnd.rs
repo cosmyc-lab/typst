@@ -95,7 +95,15 @@ fn compile_file(input: &Path, output: &Path, inputs: Dict) -> SourceResult<()> {
 
 /// Parses key/value pairs split by the first equal sign.
 ///
-/// Mirrors `typst-cli`'s `--input` parser, which is private to that crate.
+/// Mirrors `typst-cli`'s `--input` parser: `typst-cli` has no `[lib]`
+/// target (only `[[bin]]`), so nothing in it — public or not — is
+/// reachable from a dependent crate, hence the copy here.
+///
+/// Trims surrounding whitespace from both the key and the value, unlike
+/// `--inputs-file` below, which takes JSON values verbatim: a repeated
+/// `--input` is typed by hand and whitespace around `=` is noise, while an
+/// `--inputs-file` value is often itself a serialized document where
+/// whitespace can be meaningful.
 fn parse_sys_input_pair(raw: &str) -> Result<(String, String), String> {
     let (key, val) = raw
         .split_once('=')
@@ -152,6 +160,13 @@ fn load_inputs_file(path: &Path) -> SourceResult<Vec<(String, String)>> {
     })?;
     let mut pairs = Vec::with_capacity(object.len());
     for (key, val) in object {
+        if key.trim().is_empty() {
+            return Err(eco_vec![error!(
+                Span::detached(),
+                "inputs file {}: keys must not be empty",
+                path.display()
+            )]);
+        }
         let Some(s) = val.as_str() else {
             return Err(eco_vec![error!(
                 Span::detached(),

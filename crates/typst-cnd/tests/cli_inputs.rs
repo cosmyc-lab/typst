@@ -133,8 +133,8 @@ fn inputs_file_rejects_non_object_top_level() {
         "error should name the file path, got: {stderr}"
     );
     assert!(
-        stderr.to_lowercase().contains("object"),
-        "error should say an object was expected, got: {stderr}"
+        stderr.to_lowercase().contains("json object"),
+        "error should say a JSON object was expected, got: {stderr}"
     );
 }
 
@@ -152,5 +152,32 @@ fn inputs_file_rejects_non_string_value() {
         stderr.contains(inputs_path.to_str().unwrap()),
         "error should name the file path, got: {stderr}"
     );
-    assert!(stderr.contains('k'), "error should name the offending key, got: {stderr}");
+    // `main` prints each `SourceDiagnostic` with `{:?}`, which in turn
+    // debug-formats the `message: String` field — so the key's own quotes
+    // (from `{key:?}` in the error message) come out backslash-escaped in
+    // stderr, not as a bare `"k"`.
+    assert!(
+        stderr.contains("key \\\"k\\\""),
+        "error should name the offending key, got: {stderr}"
+    );
+}
+
+/// An empty key is rejected — matching `--input`'s own empty-key rejection,
+/// so the two flags feeding the same map behave consistently.
+#[test]
+fn inputs_file_rejects_empty_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let inputs_path = dir.path().join("inputs.json");
+    fs::write(&inputs_path, r#"{"": "v"}"#).expect("write inputs file");
+
+    let stderr =
+        run_expect_failure(dir.path(), &["--inputs-file", inputs_path.to_str().unwrap()]);
+    assert!(
+        stderr.contains(inputs_path.to_str().unwrap()),
+        "error should name the file path, got: {stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("empty"),
+        "error should say keys must not be empty, got: {stderr}"
+    );
 }
