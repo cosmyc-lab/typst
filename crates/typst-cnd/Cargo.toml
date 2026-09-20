@@ -38,5 +38,8 @@ clap = { workspace = true, features = ["derive"] }
 name = "typst-cnd"
 path = "src/bin/typst-cnd.rs"
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true
