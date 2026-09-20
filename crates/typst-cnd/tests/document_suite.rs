@@ -1449,18 +1449,20 @@ fn find_paragraph<'a>(nodes: &'a [CndNode], needle: &str) -> Option<&'a CndNode>
 }
 
 /// `#link` capture (ADR 0024): the three-row mapping (URL -> `links`,
-/// label/location -> `refs`, position -> dropped), the nested-marker
-/// pairing, and the null-span rules for a non-textual body and a
-/// non-flat (list item) node.
+/// label/location -> `refs`, position -> dropped), and the null-span rules
+/// for a non-textual body and a non-flat (list item) node.
 #[test]
-fn link_capture_maps_dest_kinds_and_pins_marker_pairing() {
+fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
     let cnd = cnd_for_example("links.typ");
 
     // Nested case: a link whose body begins with a ref to the very heading
-    // it sits under. This is the case that pins the marker pairing: with
-    // position-keyed pairing, the link's own `LinkMarker` (opening at the
-    // same position as the ref's point marker) can be mispaired with the
-    // ref's pending entry.
+    // it sits under. `LinkElem` capture goes through `open_frame`, keyed on
+    // the `LinkElem`'s own `Location` for both open and close (like
+    // cite/footnote) — never through the ref/`LinkMarker` pending-position
+    // mechanism, so there is no shared state for the two to collide over.
+    // This guards against a future change re-routing link capture through
+    // that mechanism: it would assert one `links` entry whose span contains
+    // the `refs` entry's span, both non-null, exactly as today.
     let nested = find_paragraph(&cnd.nodes, "and more text")
         .expect("the nested link+ref paragraph");
     let CndNode::Paragraph(nested) = nested else { unreachable!() };
@@ -1594,4 +1596,25 @@ fn link_capture_maps_dest_kinds_and_pins_marker_pairing() {
         "a link inside a non-flat node must carry a null span, got {:?}",
         list_link.text_span
     );
+
+    // A body that splits into two paragraphs (Critical 1's finding): the
+    // `LinkElem`'s `Tag::Start`/`Tag::End` straddle the paragraph-break
+    // boundary, so `typst-realize`'s grouping hoists the pair out of *both*
+    // resulting groups — neither paragraph's own walk ever sees either tag.
+    // This currently drops the link entirely rather than null-spanning it
+    // on either paragraph; pinning that as today's (uncovered) behavior,
+    // not as something this test claims is correct.
+    let first_half = find_paragraph(&cnd.nodes, "First half of a multi-paragraph")
+        .expect("the first half of the split link body");
+    let CndNode::Paragraph(first_half) = first_half else { unreachable!() };
+    assert!(
+        first_half.base.links.is_empty(),
+        "known gap: a `LinkElem` whose body splits into two paragraphs is \
+         dropped, not null-spanned — got {:?}",
+        first_half.base.links
+    );
+    let second_half = find_paragraph(&cnd.nodes, "Second half of the same link body")
+        .expect("the second half of the split link body");
+    let CndNode::Paragraph(second_half) = second_half else { unreachable!() };
+    assert!(second_half.base.links.is_empty(), "same known gap, other half");
 }

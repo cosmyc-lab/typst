@@ -10,7 +10,11 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const CND_VERSION: &str = "0.3.0";
+/// The `links` family (ADR 0024, cnd-sdk) is a 0.4.0 format change: this is
+/// the only machine-readable signal a consumer has for whether a CND may
+/// carry `links` at all (a reindex gate, or a converter's decision whether
+/// to render a links section).
+pub const CND_VERSION: &str = "0.4.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

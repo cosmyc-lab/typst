@@ -92,7 +92,48 @@ pub fn extract_with_markers(content: &Content) -> (EcoString, Vec<ExtractedMarke
     let mut out = EcoString::new();
     let mut ctx = MarkerCtx::default();
     walk(content, &mut out, &mut ctx);
-    (out, ctx.done)
+
+    // A `LinkElem` whose `Tag::Start` opens within this walk but whose
+    // matching `Tag::End` does not — left open here — would otherwise be
+    // silently discarded: the edge disappears entirely instead of getting
+    // the null span the design calls for when a marker "does not close
+    // inside [the] node's rendered text". Flush any still-open `Link` frame
+    // with a degenerate `[start, start)` span; `refs::normalize_link_span`
+    // turns that into `text_span: None`.
+    //
+    // This is `Link`-only on purpose: cite/footnote frames are NOT flushed
+    // here. Their own tags always bracket their own rendered text within one
+    // node by construction (a citation/footnote marker's rendered text is a
+    // few characters the tag itself produces, never a body that can split
+    // flow), and existing fixtures pin today's silent-drop behavior for
+    // them — flushing those too would be an unrequested behavior change.
+    //
+    // Verified limit, not a hypothetical one: this flush does **not**
+    // rescue a body that forces its own paragraph break — `#link(url)[first
+    // \n\n second]`, `#link(url)[#block[..]]`, and `#link(url)[#image(..)]`
+    // all behave the same way, confirmed against real compiles of all
+    // three. `typst-realize`'s paragraph-grouping hoists a tag pair that
+    // straddles a group boundary *out of both* resulting groups (see the
+    // "tags that are closed within or at the end boundary..." handling in
+    // `typst-realize/src/lib.rs`'s grouping code), so in each of those three
+    // cases **neither** `Tag::Start` nor `Tag::End` ever appears in *any*
+    // single node's walk — there is no open frame for this flush, or any
+    // per-node fix, to reach. That gap is a real, currently-uncovered loss
+    // of these links, not something this function can close; a fix would
+    // need to watch for orphaned tag pairs at the document level (in the
+    // spirit of `convert::absorb_covered_paragraphs`), which is a bigger
+    // change than this task's scope.
+    let MarkerCtx { open, mut done, .. } = ctx;
+    for frame in open {
+        if matches!(frame.kind, MarkerKind::Link(_)) {
+            done.push(ExtractedMarker {
+                kind: frame.kind,
+                start: frame.start,
+                end: frame.start,
+            });
+        }
+    }
+    (out, done)
 }
 
 #[derive(Default)]

@@ -215,6 +215,17 @@ fn collect_link_edge(
     match dest {
         LinkDest::Url(href) => links.push((source_id, href.to_string(), span)),
         LinkDest::Label(label) => {
+            // Mirrors `resolve_refs`'s bib-key guard: a `@key` citation is a
+            // `RefElem` that resolves in the bibliography pool, not the node
+            // tree, and a `#link(<key>)[..]` naming the same label should be
+            // kept out of `refs` for the same reason. `resolve_label`
+            // presumably already returns `None` for a bib key (nothing in
+            // `ctx.records`/the introspector carries it as a node label),
+            // but the guard is cheap and keeps this path an exact mirror of
+            // `resolve_refs` rather than an inconsistent near-copy.
+            if ctx.bib_key_to_id.contains_key(label) {
+                return;
+            }
             if let Some(target_id) = resolve_label(*label, ctx, introspector) {
                 ref_edges.push((
                     source_id,
