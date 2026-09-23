@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime, Duration};
+use typst::foundations::{Bytes, Datetime, Dict, Duration};
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
@@ -26,7 +26,7 @@ pub struct CndWorld {
     now: Time,
 }
 
-fn build_library() -> Library {
+fn build_library(inputs: Dict) -> Library {
     // `Feature::CndSemantics` makes every fully-inline fragment body (a
     // `block[…]`, a grid cell, a `place`, a `box`) realize into a real,
     // locatable `ParElem`. Without it that text is laid out but never
@@ -39,8 +39,10 @@ fn build_library() -> Library {
     // omitting it would reject documents the CND exporter used to accept.
     // The other formats were never reachable from this world, so they stay
     // unregistered — CND is this world's only output.
-    let mut library =
-        Library::builder([typst_pdf::FORMAT]).with_features(features).build();
+    let mut library = Library::builder([typst_pdf::FORMAT])
+        .with_inputs(inputs)
+        .with_features(features)
+        .build();
     // DEPRECATED — see crate::cnd's module doc. Removal tracked for the next release.
     library.global.scope_mut().define("cnd", crate::cnd::module());
     library
@@ -48,6 +50,14 @@ fn build_library() -> Library {
 
 impl CndWorld {
     pub fn new(input: &Path) -> Result<Self, FileError> {
+        Self::new_with_inputs(input, Dict::default())
+    }
+
+    /// Like [`new`](Self::new), but also seeds `sys.inputs` with `inputs`
+    /// (the CLI's `--input` and `--inputs-file`, merged before this is
+    /// called). Empty by default, so [`new`](Self::new) behaves exactly as
+    /// it always has.
+    pub fn new_with_inputs(input: &Path, inputs: Dict) -> Result<Self, FileError> {
         let root = input
             .parent()
             .unwrap_or(Path::new("."))
@@ -64,7 +74,7 @@ impl CndWorld {
 
         Ok(Self {
             main,
-            library: LazyHash::new(build_library()),
+            library: LazyHash::new(build_library(inputs)),
             fonts: LazyLock::new(Box::new(|| {
                 let mut store = FontStore::new();
                 store.extend(fonts::embedded());

@@ -11,7 +11,8 @@ use typst_library::introspection::{Introspector, Location, Tag, TagElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
     CiteElem, EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteElem, HeadingElem,
-    ListElem, ListItem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
+    LinkElem, ListElem, ListItem, ParElem, QuoteElem, RefElem, Supplement, TableElem,
+    TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_library::visualize::ImageElem;
@@ -19,7 +20,7 @@ use typst_syntax::{FileId, Span};
 use uuid::Uuid;
 
 use crate::emit::ancestry::Ancestry;
-use crate::emit::extract::{ExtractedMarker, MarkerKind};
+use crate::emit::extract::{ExtractedMarker, LinkDest, MarkerKind};
 use crate::emit::{
     code, extract, figure, heading, list, math, paragraph, quote, reading_order, table,
 };
@@ -56,6 +57,16 @@ pub struct NodeRecord {
     /// nodes. Consulted in `refs::resolve_refs` to attach a span to the
     /// edge already created from `ref_targets` (never a separate edge).
     pub ref_markers: Vec<(Label, (i64, i64))>,
+    /// `LinkElem` destinations found universally (any node, via a bare
+    /// content traverse — mirrors `ref_targets`): always `text_span: None`,
+    /// since it never sees the flat-text walk's spans (ADR 0013's rule,
+    /// generalised to `links` in ADR 0024).
+    pub link_targets: Vec<LinkDest>,
+    /// `LinkElem` destinations with their text spans — only from flat-text
+    /// nodes (mirrors `ref_markers`). Resolved in `refs::resolve_links` and
+    /// `refs::resolve_refs` (a label/location destination is a
+    /// cross-reference with a custom body).
+    pub link_markers: Vec<(LinkDest, (i64, i64))>,
     pub state_metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
@@ -749,6 +760,7 @@ fn absorb_covered_paragraphs(ctx: &mut ConvertContext, absorbed: &[(Location, Co
         let footnotes = collect_footnote_locs(nested);
         let cites = collect_cite_markers(nested);
         let refs = collect_ref_targets(nested);
+        let links = collect_link_targets(nested);
         let Some(record) = ctx.records.get_mut(&id) else { continue };
 
         for loc in footnotes {
@@ -764,6 +776,11 @@ fn absorb_covered_paragraphs(ctx: &mut ConvertContext, absorbed: &[(Location, Co
         for label in refs {
             if !record.ref_targets.contains(&label) {
                 record.ref_targets.push(label);
+            }
+        }
+        for dest in links {
+            if !record.link_targets.contains(&dest) {
+                record.link_targets.push(dest);
             }
         }
     }
@@ -929,6 +946,34 @@ pub fn collect_ref_targets(content: &Content) -> Vec<Label> {
     labels
 }
 
+/// Collect `LinkElem` destinations occurring anywhere in `content`,
+/// universally (mirrors `collect_ref_targets` exactly, bare-match only) —
+/// always paired with `text_span: None` in `refs::resolve_links`/
+/// `refs::resolve_refs`, since a span requires the flat-text walk
+/// (`ExtractedMarker`, ADR 0013).
+///
+/// Deliberately bare-only, not `TagElem`-unwrapping like
+/// `collect_cite_markers`/`collect_footnote_locs`: a realized (flat) node's
+/// `LinkElem` is *only* reachable under a `TagElem` (`fields()` skips the
+/// tag's `#[internal]` payload, so a bare traverse cannot see it there),
+/// while a non-flat node's content (a list item, a table cell) is captured
+/// bare, exactly as authored. Matching both shapes here — as cite/footnote
+/// do — would double-count a flat node's links: they are already carried,
+/// spanned, in `link_markers`, and `refs::resolve_links` combines both
+/// lists additively (unlike cite/footnote's single, location-keyed list).
+fn collect_link_targets(content: &Content) -> Vec<LinkDest> {
+    let mut out = Vec::new();
+    let _ = content.traverse(&mut |element| {
+        if let Some(link) = element.to_packed::<LinkElem>()
+            && let Some(dest) = extract::link_dest(&link.dest)
+        {
+            out.push(dest);
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    out
+}
+
 pub fn metadata_at(
     engine: &mut Engine,
     introspector: &dyn Introspector,
@@ -961,6 +1006,7 @@ pub fn make_record(
     let mut footnote_span: rustc_hash::FxHashMap<Location, (i64, i64)> =
         rustc_hash::FxHashMap::default();
     let mut ref_markers: Vec<(Label, (i64, i64))> = Vec::new();
+    let mut link_markers: Vec<(LinkDest, (i64, i64))> = Vec::new();
     for marker in markers {
         match &marker.kind {
             MarkerKind::Cite(loc) => {
@@ -972,8 +1018,13 @@ pub fn make_record(
             MarkerKind::Ref(label) => {
                 ref_markers.push((*label, (marker.start, marker.end)));
             }
+            MarkerKind::Link(dest) => {
+                link_markers.push((dest.clone(), (marker.start, marker.end)));
+            }
         }
     }
+
+    let link_targets = collect_link_targets(content);
 
     // Universal marker-location capture (all node types) + span layering.
     let footnote_locs = collect_footnote_locs(content)
@@ -997,6 +1048,8 @@ pub fn make_record(
         footnote_locs,
         cite_markers,
         ref_markers,
+        link_targets,
+        link_markers,
         state_metadata,
     })
 }

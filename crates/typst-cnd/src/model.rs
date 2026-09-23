@@ -10,7 +10,11 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const CND_VERSION: &str = "0.3.0";
+/// The `links` family (ADR 0024, cnd-sdk) is a 0.4.0 format change: this is
+/// the only machine-readable signal a consumer has for whether a CND may
+/// carry `links` at all (a reindex gate, or a converter's decision whether
+/// to render a links section).
+pub const CND_VERSION: &str = "0.4.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -167,6 +171,10 @@ impl CndNode {
         &mut self.base_mut().footnotes
     }
 
+    pub fn links_mut(&mut self) -> &mut Vec<NodeLink> {
+        &mut self.base_mut().links
+    }
+
     /// Nodes with their own reading-flow children: headings and figure
     /// wrappers. A figure's children keep their own `location` — nothing is
     /// inherited from the wrapper (ADR 0010) — but they still need to be
@@ -231,6 +239,18 @@ pub struct FootnoteRef {
     pub text_span: Option<Vec<i64>>,
 }
 
+/// Forward hyperlink edge (ADR 0024, cnd-sdk): `href` is the URL string the
+/// marker points at. Unlike `NodeRef`/`CiteRef`/`FootnoteRef`, `links` has
+/// no resolution domain — an `href` is never invalid for naming something
+/// the CND does not carry. `text_span` as on `NodeRef` (ADR 0013).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct NodeLink {
+    pub href: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_span: Option<Vec<i64>>,
+}
+
 /// Footnote pool entry — flat supporting text keyed by its rendered
 /// ordinal `label` (proposal 0004).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +307,10 @@ pub struct NodeBase {
     pub cites: Vec<CiteRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footnotes: Vec<FootnoteRef>,
+    /// Forward hyperlink edges (ADR 0024, cnd-sdk) — a fourth, href-keyed
+    /// forward family alongside `refs`/`cites`/`footnotes`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<NodeLink>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_metadata: HashMap<String, serde_json::Value>,
     pub location: NodeLocation,
@@ -544,6 +568,7 @@ impl NodeBase {
             refs: Vec::new(),
             cites: Vec::new(),
             footnotes: Vec::new(),
+            links: Vec::new(),
             state_metadata: HashMap::new(),
             location,
         }

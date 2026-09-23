@@ -1,7 +1,10 @@
 use ecow::EcoString;
 use typst_library::foundations::{Content, Label, PlainText, Value};
 use typst_library::introspection::{Location, Tag, TagElem};
-use typst_library::model::{CitationForm, CiteElem, FootnoteElem, LinkMarker, RefElem};
+use typst_library::model::{
+    CitationForm, CiteElem, Destination, FootnoteElem, LinkElem, LinkMarker, LinkTarget,
+    RefElem,
+};
 use typst_library::text::LinebreakElem;
 
 /// Extract plain text from content without duplicating inline code.
@@ -36,6 +39,42 @@ pub enum MarkerKind {
     Cite(Location),
     /// Footnote; payload is the marker's own location.
     Footnote(Location),
+    /// `LinkElem` (ADR 0024, cnd-sdk); payload is the narrowed destination
+    /// (see [`LinkDest`]). The marker's own `Tag::Start`/`Tag::End` bracket
+    /// the whole link body, so this is captured like `Cite`/`Footnote`
+    /// (`open_frame`) — never through the ref/`LinkMarker` pending
+    /// mechanism, which is a different marker's rendered text.
+    Link(LinkDest),
+}
+
+/// A `LinkElem`'s destination, narrowed to what a CND can durably point at
+/// (the three-row mapping in ADR 0024): a URL (a `links` edge), or a
+/// label/location naming another node in this document (a `refs` edge,
+/// with a custom body). A page/point position has no label and is dropped
+/// by [`link_dest`] before it ever becomes a marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkDest {
+    Url(EcoString),
+    Label(Label),
+    Location(Location),
+}
+
+/// Map a `LinkElem`'s raw (unresolved) `dest` field to what this fork
+/// carries forward. `dest` is a `LinkTarget`, not a resolved `Destination`:
+/// resolution (`LinkTarget::resolve_early`) happens inside `LinkElem`'s show
+/// rule, not on the tag this reads from, so a `#link(<label>)[..]` is seen
+/// here as `LinkTarget::Label` directly, not yet turned into a `Location`.
+pub(crate) fn link_dest(target: &LinkTarget) -> Option<LinkDest> {
+    match target {
+        LinkTarget::Label(label) => Some(LinkDest::Label(*label)),
+        LinkTarget::Dest(Destination::Url(url)) => {
+            Some(LinkDest::Url(url.clone().into_inner()))
+        }
+        LinkTarget::Dest(Destination::Location(loc)) => Some(LinkDest::Location(*loc)),
+        // Not durable: a page/point position carries no label to survive a
+        // rebuild, and is dropped rather than emitted (design's row 3).
+        LinkTarget::Dest(Destination::Position(_)) => None,
+    }
 }
 
 /// Extract plain text and, in the same walk, the code-point spans of any
@@ -53,7 +92,51 @@ pub fn extract_with_markers(content: &Content) -> (EcoString, Vec<ExtractedMarke
     let mut out = EcoString::new();
     let mut ctx = MarkerCtx::default();
     walk(content, &mut out, &mut ctx);
-    (out, ctx.done)
+
+    // A `LinkElem` whose `Tag::Start` opens within this walk but whose
+    // matching `Tag::End` does not — left open here — would otherwise be
+    // silently discarded: the edge disappears entirely instead of getting
+    // the null span the design calls for when a marker "does not close
+    // inside [the] node's rendered text". Flush any still-open `Link` frame
+    // with a degenerate `[start, start)` span; `refs::normalize_link_span`
+    // turns that into `text_span: None`.
+    //
+    // This is `Link`-only on purpose: cite/footnote frames are NOT flushed
+    // here. Cite/footnote already have their own universal,
+    // `TagElem`-unwrapping collectors (`convert::collect_cite_markers`/
+    // `collect_footnote_locs`) that capture their locations regardless of
+    // node flatness — flushing them here too would duplicate that path and
+    // is an unrequested behavior change beyond this task's scope.
+    //
+    // What this flush does and does not reach (verified against real
+    // compiles, not derived from reading alone): it rescues a link whose
+    // `Tag::Start` is *interior* to the enclosing paragraph group's trigger
+    // range — e.g. `Leading text #link(url)[body that continues onto a
+    // second paragraph.]`, where "Leading text" and the link open in the
+    // same group. It does **not** reach a *paragraph-initial* link, whose
+    // `Tag::Start` sits immediately before any group's trigger range: per
+    // `typst-realize/src/lib.rs::finish_grouping`, `PAR` grouping keeps tags
+    // (`tags: true`) and includes a tag when it is interior to the trigger
+    // range, or its partner is within the range or in the immediately
+    // adjacent run of tags — a paragraph-initial link's `Tag::End` (on the
+    // far side of a paragraph break) satisfies neither, so both tags stay
+    // in the outer flow and never enter any node's walk at all. A
+    // `#block`/`#image` body is a separate case with the same visible
+    // effect for a different reason: `BlockElem`/`ImageElem` are
+    // `Interrupt` for `PAR`, so no paragraph group forms around the link at
+    // the flow level in the first place, and the block's own inner
+    // paragraph is realized without ever seeing the link's tags.
+    let MarkerCtx { open, mut done, .. } = ctx;
+    for frame in open {
+        if matches!(frame.kind, MarkerKind::Link(_)) {
+            done.push(ExtractedMarker {
+                kind: frame.kind,
+                start: frame.start,
+                end: frame.start,
+            });
+        }
+    }
+    (out, done)
 }
 
 #[derive(Default)]
@@ -199,9 +282,10 @@ fn walk_value(value: Value, out: &mut EcoString, ctx: &mut MarkerCtx) {
     }
 }
 
-/// Open a cite/footnote marker frame for a `Tag::Start`'s inner element —
-/// these tags bracket their own rendered marker text. Refs and link markers
-/// are handled separately in [`open_tag`].
+/// Open a cite/footnote/link marker frame for a `Tag::Start`'s inner
+/// element — these tags bracket their own rendered marker text. Refs and
+/// (a ref's own rendering) `LinkMarker`s are handled separately in
+/// [`open_tag`], since a ref is a zero-width point marker.
 fn open_frame(inner: &Content, start: i64) -> Option<OpenFrame> {
     let marker_loc = inner.location()?;
     if inner.to_packed::<CiteElem>().is_some() {
@@ -222,6 +306,17 @@ fn open_frame(inner: &Content, start: i64) -> Option<OpenFrame> {
             kind: MarkerKind::Footnote(marker_loc),
             start,
         });
+    }
+    if let Some(link) = inner.to_packed::<LinkElem>() {
+        // `LinkElem` is `Locatable`, so its own `Tag::Start`/`Tag::End`
+        // already bracket the realized `LinkMarker` (and, in turn, the
+        // link's body) at this same location — unlike a ref, which is a
+        // zero-width point marker that must wait for a *different*
+        // element's `LinkMarker` to learn its rendered span. A destination
+        // that carries no label (a page/point position) yields no frame at
+        // all here, so it never gets a marker or a span.
+        let dest = link_dest(&link.dest)?;
+        return Some(OpenFrame { marker_loc, kind: MarkerKind::Link(dest), start });
     }
     None
 }
