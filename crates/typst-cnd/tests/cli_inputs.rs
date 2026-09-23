@@ -60,6 +60,17 @@ fn compile_probe(dir: &Path, extra_args: &[&str]) -> Vec<String> {
 
 /// Run `typst-cnd` and return its stderr plus exit status, without asserting
 /// success — for cases that are expected to fail.
+/// A path as it actually appears in stderr.
+///
+/// `main()` prints each `SourceDiagnostic` with `{:?}`, and the derived `Debug`
+/// escapes the message's own backslashes — so a Windows path comes back doubled
+/// (`C:\\Users\\...`) while the value we hold has single ones. On Unix this is
+/// the identity, which is why asserting on the raw path passed there and only
+/// failed on Windows.
+fn path_as_printed(path: &std::path::Path) -> String {
+    path.to_str().unwrap().replace('\\', "\\\\")
+}
+
 fn run_expect_failure(dir: &Path, extra_args: &[&str]) -> String {
     let source = dir.join("main.typ");
     fs::write(&source, PROBE_SOURCE).expect("write source");
@@ -129,7 +140,7 @@ fn inputs_file_rejects_non_object_top_level() {
     let stderr =
         run_expect_failure(dir.path(), &["--inputs-file", inputs_path.to_str().unwrap()]);
     assert!(
-        stderr.contains(inputs_path.to_str().unwrap()),
+        stderr.contains(&path_as_printed(&inputs_path)),
         "error should name the file path, got: {stderr}"
     );
     assert!(
@@ -149,7 +160,7 @@ fn inputs_file_rejects_non_string_value() {
     let stderr =
         run_expect_failure(dir.path(), &["--inputs-file", inputs_path.to_str().unwrap()]);
     assert!(
-        stderr.contains(inputs_path.to_str().unwrap()),
+        stderr.contains(&path_as_printed(&inputs_path)),
         "error should name the file path, got: {stderr}"
     );
     // `main` prints each `SourceDiagnostic` with `{:?}`, which in turn
@@ -173,7 +184,7 @@ fn inputs_file_rejects_empty_key() {
     let stderr =
         run_expect_failure(dir.path(), &["--inputs-file", inputs_path.to_str().unwrap()]);
     assert!(
-        stderr.contains(inputs_path.to_str().unwrap()),
+        stderr.contains(&path_as_printed(&inputs_path)),
         "error should name the file path, got: {stderr}"
     );
     assert!(
