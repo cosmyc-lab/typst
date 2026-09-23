@@ -1,4 +1,10 @@
 //! Shared helpers for typst-cnd integration tests.
+//!
+//! Every integration test binary that does `mod common;` compiles this whole
+//! file, so a helper only one binary uses is dead code in the others. CI runs
+//! with `RUSTFLAGS: -Dwarnings`, which turns that into a build failure — so the
+//! allow is what lets a test file use a subset without breaking the rest.
+#![allow(dead_code)]
 
 use std::collections::HashSet;
 use std::path::PathBuf;

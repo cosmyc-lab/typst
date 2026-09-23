@@ -15,6 +15,10 @@ use crate::model::{CndNode, NodeLink, NodeRef};
 
 /// `(source node, target node, the target's label, the marker's text span)`.
 type RefEdge = (Uuid, Uuid, Option<String>, Option<(i64, i64)>);
+/// A `links` edge before it reaches the node: (node id, href, span).
+/// Sibling of `RefEdge` above — same reason, and clippy's `type_complexity`
+/// is denied by CI's `-Dwarnings`.
+type LinkEdge = (Uuid, String, Option<(i64, i64)>);
 
 fn doc_selector() -> Selector {
     Selector::Or(eco_vec![
@@ -160,7 +164,7 @@ pub fn resolve_refs(
 /// `rebuild_label_index` and unaffected by `resolve_refs` itself.
 pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) {
     // (source, href, span) for a `links` edge.
-    let mut links: Vec<(Uuid, String, Option<(i64, i64)>)> = Vec::new();
+    let mut links: Vec<LinkEdge> = Vec::new();
     // Same shape as `RefEdge` in `resolve_refs`, resolved through the same
     // `set_ref` dedup below.
     let mut ref_edges: Vec<RefEdge> = Vec::new();
@@ -209,7 +213,7 @@ fn collect_link_edge(
     source_id: Uuid,
     dest: &LinkDest,
     span: Option<(i64, i64)>,
-    links: &mut Vec<(Uuid, String, Option<(i64, i64)>)>,
+    links: &mut Vec<LinkEdge>,
     ref_edges: &mut Vec<RefEdge>,
 ) {
     match dest {
