@@ -170,7 +170,9 @@ fn relative_dependencies(
     let current_dir = std::env::current_dir()?;
     let relative_root =
         pathdiff::diff_paths(&root, &current_dir).unwrap_or_else(|| root.clone());
-    Ok(world.dependencies().map(move |dependency| {
+    let fonts = world.font_dependencies();
+    let files: Vec<PathBuf> = world.dependencies().collect();
+    Ok(files.into_iter().chain(fonts).map(move |dependency| {
         dependency
             .strip_prefix(&root)
             .map_or_else(|_| dependency.clone(), |x| relative_root.join(x))

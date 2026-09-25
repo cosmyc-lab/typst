@@ -26,13 +26,17 @@ pub struct CndWorld {
     now: Time,
 }
 
-fn build_library(inputs: Dict) -> Library {
+/// Builds the standard library a CND compilation needs: `inputs` as
+/// `sys.inputs`, `features` plus [`Feature::CndSemantics`], the `pdf`
+/// format's bindings, and the deprecated `cnd` global.
+pub fn cnd_library(inputs: Dict, features: impl IntoIterator<Item = Feature>) -> Library {
     // `Feature::CndSemantics` makes every fully-inline fragment body (a
     // `block[…]`, a grid cell, a `place`, a `box`) realize into a real,
     // locatable `ParElem`. Without it that text is laid out but never
     // located, so `Introspector::query` — the only source the CND emit
     // pipeline reads — cannot see it and the content is silently dropped.
-    let features = Features::from_iter([Feature::CndSemantics]);
+    let features: Features =
+        features.into_iter().chain([Feature::CndSemantics]).collect();
     // Upstream #8496 made every export format opt-in: a format's bindings
     // (`pdf.embed`, `pdf.header-cell`, …) now exist only if the format is
     // registered here. Before it, `pdf` was defined unconditionally, so
@@ -58,6 +62,17 @@ impl CndWorld {
     /// called). Empty by default, so [`new`](Self::new) behaves exactly as
     /// it always has.
     pub fn new_with_inputs(input: &Path, inputs: Dict) -> Result<Self, FileError> {
+        Self::new_with_options(input, inputs, true)
+    }
+
+    /// Like [`new_with_inputs`](Self::new_with_inputs), but `system_fonts:
+    /// false` restricts the font set to the embedded fonts, for reproducible
+    /// comparisons across machines.
+    pub fn new_with_options(
+        input: &Path,
+        inputs: Dict,
+        system_fonts: bool,
+    ) -> Result<Self, FileError> {
         let root = input
             .parent()
             .unwrap_or(Path::new("."))
@@ -74,11 +89,13 @@ impl CndWorld {
 
         Ok(Self {
             main,
-            library: LazyHash::new(build_library(inputs)),
-            fonts: LazyLock::new(Box::new(|| {
+            library: LazyHash::new(cnd_library(inputs, [])),
+            fonts: LazyLock::new(Box::new(move || {
                 let mut store = FontStore::new();
                 store.extend(fonts::embedded());
-                store.extend(fonts::system());
+                if system_fonts {
+                    store.extend(fonts::system());
+                }
                 store
             })),
             files: FileStore::new(CndFiles {

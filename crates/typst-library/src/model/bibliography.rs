@@ -405,7 +405,7 @@ impl Bibliography {
         self.0.contains_key(&key)
     }
 
-    // cosmyc fork divergence (typst-cnd): `get`/`iter` are exposed so the
+    // fork divergence (typst-cnd): `get`/`iter` are exposed so the
     // CND manifest exporter can lift the typed bibliographic subset and the
     // full source entry (`raw`) for each cited work. Upstream keeps these
     // private. Carry this through future Typst rebases.
@@ -700,7 +700,7 @@ pub struct RenderedBibliography {
 
 /// The rendered parts for a bibliography entry.
 pub struct RenderedEntry {
-    /// cosmyc fork divergence (typst-cnd): the source `@key` of this entry,
+    /// fork divergence (typst-cnd): the source `@key` of this entry,
     /// captured from the hayagriva item so the CND manifest exporter can
     /// map a rendered reference string back to its bibliography key (the
     /// rendered order may differ from the source order). Upstream drops the
@@ -1236,7 +1236,7 @@ fn show_bibliography(
         });
 
         entries.push(RenderedEntry {
-            // cosmyc fork divergence (typst-cnd): retain the source key.
+            // fork divergence (typst-cnd): retain the source key.
             key: item.key.as_str().into(),
             prefix,
             body,

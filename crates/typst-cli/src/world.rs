@@ -1,12 +1,15 @@
+use std::any::Any;
+use std::collections::BTreeSet;
 use std::error;
 use std::fmt;
+use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use ecow::{EcoString, eco_format};
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime, Dict, Duration, IntoValue, Repr};
+use typst::foundations::{Bytes, Datetime, Duration, Repr};
 use typst::syntax::{
     FileId, PathError, RootedPath, Source, VirtualPath, VirtualRoot, VirtualizeError,
 };
@@ -16,10 +19,10 @@ use typst::{Library, LibraryExt, World};
 use typst_kit::datetime::Time;
 use typst_kit::diagnostics::DiagnosticWorld;
 use typst_kit::files::{FileLoader, FileStore, FsRoot};
-use typst_kit::fonts::FontStore;
+use typst_kit::fonts::{FontPath, FontStore};
 use typst_kit::packages::SystemPackages;
 
-use crate::args::{Feature, Input, ProcessArgs, WorldArgs};
+use crate::args::{Feature, Input, OutputFormat, ProcessArgs, WorldArgs};
 
 /// A world that provides access to the operating system.
 pub struct SystemWorld {
@@ -35,14 +38,27 @@ pub struct SystemWorld {
     /// always the same within one compilation.
     /// Reset between compilations if not [`Time::Fixed`].
     now: Time,
+    /// Indices of the fonts loaded since the last reset, for `--deps`.
+    accessed_fonts: Mutex<BTreeSet<usize>>,
 }
 
 impl SystemWorld {
-    /// Creates a new system world.
+    /// Creates a new system world with the default (non-CND) standard
+    /// library, as used by every format but CND and by `query` and `eval`.
     pub fn new(
         input: Option<&Input>,
         world_args: &'static WorldArgs,
         process_args: &ProcessArgs,
+    ) -> Result<Self, WorldCreationError> {
+        Self::new_with_format(input, world_args, process_args, None)
+    }
+
+    /// Creates a new system world whose standard library suits `format`.
+    pub fn new_with_format(
+        input: Option<&Input>,
+        world_args: &'static WorldArgs,
+        process_args: &ProcessArgs,
+        format: Option<OutputFormat>,
     ) -> Result<Self, WorldCreationError> {
         // Set up the thread pool.
         if let Some(jobs) = process_args.jobs {
@@ -54,26 +70,26 @@ impl SystemWorld {
         }
 
         let library = {
-            // Convert the input pairs to a dictionary.
-            let inputs: Dict = world_args
-                .inputs
-                .iter()
-                .map(|(k, v)| (k.as_str().into(), v.as_str().into_value()))
-                .collect();
+            let inputs = crate::inputs::sys_inputs(world_args)
+                .map_err(WorldCreationError::Inputs)?;
 
-            let features =
+            let features: Vec<typst::Feature> =
                 process_args.features.iter().copied().map(Into::into).collect();
 
-            Library::builder([
-                typst_html::FORMAT,
-                typst_pdf::FORMAT,
-                typst_svg::FORMAT,
-                typst_render::FORMAT,
-                typst_bundle::FORMAT,
-            ])
-            .with_inputs(inputs)
-            .with_features(features)
-            .build()
+            if format == Some(OutputFormat::Cnd) {
+                typst_cnd::world::cnd_library(inputs, features)
+            } else {
+                Library::builder([
+                    typst_html::FORMAT,
+                    typst_pdf::FORMAT,
+                    typst_svg::FORMAT,
+                    typst_render::FORMAT,
+                    typst_bundle::FORMAT,
+                ])
+                .with_inputs(inputs)
+                .with_features(features.into_iter().collect())
+                .build()
+            }
         };
 
         let now = match world_args.creation_timestamp {
@@ -90,6 +106,7 @@ impl SystemWorld {
             })),
             files: FileStore::new(SystemFiles::new(input, world_args)?),
             now,
+            accessed_fonts: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -113,6 +130,7 @@ impl SystemWorld {
     pub fn reset(&mut self) {
         self.files.reset();
         self.now.reset();
+        self.accessed_fonts.get_mut().unwrap().clear();
     }
 
     /// Forcibly scan fonts instead of doing it lazily upon the first access.
@@ -120,6 +138,23 @@ impl SystemWorld {
     /// Does nothing if the fonts were already scanned.
     pub fn scan_fonts(&mut self) {
         LazyLock::force(&self.fonts);
+    }
+
+    /// Font files loaded by the last compilation, canonicalized (when
+    /// possible), sorted and deduplicated.
+    /// Fonts without a file (embedded ones) are left out. This is every font
+    /// the layout loaded, which can include fonts tried for glyph fallback.
+    pub fn font_dependencies(&self) -> Vec<PathBuf> {
+        let accessed = self.accessed_fonts.lock().unwrap();
+        let paths: BTreeSet<PathBuf> = accessed
+            .iter()
+            .filter_map(|&index| self.fonts.source(index))
+            .filter_map(|source| (source as &dyn Any).downcast_ref::<FontPath>())
+            // Canonical, like file dependencies, so two spellings of one
+            // file (a symlink, a relative path) are reported once.
+            .map(|font| font.path.canonicalize().unwrap_or_else(|_| font.path.clone()))
+            .collect();
+        paths.into_iter().collect()
     }
 }
 
@@ -145,6 +180,7 @@ impl World for SystemWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
+        self.accessed_fonts.lock().unwrap().insert(index);
         self.fonts.font(index)
     }
 
@@ -196,6 +232,9 @@ static EMPTY_ID: LazyLock<FileId> = LazyLock::new(|| {
 struct SystemFiles {
     main: FileId,
     project: FsRoot,
+    /// The canonical directory where missing project files are looked up by
+    /// file name.
+    fallback: Option<PathBuf>,
     packages: SystemPackages,
 }
 
@@ -245,16 +284,59 @@ impl SystemFiles {
             *EMPTY_ID
         };
 
+        let fallback =
+            world_args.fallback_dir.as_deref().map(fallback_dir).transpose()?;
+
         Ok(Self {
             main,
             project: FsRoot::new(root),
+            fallback,
             packages: crate::packages::system(&world_args.package),
         })
     }
 
-    /// Resolves the file system path for the given `id`.
+    /// Resolves the file system path for the given `id`, including a file
+    /// served from the fallback directory.
     pub fn resolve(&self, id: FileId) -> FileResult<PathBuf> {
-        self.root(id)?.resolve(id.vpath())
+        let path = self.root(id)?.resolve(id.vpath())?;
+        Ok(self.fallback_file(id, &path).unwrap_or(path))
+    }
+
+    /// The fallback file that serves `id`, whose project path is `path`.
+    ///
+    /// Only a project file that does not exist falls back: a file that exists
+    /// wins, a directory stays an error, and an escaping path already failed
+    /// when its id was created. The file is looked up by its name alone and
+    /// is served only if it is a regular file whose real path lies inside the
+    /// fallback directory, so a symlink cannot lead out of it.
+    fn fallback_file(&self, id: FileId, path: &Path) -> Option<PathBuf> {
+        let dir = self.fallback.as_deref()?;
+        if !matches!(id.root(), VirtualRoot::Project)
+            || id == *EMPTY_ID
+            || id == *STDIN_ID
+        {
+            return None;
+        }
+        // Any outcome but "not found" (an existing file or directory, a
+        // permission error, ...) keeps the project's own result.
+        match fs::metadata(path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            _ => return None,
+        }
+        let name = id.vpath().file_name()?;
+        let mut components = Path::new(name).components();
+        if !matches!(
+            (components.next(), components.next()),
+            (Some(Component::Normal(_)), None)
+        ) {
+            return None;
+        }
+        let candidate = dir.join(name);
+        if candidate.parent() != Some(dir) {
+            return None;
+        }
+        let real = candidate.canonicalize().ok()?;
+        (real.starts_with(dir) && real.is_file()).then_some(real)
     }
 
     /// Resolves the root in which the given file ID resides.
@@ -273,9 +355,30 @@ impl FileLoader for SystemFiles {
         } else if id == *STDIN_ID {
             read_from_stdin().map(Bytes::new)
         } else {
-            self.root(id)?.load(id.vpath())
+            let root = self.root(id)?;
+            let path = root.resolve(id.vpath())?;
+            if let Some(real) = self.fallback_file(id, &path) {
+                return fs::read(&real)
+                    .map(Bytes::new)
+                    .map_err(|err| FileError::from_io(err, &real));
+            }
+            root.load(id.vpath())
         }
     }
+}
+
+/// Canonicalizes the `--fallback-dir` and checks that it is a directory.
+fn fallback_dir(dir: &Path) -> Result<PathBuf, WorldCreationError> {
+    let canonical = dir.canonicalize().map_err(|err| match err.kind() {
+        io::ErrorKind::NotFound => {
+            WorldCreationError::FallbackDirNotFound(dir.to_path_buf())
+        }
+        _ => WorldCreationError::Io(err),
+    })?;
+    if !canonical.is_dir() {
+        return Err(WorldCreationError::FallbackDirNotADirectory(dir.to_path_buf()));
+    }
+    Ok(canonical)
 }
 
 /// Read from stdin.
@@ -299,8 +402,14 @@ pub enum WorldCreationError {
     InputMalformed(VirtualizeError),
     /// The root directory does not appear to exist.
     RootNotFound(PathBuf),
+    /// The fallback directory does not appear to exist.
+    FallbackDirNotFound(PathBuf),
+    /// The fallback directory is not a directory.
+    FallbackDirNotADirectory(PathBuf),
     /// The requested creation timestamp was invalid.
     InvalidTimestamp,
+    /// The `--inputs-file` could not be used.
+    Inputs(String),
     /// Another type of I/O error.
     Io(io::Error),
 }
@@ -326,9 +435,16 @@ impl fmt::Display for WorldCreationError {
             WorldCreationError::RootNotFound(path) => {
                 write!(f, "root directory not found (searched at {})", path.display())
             }
+            WorldCreationError::FallbackDirNotFound(path) => {
+                write!(f, "fallback directory not found (searched at {})", path.display())
+            }
+            WorldCreationError::FallbackDirNotADirectory(path) => {
+                write!(f, "fallback directory is not a directory ({})", path.display())
+            }
             WorldCreationError::InvalidTimestamp => {
                 write!(f, "creation timestamp out of range")
             }
+            WorldCreationError::Inputs(message) => write!(f, "{message}"),
             WorldCreationError::Io(err) => write!(f, "{err}"),
         }
     }
@@ -362,5 +478,79 @@ impl From<Feature> for typst::Feature {
             Feature::Bundle => typst::Feature::Bundle,
             Feature::A11yExtras => typst::Feature::A11yExtras,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use typst::syntax::package::PackageSpec;
+    use typst_kit::downloader::SystemDownloader;
+    use typst_kit::packages::{FsPackages, UniversePackages};
+
+    use super::*;
+
+    /// A loader with the project in `project`, `fallback`, and local packages
+    /// in `packages`.
+    fn files(project: &Path, fallback: &Path, packages: &Path) -> SystemFiles {
+        SystemFiles {
+            main: *EMPTY_ID,
+            project: FsRoot::new(project.canonicalize().unwrap()),
+            fallback: Some(fallback.canonicalize().unwrap()),
+            packages: SystemPackages::from_parts(
+                Some(FsPackages::new(packages.to_path_buf())),
+                None,
+                // Not `crate::download::downloader()`: it parses the process
+                // arguments, which exits a test binary.
+                UniversePackages::new(SystemDownloader::new("test")),
+            ),
+        }
+    }
+
+    fn id(root: VirtualRoot, path: &str) -> FileId {
+        RootedPath::new(root, VirtualPath::new(path).unwrap()).intern()
+    }
+
+    #[test]
+    fn project_files_fall_back_and_resolve_to_the_fallback_file() {
+        let fallback = tempfile::tempdir().unwrap();
+        fs::write(fallback.path().join("lib.typ"), "x").unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let files = files(project.path(), fallback.path(), fallback.path());
+        let id = id(VirtualRoot::Project, "nested/lib.typ");
+        assert_eq!(files.load(id).unwrap().as_slice(), b"x");
+        assert_eq!(
+            files.resolve(id).unwrap(),
+            fallback.path().join("lib.typ").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn packages_never_fall_back() {
+        let fallback = tempfile::tempdir().unwrap();
+        fs::write(fallback.path().join("lib.typ"), "x").unwrap();
+        let packages = tempfile::tempdir().unwrap();
+        // The package exists, but the requested file does not.
+        fs::create_dir_all(packages.path().join("local/pkg/0.1.0")).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let files = files(project.path(), fallback.path(), packages.path());
+        let spec: PackageSpec = "@local/pkg:0.1.0".parse().unwrap();
+        let id = id(VirtualRoot::Package(spec), "lib.typ");
+        assert!(matches!(files.load(id), Err(FileError::NotFound(_))));
+        assert!(!files.resolve(id).unwrap().starts_with(fallback.path()));
+    }
+
+    #[test]
+    fn special_ids_never_fall_back() {
+        let fallback = tempfile::tempdir().unwrap();
+        // Decoys named like the special ids. Windows forbids `<` and `>` in
+        // file names, so there they cannot exist and the writes may fail.
+        let _ = fs::write(fallback.path().join("<stdin>"), "x");
+        let _ = fs::write(fallback.path().join("<empty>"), "x");
+        let project = tempfile::tempdir().unwrap();
+        let files = files(project.path(), fallback.path(), fallback.path());
+        assert!(files.load(*EMPTY_ID).unwrap().is_empty());
+        let fallback = fallback.path().canonicalize().unwrap();
+        assert!(!files.resolve(*EMPTY_ID).unwrap().starts_with(&fallback));
+        assert!(!files.resolve(*STDIN_ID).unwrap().starts_with(&fallback));
     }
 }

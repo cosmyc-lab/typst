@@ -11,7 +11,10 @@ use typst_cnd::{CndDocument, cnd_from_document, cnd_to_json, world};
 use typst_syntax::Span;
 
 #[derive(Parser)]
-#[command(name = "typst-cnd", about = "Compile Typst sources into CND JSON")]
+#[command(
+    name = "typst-cnd",
+    about = "Compile Typst sources into CND JSON (also available as `typst compile --format cnd`)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

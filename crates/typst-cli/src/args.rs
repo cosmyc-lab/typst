@@ -340,8 +340,8 @@ pub struct CompileArgs {
     #[clap(value_parser = input_value_parser(), value_hint = ValueHint::FilePath)]
     pub input: Input,
 
-    /// Path to output file (PDF, PNG, SVG, or HTML). Use `-` to write output to
-    /// stdout.
+    /// Path to output file (PDF, PNG, SVG, HTML, or CND). Use `-` to write
+    /// output to stdout.
     ///
     /// For output formats emitting one file per page (PNG & SVG), a page number
     /// template must be present if the source document renders to multiple
@@ -470,6 +470,16 @@ pub struct WorldArgs {
     #[clap(long = "root", env = "TYPST_ROOT", value_name = "DIR")]
     pub root: Option<PathBuf>,
 
+    /// A directory searched for project files that do not exist.
+    ///
+    /// When a file of the project is missing, a file with the same name (the
+    /// last path component only) in this directory is used instead. A file
+    /// that exists in the project always wins, and package files never fall
+    /// back. Only regular files that resolve to a location inside this
+    /// directory are served.
+    #[clap(long = "fallback-dir", value_name = "DIR")]
+    pub fallback_dir: Option<PathBuf>,
+
     /// Add a string key-value pair visible through `sys.inputs`.
     #[clap(
         short = 'i',
@@ -479,6 +489,15 @@ pub struct WorldArgs {
         value_parser = ValueParser::new(parse_sys_input_pair),
     )]
     pub inputs: Vec<(String, String)>,
+
+    /// Load a JSON object of string values into `sys.inputs`.
+    ///
+    /// Every value must be a JSON string — often itself serialized JSON,
+    /// decoded again on the Typst side. Use this instead of many `--input`
+    /// flags when the data would not fit comfortably on the command line. A
+    /// key also given with `--input` takes the `--input` value.
+    #[clap(long = "inputs-file", value_name = "PATH")]
+    pub inputs_file: Option<PathBuf>,
 
     /// Common font arguments.
     #[clap(flatten)]
@@ -664,6 +683,8 @@ pub enum OutputFormat {
     Svg,
     Html,
     Bundle,
+    /// A CND: the document's semantic structure as JSON.
+    Cnd,
 }
 
 impl OutputFormat {

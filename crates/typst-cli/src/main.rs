@@ -8,6 +8,7 @@ mod fonts;
 mod greet;
 mod info;
 mod init;
+mod inputs;
 mod packages;
 mod query;
 mod terminal;

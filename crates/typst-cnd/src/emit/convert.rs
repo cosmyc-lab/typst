@@ -67,7 +67,7 @@ pub struct NodeRecord {
     /// `refs::resolve_refs` (a label/location destination is a
     /// cross-reference with a custom body).
     pub link_markers: Vec<(LinkDest, (i64, i64))>,
-    pub state_metadata: std::collections::HashMap<String, serde_json::Value>,
+    pub state_metadata: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Conversion context shared across the document walk.
@@ -978,8 +978,7 @@ pub fn metadata_at(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     location: Location,
-) -> typst_library::diag::SourceResult<std::collections::HashMap<String, serde_json::Value>>
-{
+) -> typst_library::diag::SourceResult<serde_json::Map<String, serde_json::Value>> {
     crate::metadata::metadata_at(engine, introspector, location)
 }
 
@@ -1038,7 +1037,7 @@ pub fn make_record(
 
     let state_metadata = match location {
         Some(loc) => metadata_at(engine, introspector, loc)?,
-        None => std::collections::HashMap::new(),
+        None => serde_json::Map::new(),
     };
 
     Ok(NodeRecord {
@@ -1130,7 +1129,7 @@ fn set_label(node: &mut CndNode, label: &str) {
 
 fn set_metadata(
     node: &mut CndNode,
-    metadata: std::collections::HashMap<String, serde_json::Value>,
+    metadata: serde_json::Map<String, serde_json::Value>,
 ) {
     node.base_mut().state_metadata = metadata;
 }
