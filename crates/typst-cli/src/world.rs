@@ -19,7 +19,7 @@ use typst_kit::files::{FileLoader, FileStore, FsRoot};
 use typst_kit::fonts::FontStore;
 use typst_kit::packages::SystemPackages;
 
-use crate::args::{Feature, Input, ProcessArgs, WorldArgs};
+use crate::args::{Feature, Input, OutputFormat, ProcessArgs, WorldArgs};
 
 /// A world that provides access to the operating system.
 pub struct SystemWorld {
@@ -38,11 +38,21 @@ pub struct SystemWorld {
 }
 
 impl SystemWorld {
-    /// Creates a new system world.
+    /// Creates a new system world for any format but CND.
     pub fn new(
         input: Option<&Input>,
         world_args: &'static WorldArgs,
         process_args: &ProcessArgs,
+    ) -> Result<Self, WorldCreationError> {
+        Self::new_with_format(input, world_args, process_args, None)
+    }
+
+    /// Creates a new system world whose standard library suits `format`.
+    pub fn new_with_format(
+        input: Option<&Input>,
+        world_args: &'static WorldArgs,
+        process_args: &ProcessArgs,
+        format: Option<OutputFormat>,
     ) -> Result<Self, WorldCreationError> {
         // Set up the thread pool.
         if let Some(jobs) = process_args.jobs {
@@ -61,19 +71,23 @@ impl SystemWorld {
                 .map(|(k, v)| (k.as_str().into(), v.as_str().into_value()))
                 .collect();
 
-            let features =
+            let features: Vec<typst::Feature> =
                 process_args.features.iter().copied().map(Into::into).collect();
 
-            Library::builder([
-                typst_html::FORMAT,
-                typst_pdf::FORMAT,
-                typst_svg::FORMAT,
-                typst_render::FORMAT,
-                typst_bundle::FORMAT,
-            ])
-            .with_inputs(inputs)
-            .with_features(features)
-            .build()
+            if format == Some(OutputFormat::Cnd) {
+                typst_cnd::world::cnd_library(inputs, features)
+            } else {
+                Library::builder([
+                    typst_html::FORMAT,
+                    typst_pdf::FORMAT,
+                    typst_svg::FORMAT,
+                    typst_render::FORMAT,
+                    typst_bundle::FORMAT,
+                ])
+                .with_inputs(inputs)
+                .with_features(features.into_iter().collect())
+                .build()
+            }
         };
 
         let now = match world_args.creation_timestamp {

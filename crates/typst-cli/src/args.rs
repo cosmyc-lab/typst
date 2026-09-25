@@ -340,8 +340,8 @@ pub struct CompileArgs {
     #[clap(value_parser = input_value_parser(), value_hint = ValueHint::FilePath)]
     pub input: Input,
 
-    /// Path to output file (PDF, PNG, SVG, or HTML). Use `-` to write output to
-    /// stdout.
+    /// Path to output file (PDF, PNG, SVG, HTML, or CND). Use `-` to write
+    /// output to stdout.
     ///
     /// For output formats emitting one file per page (PNG & SVG), a page number
     /// template must be present if the source document renders to multiple
@@ -664,6 +664,8 @@ pub enum OutputFormat {
     Svg,
     Html,
     Bundle,
+    /// A CND: the document's semantic structure as JSON.
+    Cnd,
 }
 
 impl OutputFormat {

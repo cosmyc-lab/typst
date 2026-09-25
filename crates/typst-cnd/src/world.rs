@@ -26,13 +26,17 @@ pub struct CndWorld {
     now: Time,
 }
 
-fn build_library(inputs: Dict) -> Library {
+/// Builds the standard library a CND compilation needs: `inputs` as
+/// `sys.inputs`, `features` plus [`Feature::CndSemantics`], the `pdf`
+/// format's bindings, and the deprecated `cnd` global.
+pub fn cnd_library(inputs: Dict, features: impl IntoIterator<Item = Feature>) -> Library {
     // `Feature::CndSemantics` makes every fully-inline fragment body (a
     // `block[…]`, a grid cell, a `place`, a `box`) realize into a real,
     // locatable `ParElem`. Without it that text is laid out but never
     // located, so `Introspector::query` — the only source the CND emit
     // pipeline reads — cannot see it and the content is silently dropped.
-    let features = Features::from_iter([Feature::CndSemantics]);
+    let features: Features =
+        features.into_iter().chain([Feature::CndSemantics]).collect();
     // Upstream #8496 made every export format opt-in: a format's bindings
     // (`pdf.embed`, `pdf.header-cell`, …) now exist only if the format is
     // registered here. Before it, `pdf` was defined unconditionally, so
@@ -74,7 +78,7 @@ impl CndWorld {
 
         Ok(Self {
             main,
-            library: LazyHash::new(build_library(inputs)),
+            library: LazyHash::new(cnd_library(inputs, [])),
             fonts: LazyLock::new(Box::new(|| {
                 let mut store = FontStore::new();
                 store.extend(fonts::embedded());

@@ -30,10 +30,11 @@ pub fn watch(command: &'static WatchCommand) -> HintedStrResult<()> {
     // Create the world that serves sources, files, and fonts.
     // Additionally, if any files do not exist, wait until they do.
     let mut world = loop {
-        match SystemWorld::new(
+        match SystemWorld::new_with_format(
             Some(&command.args.input),
             &command.args.world,
             &command.args.process,
+            Some(config.output_format),
         ) {
             Ok(world) => break world,
             Err(

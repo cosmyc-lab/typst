@@ -3330,6 +3330,7 @@ dependencies = [
  "toml",
  "typst",
  "typst-bundle",
+ "typst-cnd",
  "typst-dev-assets",
  "typst-eval",
  "typst-html",

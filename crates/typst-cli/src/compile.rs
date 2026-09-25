@@ -39,10 +39,11 @@ use typst_kit::server::HttpServer;
 pub fn compile(command: &'static CompileCommand) -> HintedStrResult<()> {
     let mut timer = Timer::new_or_placeholder(command.args.timings.clone());
     let mut config = CompileConfig::new(command)?;
-    let mut world = SystemWorld::new(
+    let mut world = SystemWorld::new_with_format(
         Some(&command.args.input),
         &command.args.world,
         &command.args.process,
+        Some(config.output_format),
     )
     .map_err(|err| eco_format!("{err}"))?;
     timer.record(&mut world, |world| compile_once(world, &mut config))?
@@ -58,7 +59,7 @@ pub struct CompileConfig {
     pub fullscreen: bool,
     /// Path to input Typst file or stdin.
     pub input: Input,
-    /// Path to output file (PDF, PNG, SVG, or HTML).
+    /// Path to output file (PDF, PNG, SVG, HTML, or CND).
     pub output: Output,
     /// The format of the output file.
     pub output_format: OutputFormat,
@@ -119,6 +120,7 @@ impl CompileConfig {
                 Some(ext) if ext.eq_ignore_ascii_case("png") => OutputFormat::Png,
                 Some(ext) if ext.eq_ignore_ascii_case("svg") => OutputFormat::Svg,
                 Some(ext) if ext.eq_ignore_ascii_case("html") => OutputFormat::Html,
+                Some(ext) if ext.eq_ignore_ascii_case("cnd") => OutputFormat::Cnd,
                 _ => bail!(
                     "could not infer output format for path {}.\n\
                      consider providing the format manually with `--format/-f`",
@@ -140,6 +142,7 @@ impl CompileConfig {
                     OutputFormat::Svg => "svg",
                     OutputFormat::Html => "html",
                     OutputFormat::Bundle => "",
+                    OutputFormat::Cnd => "cnd",
                 },
             ))
         });
@@ -363,6 +366,15 @@ fn compile_and_export(
         }
         OutputFormat::Bundle => typst::compile::<Bundle>(world)
             .and_then(|bundle| export_bundle(bundle, config)),
+        OutputFormat::Cnd => {
+            let Warned { output, warnings } =
+                typst::compile::<typst_cnd::CndDocument>(&*world);
+            let result = output.and_then(|document| export_cnd(&document, world, config));
+            Warned {
+                output: result.map(|()| vec![config.output.clone()]),
+                warnings,
+            }
+        }
     }
 }
 
@@ -382,6 +394,29 @@ fn export_html(document: &HtmlDocument, config: &CompileConfig) -> SourceResult<
         .at(Span::detached())
 }
 
+/// Export to CND.
+fn export_cnd(
+    document: &typst_cnd::CndDocument,
+    world: &SystemWorld,
+    config: &CompileConfig,
+) -> SourceResult<()> {
+    let built_at = match config.creation_timestamp {
+        Some(timestamp) => timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        None => typst_cnd::world::built_at_now(),
+    };
+    let cnd = typst_cnd::cnd_from_document(
+        document,
+        typst_cnd::world::source_info(world),
+        built_at,
+    );
+    let json = typst_cnd::cnd_to_json(&cnd)?;
+    config
+        .output
+        .write(json.as_bytes())
+        .map_err(|err| eco_format!("failed to write CND file ({err})"))
+        .at(Span::detached())
+}
+
 /// Export to a paged target format.
 fn export_paged(
     document: &PagedDocument,
@@ -397,7 +432,7 @@ fn export_paged(
         OutputFormat::Svg => export_image(document, config, ImageExportFormat::Svg)
             .at(Span::detached())
             .into(),
-        OutputFormat::Html | OutputFormat::Bundle => unreachable!(),
+        OutputFormat::Html | OutputFormat::Bundle | OutputFormat::Cnd => unreachable!(),
     }
 }
 
