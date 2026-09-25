@@ -1,39 +1,35 @@
 # typst + typst-cnd — Project Context
 
-Reference map for contributors and AI agents working on the **typst-cnd** compiler inside this Typst workspace.
+Reference map for contributors and AI agents working on the **typst-cnd**
+exporter inside this fork of the Typst compiler.
 
-## What this workspace is
+## What this fork is
 
-This directory is a **local clone of the Typst compiler** (v0.14.x workspace). It is the home of **`typst-cnd`**: a new exporter crate that compiles `.typ` sources into **CND Manifest JSON** for the Cosmyc / ctxnative pipeline.
+A fork of the Typst compiler that adds **`typst-cnd`**, an exporter crate that
+compiles `.typ` sources into **CND** JSON, a structured document format defined
+by the CND standard and its SDK (`cnd-sdk`). Everything else is upstream Typst,
+merged regularly.
 
 | Piece | Location | Role |
 |---|---|---|
 | Typst compiler (upstream) | `crates/typst*`, `crates/typst-cli`, … | General-purpose typesetting |
-| **typst-cnd** (to build) | `crates/typst-cnd/` | Typst → CND manifest JSON |
-| CND consumer (separate repo) | `/home/maxence/ctxnative/cnd-engine` | Load manifest, chunk, DBR, Qdrant |
-| Cosmyc product context | Notion wiki **CND** | Spec, engine, product vision |
+| **typst-cnd** | `crates/typst-cnd/` | Typst → CND JSON exporter |
+| CND standard and SDK | `cnd-sdk` (separate repository) | Format definition, validation, consumers |
 
-**Do not** put CND emission logic in `cnd-engine` (Python). **Do not** patch `typst-layout` / `typst-eval` unless a public API gap forces it. Add a peer crate like `typst-html` and `typst-pdf`.
+**Do not** patch `typst-layout` / `typst-eval` unless a public API gap forces
+it. Exporter logic lives in `crates/typst-cnd/`, a peer of `typst-html` and
+`typst-pdf`; `typst-cli` only wires it in as an output format.
 
-## End-to-end pipeline
+## Entry point
 
 ```plain text
 Typst source (.typ)
       │  typst compile --format cnd (typst-cli + typst-cnd)
       ▼
-CND Manifest (JSON)
-      │  cnd-engine (Python)
+CND (JSON)
+      │  any CND consumer (see cnd-sdk)
       ▼
-Chunks → DBR records → embedding → Qdrant
-```
-
-```mermaid
-flowchart LR
-  A[".typ"] --> B["typst compile --format cnd"]
-  B --> C["manifest.json"]
-  C --> D["cnd-engine"]
-  D --> E["DBR"]
-  E --> F["Qdrant"]
+Validation, chunking, indexing, rendering, …
 ```
 
 `typst-cnd` is the exporter library. The supported entry point is
@@ -44,28 +40,13 @@ which brings every standard CLI option (`--root`, `--font-path`,
 `--fallback-dir` (missing project files are looked up by file name there).
 The standalone `typst-cnd` binary remains for existing callers.
 
-## Strategic context (Notion, June 2026)
-
-Two strategies were documented in the [CND Notion wiki](https://www.notion.so/maxanox/36cc61707d5f800da28ac1f757e03270):
-
-| Plan | Compilateur Typst | Format interne |
-|---|---|---|
-| Pivot DocLang | `typst-doclang` → `.dclg.xml` | DocLang pivot |
-| **Alternative CND v2** (favored for this work) | **`typst-cnd`** → manifest JSON | CND v2 canonique |
-
-**Current direction for this repo:** implement **`typst-cnd`** as the premium Typst on-ramp. DocLang remains a possible **interop boundary** for legacy PDF/DOCX ingestion — not the hot path for native Typst.
-
-Key pages:
-- [CND Standard](https://app.notion.com/p/37dc61707d5f8082b495d1fad337d087) — manifest schema, flags, refs
-- [CND Engine](https://app.notion.com/p/37dc61707d5f80228ebada1dc7ace089) — what downstream expects
-- [Alternative CND v2 + DocLang interchange](https://app.notion.com/p/37ec61707d5f81068ec8ea894a399bbc) — why typst-cnd stays central
-- [Plan de transition DocLang](https://app.notion.com/p/37ec61707d5f815a9935c79c429b46bf) — context only; superseded for Typst path if CND v2 wins
-
 ## Where typst-cnd hooks into Typst
 
-CND nodes are **not** built from the syntax AST (`typst_syntax::SyntaxNode`). They come from the **typed content tree after evaluation and realization** — the same layer `typst-html` uses.
+CND nodes are **not** built from the syntax AST (`typst_syntax::SyntaxNode`).
+They come from the **typed content tree after evaluation and realization** —
+the same layer `typst-html` uses.
 
-Reference implementation to study:
+Reference implementations to study:
 
 ```plain text
 crates/typst-html/src/document.rs   → html_document(), realize()
@@ -77,13 +58,13 @@ crates/typst-cli/src/compile.rs     → World + typst::compile::<PagedDocument>
 ### Pipeline inside typst-cnd
 
 ```plain text
-1. eval(main)           → Content (HeadingElem, ParElem, TableElem, …)
-2. realize(Document)    → structured element pairs (see typst-html)
-3. walk / convert       → CndNode tree (heading children, tables, …)
+1. eval(main)                → Content (HeadingElem, ParElem, TableElem, …)
+2. realize(Document)         → structured element pairs (see typst-html)
+3. walk / convert            → CndNode tree (heading children, tables, …)
 4. compile::<PagedDocument>  → layout + stable Introspector
-5. join locations       → NodeLocation (page, span, …) per CND node
-6. resolve refs         → refs_to / refs_from as NodeRef { id, label? }
-7. serialize            → JSON manifest
+5. join locations            → NodeLocation (starting page) per CND node
+6. resolve refs              → refs_to / refs_from as NodeRef { id, label? }
+7. serialize                 → CND JSON
 ```
 
 | CND field | Typst source |
@@ -91,119 +72,42 @@ crates/typst-cli/src/compile.rs     → World + typst::compile::<PagedDocument>
 | `heading`, `paragraph`, `table` | `HeadingElem`, `ParElem`, `TableElem` after `realize` |
 | `label` | Element labels (`<label>`) on the node itself |
 | `refs_to` / `refs_from` | `NodeRef { id, label? }` — `@label` resolved via Introspector; label kept on the edge |
-| `state_metadata` | Typst `State` / custom CND flags (`#cnd-table-hint(...)`, etc.) |
-| `location` | `Introspector` + `PagedDocument` positions |
+| `state_metadata` | Typst `State` / CND authoring flags; serialized in a stable key order |
+| `location` | `Introspector` + `PagedDocument` (starting page) |
 | `doc` | `DocumentInfo` (title, authors, lang, …) |
-| `doc_hash` | SHA-256 of source `.typ` file |
-| `heading_path` | Precomputed while walking heading tree |
+| `doc_hash` | SHA-256 of the source |
+| `heading_path` | Precomputed while walking the heading tree |
 
-## CND manifest contract (downstream)
-
-The JSON schema is consumed by **cnd-engine** (`CndManifest` in `src/cnd_engine/core/manifest.py`, nodes in `nodes.py`).
-
-Minimal valid fixture:
-
-`/home/maxence/ctxnative/cnd-engine/tests/sources/minimal_manifest.json`
-
-Top-level fields:
-
-- `cnd_version` — spec version (e.g. `"0.1.0"`)
-- `doc_hash` — content hash of source (manifest may also accept legacy `source_hash` on load in cnd-engine)
-- `compiled_at` — ISO 8601 UTC
-- `doc` — `DocMetadata` (title, authors, date, keywords, description, lang)
-- `nodes` — tree of `heading` | `paragraph` | `table` | `quote` | `code` | `math` | `figure` | `list` (see cnd-engine)
-
-**Cross-references:** each edge is `{ "id": "<uuid>", "label": "<typst-label>" }`. Chunkers and DBR use `id`; display and debugging use `label`.
-
-**Validation loop:** emit JSON from typst-cnd → load with `CND.from_json()` in cnd-engine → `pytest` / `display_nodes()`.
-
-## Planned crate layout
-
-```plain text
-crates/typst-cnd/
-├── Cargo.toml
-├── src/
-│   ├── lib.rs
-│   ├── document.rs       # CndManifest assembly
-│   ├── emit/
-│   │   ├── convert.rs    # realize → CndNode (pattern: typst-html/convert.rs)
-│   │   ├── heading.rs
-│   │   ├── paragraph.rs
-│   │   ├── table.rs
-│   │   └── refs.rs
-│   └── location.rs       # Introspector Location → CND NodeLocation
-└── src/bin/
-    └── typst-cnd.rs      # CLI: typst-cnd compile doc.typ -o manifest.json
-```
-
-Workspace membership: `crates/*` is already in root `Cargo.toml` — adding `crates/typst-cnd/` is enough.
-
-Optional later:
-- `impl Output for CndDocument` (like `HtmlDocument` in `typst-html/src/dom.rs`)
-- `typst-cli` integration: `typst compile -f cnd`
-
-## Dependencies (expected)
-
-Mirror `typst-html` / `typst-pdf` peers:
-
-- `typst-library`, `typst-layout`, `typst-eval`, `typst-syntax`, `typst-utils`, `typst-macros`
-- `serde`, `serde_json` for JSON export
-- `clap` for CLI binary
-- `comemo`, `ecow`, `rustc-hash` as needed
+The field-level contract is the CND specification in `cnd-sdk`; this crate
+must not redefine it. Cross-reference edges are `{ "id": "<uuid>", "label":
+"<typst-label>" }`: consumers use `id`, display and debugging use `label`.
 
 ## Commands
 
 ```bash
-cd /home/maxence/ctxnative/typst
+# Compile a document to CND
+cargo run -p typst-cli -- compile path/to/doc.typ out.cnd
 
-# Build whole workspace (once typst-cnd exists)
-cargo build -p typst-cnd
+# Tests
+cargo test -p typst-cnd
+cargo test -p typst-cli        # includes tests/cnd.rs (format, parity, options)
+cargo test --workspace         # what CI runs
 
-# Run CND compiler (once CLI exists)
-cargo run -p typst-cnd -- compile path/to/doc.typ -o manifest.json
-
-# Validate output against cnd-engine
-cd /home/maxence/ctxnative/cnd-engine
-uv run python -c "
-from cnd_engine import CND
-cnd = CND.from_json('../typst/path/to/manifest.json')
-cnd.display_nodes()
-"
+# Lint
+cargo clippy -p typst-cli -p typst-cnd --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
-
-## What's NOT in scope here
-
-- Chunking, DBR, embeddings, Qdrant → **cnd-engine**
-- DocLang export (`typst-doclang`) → separate effort unless interop is prioritized
-- cosmyc-engine Docling pipeline → `/home/maxence/ctxnative/cosmyc-engine`
-- Upstreaming typst-cnd to official Typst repo (ctxnative / Cosmyc specific for now)
-
-## POC milestones
-
-1. Scaffold `crates/typst-cnd/` with `Cargo.toml` and empty lib + bin
-2. Compile a minimal `.typ` with one `heading` + one `paragraph`
-3. Emit JSON that passes `CndManifest.model_validate_json()` in cnd-engine
-4. Add `table` with cells + `location` from paged layout
-5. Resolve `refs_to` / `refs_from` for `@label` references
-6. Read `state_metadata` from CND Typst flags
-7. Wire `doc_hash` + `DocumentInfo`
-
-## Related repositories
-
-| Path | Role |
-|---|---|
-| `/home/maxence/ctxnative/typst` | **This repo** — typst-cnd compiler |
-| `/home/maxence/ctxnative/cnd-engine` | Python CND Engine — manifest consumer |
-| `/home/maxence/ctxnative/cosmyc-engine` | Alternate DocLang-based indexing POC |
 
 ## For agents
 
-When continuing work:
-
 1. Read this file first.
-2. Study `typst-html` before inventing a new walk — reuse `realize` + convert patterns.
+2. Study `typst-html` before inventing a new walk — reuse `realize` + convert
+   patterns.
 3. CND nodes = **realized library elements**, not syntax tree nodes.
-4. Keep typst-cnd changes in `crates/typst-cnd/`; avoid drive-by edits to upstream crates.
-5. Validate every manifest against cnd-engine fixtures and Pydantic models.
-6. Match manifest field names to cnd-engine (`doc_hash` in DBR maps from manifest `source_hash` / `doc_hash` — check current cnd-engine code).
-7. Use `cargo` for Rust; do not add Python deps to this workspace.
+4. Keep CND changes in `crates/typst-cnd/` (and the small `typst-cli` wiring);
+   avoid drive-by edits to upstream crates so upstream merges stay clean.
+5. Output must stay deterministic: two compilations of the same input differ
+   only in `built_at` and node UUIDs (the parity test in
+   `crates/typst-cli/tests/cnd.rs` enforces it).
+6. Validate emitted CND with `cnd-sdk`.
+7. Use `cargo` for Rust; do not add Python dependencies to this repository.
