@@ -542,8 +542,10 @@ mod tests {
     #[test]
     fn special_ids_never_fall_back() {
         let fallback = tempfile::tempdir().unwrap();
-        fs::write(fallback.path().join("<stdin>"), "x").unwrap();
-        fs::write(fallback.path().join("<empty>"), "x").unwrap();
+        // Decoys named like the special ids. Windows forbids `<` and `>` in
+        // file names, so there they cannot exist and the writes may fail.
+        let _ = fs::write(fallback.path().join("<stdin>"), "x");
+        let _ = fs::write(fallback.path().join("<empty>"), "x");
         let project = tempfile::tempdir().unwrap();
         let files = files(project.path(), fallback.path(), fallback.path());
         assert!(files.load(*EMPTY_ID).unwrap().is_empty());
