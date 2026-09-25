@@ -62,6 +62,17 @@ impl CndWorld {
     /// called). Empty by default, so [`new`](Self::new) behaves exactly as
     /// it always has.
     pub fn new_with_inputs(input: &Path, inputs: Dict) -> Result<Self, FileError> {
+        Self::new_with_options(input, inputs, true)
+    }
+
+    /// Like [`new_with_inputs`](Self::new_with_inputs), but `system_fonts:
+    /// false` restricts the font set to the embedded fonts, for reproducible
+    /// comparisons across machines.
+    pub fn new_with_options(
+        input: &Path,
+        inputs: Dict,
+        system_fonts: bool,
+    ) -> Result<Self, FileError> {
         let root = input
             .parent()
             .unwrap_or(Path::new("."))
@@ -79,10 +90,12 @@ impl CndWorld {
         Ok(Self {
             main,
             library: LazyHash::new(cnd_library(inputs, [])),
-            fonts: LazyLock::new(Box::new(|| {
+            fonts: LazyLock::new(Box::new(move || {
                 let mut store = FontStore::new();
                 store.extend(fonts::embedded());
-                store.extend(fonts::system());
+                if system_fonts {
+                    store.extend(fonts::system());
+                }
                 store
             })),
             files: FileStore::new(CndFiles {

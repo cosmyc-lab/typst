@@ -95,3 +95,99 @@ fn root_flag_resolves_absolute_imports_from_a_nested_main() {
         Some("chapters/main.typ")
     );
 }
+
+/// Every example of the CND suite compiles to the same CND through
+/// `typst compile --format cnd` as through the typst-cnd library entry point
+/// the standalone binary uses. System fonts are off on both sides: the two
+/// entry points discover them in a different order, which is a font-setup
+/// difference, not an exporter one.
+#[test]
+fn cnd_format_matches_the_standalone_exporter_on_every_example() {
+    let examples =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../typst-cnd/examples");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&examples)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "typ"))
+        .collect();
+    files.sort();
+    assert!(files.len() >= 9, "expected the example suite, found {}", files.len());
+
+    let out_dir = tempfile::tempdir().unwrap();
+    for path in files {
+        let world = typst_cnd::world::CndWorld::new_with_options(
+            &path,
+            typst::foundations::Dict::default(),
+            false,
+        )
+        .unwrap();
+        let document = typst::compile::<typst_cnd::CndDocument>(&world)
+            .output
+            .unwrap_or_else(|errors| panic!("{}: {errors:?}", path.display()));
+        let expected = typst_cnd::cnd_to_json(&typst_cnd::cnd_from_document(
+            &document,
+            typst_cnd::world::source_info(&world),
+            "1970-01-01T00:00:00Z".into(),
+        ))
+        .unwrap();
+
+        let out = out_dir.path().join("out.cnd");
+        run_ok(
+            exec()
+                .arg("compile")
+                .arg(&path)
+                .arg(&out)
+                .arg("--ignore-system-fonts")
+                .arg("--creation-timestamp")
+                .arg("0"),
+        );
+        let actual = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            normalize_uuids(&actual),
+            normalize_uuids(&expected),
+            "{} differs",
+            path.display()
+        );
+    }
+}
+
+/// Node ids are random v4 UUIDs, minted per compilation. Replaces each
+/// distinct UUID by its order of first appearance, so two compilations of
+/// the same document compare equal exactly when their structure, text and
+/// cross-references (which reuse the ids) are equal.
+fn normalize_uuids(json: &str) -> String {
+    fn is_uuid(s: &[u8]) -> bool {
+        s.len() == 36
+            && s.iter().enumerate().all(|(i, &b)| match i {
+                8 | 13 | 18 | 23 => b == b'-',
+                _ => b.is_ascii_hexdigit(),
+            })
+    }
+    let bytes = json.as_bytes();
+    let mut seen: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::default();
+    let mut out = String::with_capacity(json.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 36 <= bytes.len() && is_uuid(&bytes[i..i + 36]) {
+            let next = seen.len();
+            let n = *seen.entry(&json[i..i + 36]).or_insert(next);
+            out.push_str(&format!("uuid-{n}"));
+            i += 36;
+        } else {
+            let ch = json[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+#[test]
+fn normalize_uuids_keeps_references_aligned() {
+    let a = r#"{"id":"11111111-1111-4111-8111-111111111111","ref":"11111111-1111-4111-8111-111111111111","b":"22222222-2222-4222-8222-222222222222"}"#;
+    let b = r#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","ref":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","b":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}"#;
+    let c = r#"{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","ref":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","b":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#;
+    assert_eq!(normalize_uuids(a), normalize_uuids(b));
+    assert_ne!(normalize_uuids(a), normalize_uuids(c));
+}
