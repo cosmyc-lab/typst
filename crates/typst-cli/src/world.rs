@@ -43,7 +43,8 @@ pub struct SystemWorld {
 }
 
 impl SystemWorld {
-    /// Creates a new system world for any format but CND.
+    /// Creates a new system world with the default (non-CND) standard
+    /// library, as used by every format but CND and by `query` and `eval`.
     pub fn new(
         input: Option<&Input>,
         world_args: &'static WorldArgs,
@@ -139,7 +140,8 @@ impl SystemWorld {
         LazyLock::force(&self.fonts);
     }
 
-    /// Font files loaded by the last compilation, sorted and deduplicated.
+    /// Font files loaded by the last compilation, canonicalized (when
+    /// possible), sorted and deduplicated.
     /// Fonts without a file (embedded ones) are left out. This is every font
     /// the layout loaded, which can include fonts tried for glyph fallback.
     pub fn font_dependencies(&self) -> Vec<PathBuf> {
@@ -148,7 +150,9 @@ impl SystemWorld {
             .iter()
             .filter_map(|&index| self.fonts.source(index))
             .filter_map(|source| (source as &dyn Any).downcast_ref::<FontPath>())
-            .map(|font| font.path.clone())
+            // Canonical, like file dependencies, so two spellings of one
+            // file (a symlink, a relative path) are reported once.
+            .map(|font| font.path.canonicalize().unwrap_or_else(|_| font.path.clone()))
             .collect();
         paths.into_iter().collect()
     }

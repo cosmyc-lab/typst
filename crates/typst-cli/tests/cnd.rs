@@ -5,8 +5,27 @@ use std::process::Command;
 
 use typst_cnd::Cnd;
 
+/// Environment variables the CLI reads as defaults for its flags. A test
+/// must not depend on the environment it runs in.
+const CLI_ENV: &[&str] = &[
+    "TYPST_CERT",
+    "TYPST_ROOT",
+    "SOURCE_DATE_EPOCH",
+    "TYPST_FEATURES",
+    "TYPST_DIAGNOSTIC_FORMAT",
+    "TYPST_PACKAGE_PATH",
+    "TYPST_PACKAGE_CACHE_PATH",
+    "TYPST_FONT_PATHS",
+    "TYPST_IGNORE_SYSTEM_FONTS",
+    "TYPST_IGNORE_EMBEDDED_FONTS",
+];
+
 fn exec() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_typst"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_typst"));
+    for var in CLI_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
 }
 
 fn write(dir: &Path, rel: &str, data: impl AsRef<[u8]>) -> PathBuf {
@@ -573,4 +592,70 @@ fn deps_without_custom_fonts_lists_no_font_file() {
             .iter()
             .all(|p| !p.ends_with(".ttf") && !p.ends_with(".otf"))
     );
+}
+
+/// A font directory reached through a symlink or a relative path is reported
+/// by its canonical path, like a fallback file from the same directory:
+/// relative to `--root` when inside it, absolute otherwise.
+#[cfg(unix)]
+#[test]
+fn deps_report_font_files_by_their_canonical_path() {
+    let outer = tempfile::tempdir().unwrap();
+    let outer = outer.path().canonicalize().unwrap();
+    let project = outer.join("project");
+    let data = typst_dev_assets::fonts().next().unwrap();
+    let family = typst::text::Font::new(typst::foundations::Bytes::new(data), 0)
+        .unwrap()
+        .info()
+        .family
+        .clone();
+    for dir in [project.join("fonts"), outer.join("library/fonts")] {
+        write(&dir, "custom.ttf", data);
+        write(&dir, "logo.svg", SVG_1X1);
+    }
+    std::os::unix::fs::symlink(outer.join("library"), outer.join("link")).unwrap();
+    let main = write(
+        &project,
+        "main.typ",
+        format!("#set text(font: \"{family}\")\nHello\n#image(\"logo.svg\")"),
+    );
+
+    let absolute = |p: PathBuf| p.to_str().unwrap().to_owned();
+    let cases = [
+        // Outside the root, through a symlinked directory: absolute, canonical.
+        (
+            outer.join("link/fonts"),
+            absolute(outer.join("library/fonts/custom.ttf")),
+            absolute(outer.join("library/fonts/logo.svg")),
+        ),
+        // Inside the root, as a relative path: relative to the root.
+        (
+            PathBuf::from("../project/fonts"),
+            "fonts/custom.ttf".to_owned(),
+            "fonts/logo.svg".to_owned(),
+        ),
+    ];
+    for (dir, font, logo) in cases {
+        run_ok(
+            exec()
+                .current_dir(&project)
+                .arg("compile")
+                .arg(&main)
+                .arg(project.join("out.cnd"))
+                .arg("--root")
+                .arg(&project)
+                .arg("--ignore-system-fonts")
+                .arg("--font-path")
+                .arg(&dir)
+                .arg("--fallback-dir")
+                .arg(&dir)
+                .arg("--deps")
+                .arg(project.join("deps.json"))
+                .arg("--deps-format")
+                .arg("json"),
+        );
+        let inputs = deps_inputs(&project);
+        assert!(inputs.contains(&logo), "{}: {logo} in {inputs:?}", dir.display());
+        assert!(inputs.contains(&font), "{}: {font} in {inputs:?}", dir.display());
+    }
 }
