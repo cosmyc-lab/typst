@@ -470,6 +470,16 @@ pub struct WorldArgs {
     #[clap(long = "root", env = "TYPST_ROOT", value_name = "DIR")]
     pub root: Option<PathBuf>,
 
+    /// A directory searched for project files that do not exist.
+    ///
+    /// When a file of the project is missing, a file with the same name (the
+    /// last path component only) in this directory is used instead. A file
+    /// that exists in the project always wins, and package files never fall
+    /// back. Only regular files that resolve to a location inside this
+    /// directory are served.
+    #[clap(long = "fallback-dir", value_name = "DIR")]
+    pub fallback_dir: Option<PathBuf>,
+
     /// Add a string key-value pair visible through `sys.inputs`.
     #[clap(
         short = 'i',

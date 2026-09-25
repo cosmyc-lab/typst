@@ -1,7 +1,8 @@
 use std::error;
 use std::fmt;
+use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use ecow::{EcoString, eco_format};
@@ -206,6 +207,9 @@ static EMPTY_ID: LazyLock<FileId> = LazyLock::new(|| {
 struct SystemFiles {
     main: FileId,
     project: FsRoot,
+    /// The canonical directory where missing project files are looked up by
+    /// file name.
+    fallback: Option<PathBuf>,
     packages: SystemPackages,
 }
 
@@ -255,16 +259,59 @@ impl SystemFiles {
             *EMPTY_ID
         };
 
+        let fallback =
+            world_args.fallback_dir.as_deref().map(fallback_dir).transpose()?;
+
         Ok(Self {
             main,
             project: FsRoot::new(root),
+            fallback,
             packages: crate::packages::system(&world_args.package),
         })
     }
 
-    /// Resolves the file system path for the given `id`.
+    /// Resolves the file system path for the given `id`, including a file
+    /// served from the fallback directory.
     pub fn resolve(&self, id: FileId) -> FileResult<PathBuf> {
-        self.root(id)?.resolve(id.vpath())
+        let path = self.root(id)?.resolve(id.vpath())?;
+        Ok(self.fallback_file(id, &path).unwrap_or(path))
+    }
+
+    /// The fallback file that serves `id`, whose project path is `path`.
+    ///
+    /// Only a project file that does not exist falls back: a file that exists
+    /// wins, a directory stays an error, and an escaping path already failed
+    /// when its id was created. The file is looked up by its name alone and
+    /// is served only if it is a regular file whose real path lies inside the
+    /// fallback directory, so a symlink cannot lead out of it.
+    fn fallback_file(&self, id: FileId, path: &Path) -> Option<PathBuf> {
+        let dir = self.fallback.as_deref()?;
+        if !matches!(id.root(), VirtualRoot::Project)
+            || id == *EMPTY_ID
+            || id == *STDIN_ID
+        {
+            return None;
+        }
+        // Any outcome but "not found" (an existing file or directory, a
+        // permission error, ...) keeps the project's own result.
+        match fs::metadata(path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            _ => return None,
+        }
+        let name = id.vpath().file_name()?;
+        let mut components = Path::new(name).components();
+        if !matches!(
+            (components.next(), components.next()),
+            (Some(Component::Normal(_)), None)
+        ) {
+            return None;
+        }
+        let candidate = dir.join(name);
+        if candidate.parent() != Some(dir) {
+            return None;
+        }
+        let real = candidate.canonicalize().ok()?;
+        (real.starts_with(dir) && real.is_file()).then_some(real)
     }
 
     /// Resolves the root in which the given file ID resides.
@@ -283,9 +330,30 @@ impl FileLoader for SystemFiles {
         } else if id == *STDIN_ID {
             read_from_stdin().map(Bytes::new)
         } else {
-            self.root(id)?.load(id.vpath())
+            let root = self.root(id)?;
+            let path = root.resolve(id.vpath())?;
+            if let Some(real) = self.fallback_file(id, &path) {
+                return fs::read(&real)
+                    .map(Bytes::new)
+                    .map_err(|err| FileError::from_io(err, &real));
+            }
+            root.load(id.vpath())
         }
     }
+}
+
+/// Canonicalizes the `--fallback-dir` and checks that it is a directory.
+fn fallback_dir(dir: &Path) -> Result<PathBuf, WorldCreationError> {
+    let canonical = dir.canonicalize().map_err(|err| match err.kind() {
+        io::ErrorKind::NotFound => {
+            WorldCreationError::FallbackDirNotFound(dir.to_path_buf())
+        }
+        _ => WorldCreationError::Io(err),
+    })?;
+    if !canonical.is_dir() {
+        return Err(WorldCreationError::FallbackDirNotADirectory(dir.to_path_buf()));
+    }
+    Ok(canonical)
 }
 
 /// Read from stdin.
@@ -309,6 +377,10 @@ pub enum WorldCreationError {
     InputMalformed(VirtualizeError),
     /// The root directory does not appear to exist.
     RootNotFound(PathBuf),
+    /// The fallback directory does not appear to exist.
+    FallbackDirNotFound(PathBuf),
+    /// The fallback directory is not a directory.
+    FallbackDirNotADirectory(PathBuf),
     /// The requested creation timestamp was invalid.
     InvalidTimestamp,
     /// The `--inputs-file` could not be used.
@@ -337,6 +409,12 @@ impl fmt::Display for WorldCreationError {
             }
             WorldCreationError::RootNotFound(path) => {
                 write!(f, "root directory not found (searched at {})", path.display())
+            }
+            WorldCreationError::FallbackDirNotFound(path) => {
+                write!(f, "fallback directory not found (searched at {})", path.display())
+            }
+            WorldCreationError::FallbackDirNotADirectory(path) => {
+                write!(f, "fallback directory is not a directory ({})", path.display())
             }
             WorldCreationError::InvalidTimestamp => {
                 write!(f, "creation timestamp out of range")
@@ -375,5 +453,77 @@ impl From<Feature> for typst::Feature {
             Feature::Bundle => typst::Feature::Bundle,
             Feature::A11yExtras => typst::Feature::A11yExtras,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use typst::syntax::package::PackageSpec;
+    use typst_kit::downloader::SystemDownloader;
+    use typst_kit::packages::{FsPackages, UniversePackages};
+
+    use super::*;
+
+    /// A loader with the project in `project`, `fallback`, and local packages
+    /// in `packages`.
+    fn files(project: &Path, fallback: &Path, packages: &Path) -> SystemFiles {
+        SystemFiles {
+            main: *EMPTY_ID,
+            project: FsRoot::new(project.canonicalize().unwrap()),
+            fallback: Some(fallback.canonicalize().unwrap()),
+            packages: SystemPackages::from_parts(
+                Some(FsPackages::new(packages.to_path_buf())),
+                None,
+                // Not `crate::download::downloader()`: it parses the process
+                // arguments, which exits a test binary.
+                UniversePackages::new(SystemDownloader::new("test")),
+            ),
+        }
+    }
+
+    fn id(root: VirtualRoot, path: &str) -> FileId {
+        RootedPath::new(root, VirtualPath::new(path).unwrap()).intern()
+    }
+
+    #[test]
+    fn project_files_fall_back_and_resolve_to_the_fallback_file() {
+        let fallback = tempfile::tempdir().unwrap();
+        fs::write(fallback.path().join("lib.typ"), "x").unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let files = files(project.path(), fallback.path(), fallback.path());
+        let id = id(VirtualRoot::Project, "nested/lib.typ");
+        assert_eq!(files.load(id).unwrap().as_slice(), b"x");
+        assert_eq!(
+            files.resolve(id).unwrap(),
+            fallback.path().join("lib.typ").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn packages_never_fall_back() {
+        let fallback = tempfile::tempdir().unwrap();
+        fs::write(fallback.path().join("lib.typ"), "x").unwrap();
+        let packages = tempfile::tempdir().unwrap();
+        // The package exists, but the requested file does not.
+        fs::create_dir_all(packages.path().join("local/pkg/0.1.0")).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let files = files(project.path(), fallback.path(), packages.path());
+        let spec: PackageSpec = "@local/pkg:0.1.0".parse().unwrap();
+        let id = id(VirtualRoot::Package(spec), "lib.typ");
+        assert!(matches!(files.load(id), Err(FileError::NotFound(_))));
+        assert!(!files.resolve(id).unwrap().starts_with(fallback.path()));
+    }
+
+    #[test]
+    fn special_ids_never_fall_back() {
+        let fallback = tempfile::tempdir().unwrap();
+        fs::write(fallback.path().join("<stdin>"), "x").unwrap();
+        fs::write(fallback.path().join("<empty>"), "x").unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let files = files(project.path(), fallback.path(), fallback.path());
+        assert!(files.load(*EMPTY_ID).unwrap().is_empty());
+        let fallback = fallback.path().canonicalize().unwrap();
+        assert!(!files.resolve(*EMPTY_ID).unwrap().starts_with(&fallback));
+        assert!(!files.resolve(*STDIN_ID).unwrap().starts_with(&fallback));
     }
 }

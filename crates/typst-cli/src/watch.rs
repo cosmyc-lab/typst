@@ -39,7 +39,8 @@ pub fn watch(command: &'static WatchCommand) -> HintedStrResult<()> {
             Ok(world) => break world,
             Err(
                 ref err @ (WorldCreationError::InputNotFound(ref path)
-                | WorldCreationError::RootNotFound(ref path)),
+                | WorldCreationError::RootNotFound(ref path)
+                | WorldCreationError::FallbackDirNotFound(ref path)),
             ) => {
                 watcher.update([path.clone()])?;
                 Status::Error.print(&config).unwrap();
