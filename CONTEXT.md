@@ -19,7 +19,7 @@ This directory is a **local clone of the Typst compiler** (v0.14.x workspace). I
 
 ```plain text
 Typst source (.typ)
-      │  typst-cnd (Rust, this workspace)
+      │  typst compile --format cnd (typst-cli + typst-cnd)
       ▼
 CND Manifest (JSON)
       │  cnd-engine (Python)
@@ -35,6 +35,14 @@ flowchart LR
   D --> E["DBR"]
   E --> F["Qdrant"]
 ```
+
+`typst-cnd` is the exporter library. The supported entry point is
+`typst compile <file> --format cnd` (or an output path ending in `.cnd`),
+which brings every standard CLI option (`--root`, `--font-path`,
+`--ignore-system-fonts`, `--deps`) plus two generic additions:
+`--inputs-file` (a JSON object of string values for `sys.inputs`) and
+`--fallback-dir` (missing project files are looked up by file name there).
+The standalone `typst-cnd` binary remains for existing callers.
 
 ## Strategic context (Notion, June 2026)
 
