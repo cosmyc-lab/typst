@@ -480,6 +480,15 @@ pub struct WorldArgs {
     )]
     pub inputs: Vec<(String, String)>,
 
+    /// Load a JSON object of string values into `sys.inputs`.
+    ///
+    /// Every value must be a JSON string — often itself serialized JSON,
+    /// decoded again on the Typst side. Use this instead of many `--input`
+    /// flags when the data would not fit comfortably on the command line. A
+    /// key also given with `--input` takes the `--input` value.
+    #[clap(long = "inputs-file", value_name = "PATH")]
+    pub inputs_file: Option<PathBuf>,
+
     /// Common font arguments.
     #[clap(flatten)]
     pub font: FontArgs,

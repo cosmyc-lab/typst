@@ -191,3 +191,54 @@ fn normalize_uuids_keeps_references_aligned() {
     assert_eq!(normalize_uuids(a), normalize_uuids(b));
     assert_ne!(normalize_uuids(a), normalize_uuids(c));
 }
+
+#[test]
+fn inputs_file_feeds_sys_inputs_and_input_flag_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let main =
+        write(dir.path(), "main.typ", "#sys.inputs.at(\"a\") #sys.inputs.at(\"b\")");
+    let inputs = write(dir.path(), "inputs.json", r#"{"a": "from-file", "b": "file-b"}"#);
+    let out = dir.path().join("out.cnd");
+    run_ok(
+        exec()
+            .arg("compile")
+            .arg(&main)
+            .arg(&out)
+            .arg("--inputs-file")
+            .arg(&inputs)
+            .arg("--input")
+            .arg("b=from-flag"),
+    );
+    let json = std::fs::read_to_string(&out).unwrap();
+    assert!(json.contains("from-file"), "{json}");
+    assert!(json.contains("from-flag") && !json.contains("file-b"), "{json}");
+}
+
+#[test]
+fn inputs_file_works_for_every_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = write(dir.path(), "main.typ", "#sys.inputs.at(\"a\")");
+    let inputs = write(dir.path(), "inputs.json", r#"{"a": "x"}"#);
+    run_ok(exec().arg("compile").arg(&main).arg("--inputs-file").arg(&inputs));
+    assert!(dir.path().join("main.pdf").exists());
+}
+
+#[test]
+fn bad_inputs_file_fails_with_its_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = write(dir.path(), "main.typ", "x");
+    let inputs = write(dir.path(), "inputs.json", r#"{"a": 1}"#);
+    let out = exec()
+        .arg("compile")
+        .arg(&main)
+        .arg("--inputs-file")
+        .arg(&inputs)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("inputs.json") && stderr.contains("must be a string"),
+        "{stderr}"
+    );
+}

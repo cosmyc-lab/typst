@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 
 use ecow::{EcoString, eco_format};
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime, Dict, Duration, IntoValue, Repr};
+use typst::foundations::{Bytes, Datetime, Duration, Repr};
 use typst::syntax::{
     FileId, PathError, RootedPath, Source, VirtualPath, VirtualRoot, VirtualizeError,
 };
@@ -64,12 +64,8 @@ impl SystemWorld {
         }
 
         let library = {
-            // Convert the input pairs to a dictionary.
-            let inputs: Dict = world_args
-                .inputs
-                .iter()
-                .map(|(k, v)| (k.as_str().into(), v.as_str().into_value()))
-                .collect();
+            let inputs = crate::inputs::sys_inputs(world_args)
+                .map_err(WorldCreationError::Inputs)?;
 
             let features: Vec<typst::Feature> =
                 process_args.features.iter().copied().map(Into::into).collect();
@@ -315,6 +311,8 @@ pub enum WorldCreationError {
     RootNotFound(PathBuf),
     /// The requested creation timestamp was invalid.
     InvalidTimestamp,
+    /// The `--inputs-file` could not be used.
+    Inputs(String),
     /// Another type of I/O error.
     Io(io::Error),
 }
@@ -343,6 +341,7 @@ impl fmt::Display for WorldCreationError {
             WorldCreationError::InvalidTimestamp => {
                 write!(f, "creation timestamp out of range")
             }
+            WorldCreationError::Inputs(message) => write!(f, "{message}"),
             WorldCreationError::Io(err) => write!(f, "{err}"),
         }
     }
