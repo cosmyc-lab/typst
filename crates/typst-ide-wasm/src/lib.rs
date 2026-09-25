@@ -672,6 +672,12 @@ mod tests {
         list.iter().map(|name| name.to_string()).collect()
     }
 
+    fn completion_labels(s: &mut Session, path: &str, cursor: usize) -> Vec<String> {
+        s.autocomplete_impl("main.typ", path, cursor, true)
+            .map(|r| r.completions.into_iter().map(|c| c.label.to_string()).collect())
+            .unwrap_or_default()
+    }
+
     #[test]
     fn library_images_resolve_by_bare_name_from_any_directory() {
         let mut s = session_with("#include \"chapters/intro.typ\"\n#image(\"logo.svg\")");
@@ -777,5 +783,71 @@ mod tests {
         .intern();
         assert!(world.file(id).is_err());
         assert!(world.take_missing_library_images().is_empty());
+    }
+
+    #[test]
+    fn library_name_rejects_anything_but_a_bare_file_name() {
+        use crate::world::library_name;
+        assert_eq!(library_name("a/b.svg"), None);
+        assert_eq!(library_name("a\\b.svg"), None);
+        assert_eq!(library_name(".."), None);
+        assert_eq!(library_name("."), None);
+        assert_eq!(library_name(""), None);
+        assert_eq!(library_name("logo.svg"), Some("logo.svg".into()));
+    }
+
+    #[test]
+    fn library_images_complete_by_bare_name() {
+        let mut s = session_with("#image(\"\")");
+        s.set_library_images(&names(&["logo.svg"]));
+        let labels = completion_labels(&mut s, "main.typ", 8);
+        assert!(labels.iter().any(|l| l.contains("logo.svg")), "{labels:?}");
+    }
+
+    #[test]
+    fn library_images_complete_by_bare_name_in_a_subfolder() {
+        let mut s = session_with("#include \"chapters/intro.typ\"");
+        s.add_source("chapters/intro.typ", "#image(\"\")");
+        s.set_library_images(&names(&["logo.svg"]));
+        let labels = completion_labels(&mut s, "chapters/intro.typ", 8);
+        assert!(labels.iter().any(|l| l.trim_matches('"') == "logo.svg"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l.contains("../logo.svg")), "{labels:?}");
+    }
+
+    #[test]
+    fn a_project_file_and_a_library_image_of_the_same_name_complete_once() {
+        let mut s = session_with("#image(\"\")");
+        s.add_asset("logo.svg", SVG);
+        s.set_library_images(&names(&["logo.svg"]));
+        let labels = completion_labels(&mut s, "main.typ", 8);
+        let count = labels.iter().filter(|l| l.contains("logo.svg")).count();
+        assert_eq!(count, 1, "{labels:?}");
+    }
+
+    #[test]
+    fn library_completions_respect_the_typed_prefix_and_extension() {
+        let mut s = session_with("#image(\"zz\")");
+        s.set_library_images(&names(&["logo.svg", "notes.csv"]));
+        assert!(
+            !completion_labels(&mut s, "main.typ", 10)
+                .iter()
+                .any(|l| l.contains("logo"))
+        );
+
+        let mut s = session_with("#image(\"\")");
+        s.set_library_images(&names(&["logo.svg", "notes.csv"]));
+        let labels = completion_labels(&mut s, "main.typ", 8);
+        assert!(!labels.iter().any(|l| l.contains("notes.csv")), "{labels:?}");
+    }
+
+    #[test]
+    fn hostile_names_never_complete() {
+        let mut s = session_with("#image(\"\")");
+        s.set_library_images(&names(&["../x.svg", "a/b.svg", "a\\b.svg"]));
+        let labels = completion_labels(&mut s, "main.typ", 8);
+        assert!(
+            !labels.iter().any(|l| l.contains("x.svg") || l.contains("b.svg")),
+            "{labels:?}"
+        );
     }
 }

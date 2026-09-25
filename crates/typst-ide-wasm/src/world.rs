@@ -225,6 +225,9 @@ impl World for BrowserWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
+        // Deliberately no library fallback here: the library holds images
+        // only, even though the CLI's own `--fallback-dir` serves sources
+        // too.
         match self.sources.get(&id) {
             Some(source) => Ok(source.clone()),
             None => Err(FileError::NotFound(id.vpath().get_without_slash().into())),
@@ -272,18 +275,44 @@ impl IdeWorld for BrowserWorld {
         // relative to the file being completed, optionally narrowed by what
         // the user has already typed.
         let dir = base.vpath().parent();
-        self.sources
+        let matches_prefix = |path: &VirtualPath| {
+            prefix.is_none_or(|prefix| {
+                dir.as_ref()
+                    .map(|dir| path.relative_from(dir))
+                    .is_none_or(|relative| relative.starts_with(prefix))
+            })
+        };
+
+        let mut paths: Vec<VirtualPath> = self
+            .sources
             .keys()
             .chain(self.assets.keys())
             .map(|id| id.vpath().clone())
-            .filter(|path| {
-                prefix.is_none_or(|prefix| {
-                    dir.as_ref()
-                        .map(|dir| path.relative_from(dir))
-                        .is_none_or(|relative| relative.starts_with(prefix))
-                })
-            })
-            .collect()
+            .filter(|path| matches_prefix(path))
+            .collect();
+
+        // A library image resolves by its bare name from any directory, so it
+        // is offered as if it sat next to the file being completed — unless
+        // the project has a file there, which wins and is already listed.
+        if let Some(dir) = &dir {
+            // `library_names` is a hash set, whose iteration order is
+            // unspecified; sorting first keeps the offered completions
+            // deterministic.
+            let mut names: Vec<&EcoString> = self.library_names.iter().collect();
+            names.sort();
+            for name in names {
+                let Ok(path) = dir.join(name) else { continue };
+                let id = RootedPath::new(VirtualRoot::Project, path.clone()).intern();
+                if self.sources.contains_key(&id) || self.assets.contains_key(&id) {
+                    continue;
+                }
+                if matches_prefix(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+
+        paths
     }
 
     fn packages(&self) -> &[(PackageSpec, Option<EcoString>)] {
