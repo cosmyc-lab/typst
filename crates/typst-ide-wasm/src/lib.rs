@@ -15,10 +15,12 @@
 
 #[cfg(target_arch = "wasm32")]
 mod bindings;
+mod fonts;
 mod world;
 
 #[cfg(target_arch = "wasm32")]
 pub use self::bindings::IdeSession;
+pub use self::fonts::{FontFace, font_faces};
 pub use self::world::BrowserWorld;
 
 use std::num::NonZeroUsize;
