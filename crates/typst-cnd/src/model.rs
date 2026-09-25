@@ -5,8 +5,6 @@
 //! emitting a CND and running it through the SDK's `validate()`, not by
 //! construction.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -311,8 +309,16 @@ pub struct NodeBase {
     /// forward family alongside `refs`/`cites`/`footnotes`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<NodeLink>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub state_metadata: HashMap<String, serde_json::Value>,
+    /// A plain `serde_json::Map`, not a `HashMap`: without `serde_json`'s
+    /// `preserve_order` feature (never enabled in this workspace — it would
+    /// change map ordering for every crate in the build), `Map` is backed
+    /// by a `BTreeMap`, so keys always serialize in the same alphabetical
+    /// order. A `HashMap` here would serialize its keys in a random,
+    /// per-process order, which is exactly what CND's `built_at`/UUID
+    /// normalization in `typst-cli`'s parity test cannot paper over: the
+    /// same document would produce a textually different CND on every run.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub state_metadata: serde_json::Map<String, serde_json::Value>,
     pub location: NodeLocation,
 }
 
@@ -569,7 +575,7 @@ impl NodeBase {
             cites: Vec::new(),
             footnotes: Vec::new(),
             links: Vec::new(),
-            state_metadata: HashMap::new(),
+            state_metadata: serde_json::Map::new(),
             location,
         }
     }

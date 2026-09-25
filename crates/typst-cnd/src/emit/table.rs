@@ -159,7 +159,7 @@ pub fn from_figure_grid(
         ref_markers: Vec::new(),
         link_targets: Vec::new(),
         link_markers: Vec::new(),
-        state_metadata: std::collections::HashMap::new(),
+        state_metadata: serde_json::Map::new(),
     };
 
     let wrapper_id = Uuid::new_v4();
@@ -221,7 +221,7 @@ pub fn convert(
 /// actually reads. Only a string value is accepted; anything else (wrong
 /// type, or simply absent) leaves the hint unset rather than guessing.
 fn content_kind_from_metadata(
-    metadata: &std::collections::HashMap<String, serde_json::Value>,
+    metadata: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<String> {
     match metadata.get("content_kind") {
         Some(serde_json::Value::String(s)) => Some(s.clone()),

@@ -103,7 +103,7 @@ fn minimal_record(content: &Content) -> NodeRecord {
         ref_markers: Vec::new(),
         link_targets: Vec::new(),
         link_markers: Vec::new(),
-        state_metadata: std::collections::HashMap::new(),
+        state_metadata: serde_json::Map::new(),
     }
 }
 
