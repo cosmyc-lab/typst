@@ -162,6 +162,25 @@ impl Session {
         self.dirty = true;
     }
 
+    /// Replaces the set of library image names (see
+    /// [`BrowserWorld::set_library_images`]).
+    pub fn set_library_images(&mut self, names: &[String]) {
+        self.world.set_library_images(names);
+        self.dirty = true;
+    }
+
+    /// Supplies the bytes of a library image.
+    pub fn add_library_image(&mut self, name: &str, bytes: &[u8]) {
+        self.world.add_library_image(name, bytes);
+        self.dirty = true;
+    }
+
+    /// Returns and forgets the library images that lookups needed but whose
+    /// bytes have not been supplied yet.
+    pub fn take_missing_library_images(&mut self) -> Vec<String> {
+        self.world.take_missing_library_images()
+    }
+
     /// Compiles the project rooted at `main_path` and caches the result.
     ///
     /// Returns the error messages if compilation failed; the cached document
@@ -643,5 +662,120 @@ mod tests {
         assert_eq!(sanitize_cursor(text, 3), 3);
         assert_eq!(sanitize_cursor(text, 9_999), text.len());
         assert_eq!(sanitize_cursor("", 5), 0);
+    }
+
+    /// A 10×10 SVG: small, valid, and decodable without any image feature.
+    const SVG: &[u8] =
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn library_images_resolve_by_bare_name_from_any_directory() {
+        let mut s = session_with("#include \"chapters/intro.typ\"\n#image(\"logo.svg\")");
+        s.add_source("chapters/intro.typ", "#image(\"logo.svg\")");
+        s.set_library_images(&names(&["logo.svg"]));
+        s.add_library_image("logo.svg", SVG);
+        s.compile_impl("main.typ")
+            .unwrap_or_else(|errors| panic!("compile failed: {errors:?}"));
+        assert!(s.take_missing_library_images().is_empty());
+    }
+
+    #[test]
+    fn a_project_file_wins_over_the_library() {
+        // The project's own `logo.svg` is not an image at all, so the
+        // compilation can only succeed if the library copy were used.
+        let mut s = session_with("#image(\"logo.svg\")");
+        s.add_asset("logo.svg", b"not an image");
+        s.set_library_images(&names(&["logo.svg"]));
+        s.add_library_image("logo.svg", SVG);
+        assert!(s.compile_impl("main.typ").is_err());
+    }
+
+    #[test]
+    fn a_project_file_in_a_subfolder_wins_there() {
+        let mut s = session_with("#include \"chapters/intro.typ\"");
+        s.add_source("chapters/intro.typ", "#image(\"logo.svg\")");
+        s.add_asset("chapters/logo.svg", b"not an image");
+        s.set_library_images(&names(&["logo.svg"]));
+        s.add_library_image("logo.svg", SVG);
+        assert!(s.compile_impl("main.typ").is_err());
+    }
+
+    #[test]
+    fn missing_bytes_are_reported_once_then_served() {
+        let mut s = session_with("#image(\"logo.svg\")");
+        s.set_library_images(&names(&["logo.svg"]));
+        let errors = s.compile_impl("main.typ").expect_err("bytes not there yet");
+        assert!(errors.iter().any(|e| e.contains("not found")), "{errors:?}");
+        assert_eq!(s.take_missing_library_images(), names(&["logo.svg"]));
+        assert!(s.take_missing_library_images().is_empty(), "drained");
+
+        s.add_library_image("logo.svg", SVG);
+        s.compile_impl("main.typ")
+            .unwrap_or_else(|errors| panic!("compile failed: {errors:?}"));
+    }
+
+    #[test]
+    fn names_outside_the_set_are_never_served_or_reported() {
+        let mut s = session_with("#image(\"other.svg\")");
+        s.set_library_images(&names(&["logo.svg"]));
+        s.add_library_image("logo.svg", SVG);
+        // Bytes for a name that is not in the set are ignored.
+        s.add_library_image("other.svg", SVG);
+        assert!(s.compile_impl("main.typ").is_err());
+        assert!(s.take_missing_library_images().is_empty());
+    }
+
+    #[test]
+    fn hostile_names_are_ignored() {
+        let hostile = ["../x.svg", "a/b.svg", "a\\b.svg", "", ".", ".."];
+        let mut s = session_with("#image(\"x.svg\")");
+        s.set_library_images(&names(&hostile));
+        for name in hostile {
+            s.add_library_image(name, SVG);
+        }
+        assert!(s.compile_impl("main.typ").is_err());
+        assert!(s.take_missing_library_images().is_empty());
+    }
+
+    #[test]
+    fn replacing_the_set_drops_bytes_and_invalidates_the_document() {
+        // A cursor jump only lands on text, so the image comes after a word
+        // the cursor (offset 1) sits in.
+        let mut s = session_with("Hello\n#image(\"logo.svg\")");
+        s.set_library_images(&names(&["logo.svg"]));
+        s.add_library_image("logo.svg", SVG);
+        s.compile_impl("main.typ").expect("compiles");
+        assert!(!s.jump_from_cursor_impl("main.typ", "main.typ", 1).is_empty());
+
+        s.set_library_images(&names(&[]));
+        // The jump recompiles because the set changed; the image is gone,
+        // so the project no longer compiles and there is nothing to jump to.
+        assert!(s.jump_from_cursor_impl("main.typ", "main.typ", 1).is_empty());
+        // Re-adding the name without bytes does not resurrect the old bytes.
+        s.set_library_images(&names(&["logo.svg"]));
+        assert!(s.compile_impl("main.typ").is_err());
+    }
+
+    #[test]
+    fn package_files_never_fall_back() {
+        use typst::World;
+        use typst::syntax::package::PackageSpec;
+        use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
+
+        let mut world = BrowserWorld::new();
+        world.set_library_images(&names(&["logo.svg"]));
+        world.add_library_image("logo.svg", SVG);
+        let spec: PackageSpec = "@preview/pkg:0.1.0".parse().expect("spec");
+        let id = RootedPath::new(
+            VirtualRoot::Package(spec),
+            VirtualPath::new("logo.svg").expect("path"),
+        )
+        .intern();
+        assert!(world.file(id).is_err());
+        assert!(world.take_missing_library_images().is_empty());
     }
 }

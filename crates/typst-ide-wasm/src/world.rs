@@ -1,7 +1,10 @@
 //! An in-memory [`World`] implementation suitable for browsers.
 
+use std::collections::BTreeSet;
+use std::sync::Mutex;
+
 use ecow::EcoString;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::package::PackageSpec;
@@ -25,6 +28,19 @@ pub fn file_id(path: &str) -> Option<FileId> {
     Some(RootedPath::new(VirtualRoot::Project, vpath).intern())
 }
 
+/// Accepts a library image name only if it is a bare file name.
+///
+/// Anything with a separator, an empty name or a `.`/`..` component is
+/// rejected, so a name handed in by the host can never become a path that
+/// reaches beyond the directory it is looked up in.
+pub(crate) fn library_name(name: &str) -> Option<EcoString> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+        return None;
+    }
+    let path = VirtualPath::new(name).ok()?;
+    (path.file_name() == Some(name)).then(|| name.into())
+}
+
 /// A [`World`] whose entire file system and font set live in memory.
 ///
 /// Everything is owned by the world itself: there is no file system access, no
@@ -43,6 +59,15 @@ pub struct BrowserWorld {
     assets: FxHashMap<FileId, Bytes>,
     /// The file that is currently treated as the main file.
     main: FileId,
+    /// Image names that any project file which does not exist may resolve
+    /// to, by its bare file name (the same rule as the CLI's
+    /// `--fallback-dir`).
+    library_names: FxHashSet<EcoString>,
+    /// The bytes of library images the host has supplied so far.
+    library_bytes: FxHashMap<EcoString, Bytes>,
+    /// Library images a lookup needed but whose bytes were not supplied yet.
+    /// `World::file` takes `&self`, hence the lock.
+    missing_library: Mutex<BTreeSet<String>>,
 }
 
 impl BrowserWorld {
@@ -64,6 +89,9 @@ impl BrowserWorld {
             sources: FxHashMap::default(),
             assets: FxHashMap::default(),
             main,
+            library_names: FxHashSet::default(),
+            library_bytes: FxHashMap::default(),
+            missing_library: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -110,6 +138,71 @@ impl BrowserWorld {
     pub fn source_at(&self, path: &str) -> Option<Source> {
         self.sources.get(&file_id(path)?).cloned()
     }
+
+    /// Replaces the set of library image names.
+    ///
+    /// Invalid names are ignored. Bytes and pending lookups of names that are
+    /// no longer in the set are dropped.
+    pub fn set_library_images(&mut self, names: &[String]) {
+        self.library_names = names.iter().filter_map(|name| library_name(name)).collect();
+        self.library_bytes.retain(|name, _| self.library_names.contains(name));
+        self.missing_library
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|name| self.library_names.contains(name.as_str()));
+    }
+
+    /// Supplies the bytes of a library image.
+    ///
+    /// Ignored unless `name` is in the current set.
+    pub fn add_library_image(&mut self, name: &str, bytes: &[u8]) {
+        let Some(name) = library_name(name) else { return };
+        if !self.library_names.contains(&name) {
+            return;
+        }
+        self.missing_library
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(name.as_str());
+        self.library_bytes.insert(name, Bytes::new(bytes.to_vec()));
+    }
+
+    /// Returns, sorted, the library images lookups needed but that have no
+    /// bytes yet, and forgets them.
+    pub fn take_missing_library_images(&self) -> Vec<String> {
+        let mut missing = self
+            .missing_library
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *missing).into_iter().collect()
+    }
+
+    /// Serves a project file that does not exist from the library.
+    ///
+    /// Returns `None` when the library has nothing to say about `id`: a
+    /// package file, a name outside the set, or a file the project has.
+    fn library_file(&self, id: FileId) -> Option<FileResult<Bytes>> {
+        if !matches!(id.root(), VirtualRoot::Project)
+            || self.sources.contains_key(&id)
+            || self.assets.contains_key(&id)
+        {
+            return None;
+        }
+        let name = id.vpath().file_name()?;
+        if !self.library_names.contains(name) {
+            return None;
+        }
+        Some(match self.library_bytes.get(name) {
+            Some(bytes) => Ok(bytes.clone()),
+            None => {
+                self.missing_library
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(name.to_owned());
+                Err(FileError::NotFound(id.vpath().get_without_slash().into()))
+            }
+        })
+    }
 }
 
 impl Default for BrowserWorld {
@@ -149,6 +242,10 @@ impl World for BrowserWorld {
         // would fail even though the world holds its text.
         if let Some(source) = self.sources.get(&id) {
             return Ok(Bytes::from_string(source.text().to_owned()));
+        }
+
+        if let Some(result) = self.library_file(id) {
+            return result;
         }
 
         Err(FileError::NotFound(id.vpath().get_without_slash().into()))
