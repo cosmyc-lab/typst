@@ -1,9 +1,11 @@
+use std::any::Any;
+use std::collections::BTreeSet;
 use std::error;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use ecow::{EcoString, eco_format};
 use typst::diag::{FileError, FileResult};
@@ -17,7 +19,7 @@ use typst::{Library, LibraryExt, World};
 use typst_kit::datetime::Time;
 use typst_kit::diagnostics::DiagnosticWorld;
 use typst_kit::files::{FileLoader, FileStore, FsRoot};
-use typst_kit::fonts::FontStore;
+use typst_kit::fonts::{FontPath, FontStore};
 use typst_kit::packages::SystemPackages;
 
 use crate::args::{Feature, Input, OutputFormat, ProcessArgs, WorldArgs};
@@ -36,6 +38,8 @@ pub struct SystemWorld {
     /// always the same within one compilation.
     /// Reset between compilations if not [`Time::Fixed`].
     now: Time,
+    /// Indices of the fonts loaded since the last reset, for `--deps`.
+    accessed_fonts: Mutex<BTreeSet<usize>>,
 }
 
 impl SystemWorld {
@@ -101,6 +105,7 @@ impl SystemWorld {
             })),
             files: FileStore::new(SystemFiles::new(input, world_args)?),
             now,
+            accessed_fonts: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -124,6 +129,7 @@ impl SystemWorld {
     pub fn reset(&mut self) {
         self.files.reset();
         self.now.reset();
+        self.accessed_fonts.get_mut().unwrap().clear();
     }
 
     /// Forcibly scan fonts instead of doing it lazily upon the first access.
@@ -131,6 +137,20 @@ impl SystemWorld {
     /// Does nothing if the fonts were already scanned.
     pub fn scan_fonts(&mut self) {
         LazyLock::force(&self.fonts);
+    }
+
+    /// Font files loaded by the last compilation, sorted and deduplicated.
+    /// Fonts without a file (embedded ones) are left out. This is every font
+    /// the layout loaded, which can include fonts tried for glyph fallback.
+    pub fn font_dependencies(&self) -> Vec<PathBuf> {
+        let accessed = self.accessed_fonts.lock().unwrap();
+        let paths: BTreeSet<PathBuf> = accessed
+            .iter()
+            .filter_map(|&index| self.fonts.source(index))
+            .filter_map(|source| (source as &dyn Any).downcast_ref::<FontPath>())
+            .map(|font| font.path.clone())
+            .collect();
+        paths.into_iter().collect()
     }
 }
 
@@ -156,6 +176,7 @@ impl World for SystemWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
+        self.accessed_fonts.lock().unwrap().insert(index);
         self.fonts.font(index)
     }
 

@@ -513,3 +513,64 @@ fn fallback_dir_must_be_a_directory() {
     assert!(!out.status.success());
     assert!(stderr.contains("fallback directory is not a directory"), "{stderr}");
 }
+
+#[test]
+fn deps_lists_font_files_the_compile_loaded() {
+    let project = tempfile::tempdir().unwrap();
+    let fonts = tempfile::tempdir().unwrap();
+    let data = typst_dev_assets::fonts().next().unwrap();
+    let family = typst::text::Font::new(typst::foundations::Bytes::new(data), 0)
+        .unwrap()
+        .info()
+        .family
+        .clone();
+    write(fonts.path(), "custom.ttf", data);
+    write(fonts.path(), "unused.ttf", data); // same family twice: only one is loaded
+    let main = write(
+        project.path(),
+        "main.typ",
+        format!("#set text(font: \"{family}\")\nHello"),
+    );
+    let deps = project.path().join("deps.json");
+    run_ok(
+        exec()
+            .arg("compile")
+            .arg(&main)
+            .arg(project.path().join("out.cnd"))
+            .arg("--ignore-system-fonts")
+            .arg("--font-path")
+            .arg(fonts.path())
+            .arg("--deps")
+            .arg(&deps)
+            .arg("--deps-format")
+            .arg("json"),
+    );
+    let inputs = deps_inputs(project.path());
+    let font_inputs: Vec<&String> =
+        inputs.iter().filter(|p| p.ends_with(".ttf")).collect();
+    assert_eq!(font_inputs.len(), 1, "exactly one font file loaded: {inputs:?}");
+    assert!(inputs.iter().any(|p| p.ends_with("main.typ")));
+}
+
+#[test]
+fn deps_without_custom_fonts_lists_no_font_file() {
+    let project = tempfile::tempdir().unwrap();
+    let main = write(project.path(), "main.typ", "Hello");
+    run_ok(
+        exec()
+            .arg("compile")
+            .arg(&main)
+            .arg(project.path().join("out.cnd"))
+            .arg("--ignore-system-fonts")
+            .arg("--deps")
+            .arg(project.path().join("deps.json"))
+            .arg("--deps-format")
+            .arg("json"),
+    );
+    // Embedded fonts have no file.
+    assert!(
+        deps_inputs(project.path())
+            .iter()
+            .all(|p| !p.ends_with(".ttf") && !p.ends_with(".otf"))
+    );
+}
