@@ -29,7 +29,7 @@ Chunks → DBR records → embedding → Qdrant
 
 ```mermaid
 flowchart LR
-  A[".typ"] --> B["typst-cnd"]
+  A[".typ"] --> B["typst compile --format cnd"]
   B --> C["manifest.json"]
   C --> D["cnd-engine"]
   D --> E["DBR"]
