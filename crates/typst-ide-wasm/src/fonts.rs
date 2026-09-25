@@ -49,6 +49,7 @@ pub fn font_faces(bytes: &[u8]) -> Result<Vec<FontFace>, String> {
             return Err(format!("the font collection claims {count} faces"));
         }
     }
+    check_coverage(bytes)?;
 
     let faces: Vec<FontFace> = Font::iter(Bytes::new(bytes.to_vec()))
         .take(MAX_FACES as usize)
@@ -81,6 +82,150 @@ fn collection_count(bytes: &[u8]) -> Option<u32> {
     }
     let count = bytes.get(8..12)?;
     Some(u32::from_be_bytes(count.try_into().ok()?))
+}
+
+/// The most codepoints one face's `cmap` subtables may declare, summed.
+///
+/// Reading a face lists every codepoint of its `cmap` one by one, and a
+/// 12-byte range can declare four billion of them. Four times the Unicode
+/// range leaves room for a real face's several subtables.
+const MAX_FACE_CODEPOINTS: u64 = 4 * 0x110000;
+
+/// The most codepoints all faces of one file may declare, summed.
+const MAX_FILE_CODEPOINTS: u64 = 16 * 0x110000;
+
+/// Rejects a file whose `cmap` tables would make reading it unbounded.
+///
+/// Counts, from the raw table bytes, how many codepoints each face's
+/// subtables declare, before the face is read. Every encoding record is
+/// counted, since several records may point at the same subtable and each
+/// one is listed again. The count stops as soon as a limit is crossed, so
+/// the check itself stays bounded. A face the font parser cannot read is
+/// left to the reader, which skips it.
+fn check_coverage(bytes: &[u8]) -> Result<(), String> {
+    let count = collection_count(bytes).unwrap_or(1);
+    let mut file_total = 0;
+    for index in 0..count {
+        let Ok(face) = ttf_parser::Face::parse(bytes, index) else { continue };
+        let Some(cmap) = face.raw_face().table(ttf_parser::Tag::from_bytes(b"cmap"))
+        else {
+            continue;
+        };
+        let face_total = cmap_codepoints(cmap, MAX_FACE_CODEPOINTS)?;
+        if face_total > MAX_FACE_CODEPOINTS {
+            return Err(format!("font face {index} declares too many codepoints"));
+        }
+        file_total += face_total;
+        if file_total > MAX_FILE_CODEPOINTS {
+            return Err("the font file declares too many codepoints".into());
+        }
+    }
+    Ok(())
+}
+
+/// Sums the codepoints declared by every encoding record of a `cmap` table,
+/// stopping once the sum passes `limit`.
+///
+/// Errors on a format 12 or 13 group that is reversed or ends past U+10FFFF.
+/// A subtable too short to hold what it declares counts as empty, since the
+/// font parser does not read it either.
+fn cmap_codepoints(cmap: &[u8], limit: u64) -> Result<u64, String> {
+    let records = read_u16(cmap, 2).unwrap_or(0);
+    let mut total = 0;
+    for record in 0..usize::from(records) {
+        let Some(offset) = read_u32(cmap, 4 + 8 * record + 4) else { break };
+        let Some(subtable) = cmap.get(offset as usize..) else { continue };
+        total += subtable_codepoints(subtable, limit.saturating_sub(total))?;
+        if total > limit {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// The codepoints one `cmap` subtable declares (an upper bound of what the
+/// font parser lists), stopping once past `limit`.
+fn subtable_codepoints(data: &[u8], limit: u64) -> Result<u64, String> {
+    let Some(format) = read_u16(data, 0) else { return Ok(0) };
+    let count = match format {
+        0 => 256,
+        2 => {
+            // 256 sub-header keys, then sub-headers of 8 bytes each.
+            let mut total = 0;
+            for byte in 0..256 {
+                let Some(key) = read_u16(data, 6 + 2 * byte) else { return Ok(0) };
+                let sub = usize::from(key / 8);
+                total += match sub {
+                    0 => 1,
+                    _ => u64::from(read_u16(data, 518 + 8 * sub + 2).unwrap_or(0)),
+                };
+            }
+            total
+        }
+        4 => {
+            let Some(seg_x2) = read_u16(data, 6) else { return Ok(0) };
+            let segs = usize::from(seg_x2 / 2);
+            let mut total = 0;
+            for seg in 0..segs {
+                let (Some(end), Some(start)) = (
+                    read_u16(data, 14 + 2 * seg),
+                    read_u16(data, 16 + usize::from(seg_x2) + 2 * seg),
+                ) else {
+                    return Ok(0);
+                };
+                // A reversed segment lists nothing, but counts as one so
+                // that every segment moves the count toward the limit.
+                total += u64::from(end.saturating_sub(start)) + 1;
+                if total > limit {
+                    break;
+                }
+            }
+            total
+        }
+        6 => {
+            let entries = u64::from(read_u16(data, 8).unwrap_or(0));
+            entries.min((data.len().saturating_sub(10) / 2) as u64)
+        }
+        10 => {
+            let chars = u64::from(read_u32(data, 16).unwrap_or(0));
+            chars.min((data.len().saturating_sub(20) / 2) as u64)
+        }
+        12 | 13 => {
+            let Some(groups) = read_u32(data, 12) else { return Ok(0) };
+            if groups as usize > data.len().saturating_sub(16) / 12 {
+                return Ok(0);
+            }
+            let mut total = 0;
+            for group in 0..groups as usize {
+                let at = 16 + 12 * group;
+                let (Some(start), Some(end)) =
+                    (read_u32(data, at), read_u32(data, at + 4))
+                else {
+                    return Ok(0);
+                };
+                if start > end || end > 0x10FFFF {
+                    return Err(format!(
+                        "a font cmap maps the invalid range {start:#X}..={end:#X}"
+                    ));
+                }
+                total += u64::from(end - start) + 1;
+                if total > limit {
+                    break;
+                }
+            }
+            total
+        }
+        _ => 0,
+    };
+    Ok(count)
+}
+
+fn read_u16(data: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(data.get(at..at.checked_add(2)?)?.try_into().ok()?))
+}
+
+fn read_u32(data: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(data.get(at..at.checked_add(4)?)?.try_into().ok()?))
 }
 
 #[cfg(test)]
@@ -204,5 +349,118 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(font_faces(&forged).is_err());
         assert!(started.elapsed() < std::time::Duration::from_millis(200));
+    }
+
+    #[test]
+    fn a_collection_header_longer_than_its_bytes_is_rejected() {
+        let mut forged = b"ttcf\0\x01\0\0".to_vec();
+        forged.extend_from_slice(&200_u32.to_be_bytes());
+        forged.resize(30, 0);
+        // Under the face limit, but 30 bytes cannot hold 200 offsets.
+        let err = font_faces(&forged).expect_err("a forged header");
+        assert!(err.contains("claims 200 faces"), "{err}");
+    }
+
+    /// Replaces a font's `cmap` table with `cmap`, appended at the end.
+    fn with_cmap(font: &[u8], cmap: &[u8]) -> Vec<u8> {
+        let mut out = font.to_vec();
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        let offset = out.len() as u32;
+        let tables = u16::from_be_bytes([out[4], out[5]]) as usize;
+        let record = (0..tables)
+            .map(|i| 12 + 16 * i)
+            .find(|&at| &out[at..at + 4] == b"cmap")
+            .expect("the font has a cmap");
+        out[record + 8..record + 12].copy_from_slice(&offset.to_be_bytes());
+        out[record + 12..record + 16].copy_from_slice(&(cmap.len() as u32).to_be_bytes());
+        out.extend_from_slice(cmap);
+        out
+    }
+
+    /// A `cmap` whose `records` encoding records all point at one subtable.
+    fn cmap(records: u16, subtable: &[u8]) -> Vec<u8> {
+        let mut out = vec![0, 0];
+        out.extend_from_slice(&records.to_be_bytes());
+        for _ in 0..records {
+            out.extend_from_slice(&[0, 3, 0, 10]);
+            out.extend_from_slice(&(4 + 8 * u32::from(records)).to_be_bytes());
+        }
+        out.extend_from_slice(subtable);
+        out
+    }
+
+    /// A format 12 subtable with the given `(start, end)` groups.
+    fn format12(groups: &[(u32, u32)]) -> Vec<u8> {
+        let mut out = vec![0, 12, 0, 0];
+        out.extend_from_slice(&(16 + 12 * groups.len() as u32).to_be_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&(groups.len() as u32).to_be_bytes());
+        for &(start, end) in groups {
+            out.extend_from_slice(&start.to_be_bytes());
+            out.extend_from_slice(&end.to_be_bytes());
+            out.extend_from_slice(&1_u32.to_be_bytes());
+        }
+        out
+    }
+
+    /// A format 4 subtable with one `start..=end` segment and the final one.
+    fn format4(start: u16, end: u16) -> Vec<u8> {
+        let mut out = vec![0, 4, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0];
+        for value in [end, 0xFFFF, 0, start, 0xFFFF, 0, 1, 0, 0] {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        let len = out.len() as u16;
+        out[2..4].copy_from_slice(&len.to_be_bytes());
+        out
+    }
+
+    fn quickly_rejected(font: &[u8]) -> String {
+        let started = std::time::Instant::now();
+        let err = font_faces(font).expect_err("the font is rejected");
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+        err
+    }
+
+    #[test]
+    fn a_sane_replacement_cmap_still_reads() {
+        // Proves the fixtures below build a readable font, so their errors
+        // come from the guard.
+        let font = with_cmap(some_font(), &cmap(1, &format12(&[(0x20, 0x7E)])));
+        assert_eq!(font_faces(&font).expect("a font").len(), 1);
+        let font = with_cmap(some_font(), &cmap(1, &format4(0x20, 0x7E)));
+        assert_eq!(font_faces(&font).expect("a font").len(), 1);
+    }
+
+    #[test]
+    fn a_cmap_group_past_unicode_is_rejected_quickly() {
+        let font = with_cmap(some_font(), &cmap(1, &format12(&[(0, u32::MAX)])));
+        assert!(quickly_rejected(&font).contains("cmap"));
+    }
+
+    #[test]
+    fn a_reversed_cmap_group_is_rejected() {
+        let font = with_cmap(some_font(), &cmap(1, &format12(&[(0x7E, 0x20)])));
+        assert!(quickly_rejected(&font).contains("cmap"));
+    }
+
+    #[test]
+    fn a_face_declaring_too_many_codepoints_is_rejected_quickly() {
+        // Each group is valid, but together they list the Unicode range five
+        // times over.
+        let groups = [(0, 0x10FFFF); 5];
+        let font = with_cmap(some_font(), &cmap(1, &format12(&groups)));
+        quickly_rejected(&font);
+    }
+
+    #[test]
+    fn records_sharing_one_subtable_count_once_each() {
+        // A single full-range subtable is fine; listed by 100 records, it is
+        // read 100 times.
+        let font = with_cmap(some_font(), &cmap(100, &format12(&[(0, 0x10FFFF)])));
+        quickly_rejected(&font);
+        let font = with_cmap(some_font(), &cmap(100, &format4(0, 0xFFFE)));
+        quickly_rejected(&font);
     }
 }
