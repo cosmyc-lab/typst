@@ -283,33 +283,32 @@ impl IdeWorld for BrowserWorld {
             })
         };
 
-        let mut paths: Vec<VirtualPath> = self
+        let project: FxHashSet<&VirtualPath> = self
             .sources
             .keys()
             .chain(self.assets.keys())
-            .map(|id| id.vpath().clone())
+            .map(|id| id.vpath())
+            .collect();
+        let mut paths: Vec<VirtualPath> = project
+            .iter()
             .filter(|path| matches_prefix(path))
+            .map(|&path| path.clone())
             .collect();
 
         // A library image resolves by its bare name from any directory, so it
         // is offered as if it sat next to the file being completed — unless
         // the project has a file there, which wins and is already listed.
+        // Paths are compared as they are, never interned: file ids are never
+        // freed, and interning one per name and directory asked about would
+        // exhaust them over a long session. The order of the hash set does
+        // not matter: the IDE sorts the paths it gets.
         if let Some(dir) = &dir {
-            // `library_names` is a hash set, whose iteration order is
-            // unspecified; sorting first keeps the offered completions
-            // deterministic.
-            let mut names: Vec<&EcoString> = self.library_names.iter().collect();
-            names.sort();
-            for name in names {
-                let Ok(path) = dir.join(name) else { continue };
-                let id = RootedPath::new(VirtualRoot::Project, path.clone()).intern();
-                if self.sources.contains_key(&id) || self.assets.contains_key(&id) {
-                    continue;
-                }
-                if matches_prefix(&path) {
-                    paths.push(path);
-                }
-            }
+            paths.extend(
+                self.library_names
+                    .iter()
+                    .filter_map(|name| dir.join(name).ok())
+                    .filter(|path| !project.contains(path) && matches_prefix(path)),
+            );
         }
 
         paths

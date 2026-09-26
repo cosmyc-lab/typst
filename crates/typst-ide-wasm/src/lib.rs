@@ -852,4 +852,38 @@ mod tests {
             "{labels:?}"
         );
     }
+
+    #[test]
+    fn library_completions_intern_no_file_ids() {
+        use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
+
+        // File ids come from a global interner that never frees one and holds
+        // at most 65,535, so completions must not intern a path per library
+        // name and directory: a long session would run out and panic.
+        let sentinel = |name: &str| {
+            RootedPath::new(VirtualRoot::Project, VirtualPath::new(name).unwrap())
+                .intern()
+                .into_raw()
+                .get()
+        };
+        let mut s = session_with("#image(\"\")");
+        let many: Vec<String> = (0..200).map(|i| format!("img{i}.png")).collect();
+        s.set_library_images(&many);
+        let dirs: Vec<String> = (0..20).map(|d| format!("dir{d}/page.typ")).collect();
+        for path in &dirs {
+            s.add_source(path, "#image(\"\")");
+        }
+
+        let before = sentinel("interner-sentinel-before.typ");
+        for path in &dirs {
+            let labels = completion_labels(&mut s, path, 8);
+            assert!(labels.iter().any(|l| l.contains("img7.png")), "{labels:?}");
+        }
+        let after = sentinel("interner-sentinel-after.typ");
+
+        // Adjacent when run alone; the slack absorbs tests running in
+        // parallel threads, far below the 4,000 ids interning per name and
+        // directory would take.
+        assert!(after - before < 500, "{} file ids interned", after - before - 1);
+    }
 }
