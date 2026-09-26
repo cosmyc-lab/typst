@@ -29,7 +29,7 @@ pub struct FontFace {
     pub stretch: f64,
     /// All glyphs have the same width.
     pub monospace: bool,
-    /// Glyphs have serifs.
+    /// Typst's PANOSE-based serif guess.
     pub serif: bool,
     /// The face has a math table.
     pub math: bool,
