@@ -142,29 +142,37 @@ impl BrowserWorld {
     /// Replaces the set of library image names.
     ///
     /// Invalid names are ignored. Bytes and pending lookups of names that are
-    /// no longer in the set are dropped.
-    pub fn set_library_images(&mut self, names: &[String]) {
-        self.library_names = names.iter().filter_map(|name| library_name(name)).collect();
+    /// no longer in the set are dropped. Returns whether the set changed.
+    pub fn set_library_images(&mut self, names: &[String]) -> bool {
+        let names: FxHashSet<EcoString> =
+            names.iter().filter_map(|name| library_name(name)).collect();
+        if names == self.library_names {
+            return false;
+        }
+        self.library_names = names;
         self.library_bytes.retain(|name, _| self.library_names.contains(name));
         self.missing_library
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|name| self.library_names.contains(name.as_str()));
+        true
     }
 
     /// Supplies the bytes of a library image.
     ///
-    /// Ignored unless `name` is in the current set.
-    pub fn add_library_image(&mut self, name: &str, bytes: &[u8]) {
-        let Some(name) = library_name(name) else { return };
+    /// Ignored unless `name` is in the current set. Returns whether the bytes
+    /// were taken.
+    pub fn add_library_image(&mut self, name: &str, bytes: &[u8]) -> bool {
+        let Some(name) = library_name(name) else { return false };
         if !self.library_names.contains(&name) {
-            return;
+            return false;
         }
         self.missing_library
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(name.as_str());
         self.library_bytes.insert(name, Bytes::new(bytes.to_vec()));
+        true
     }
 
     /// Returns, sorted, the library images lookups needed but that have no

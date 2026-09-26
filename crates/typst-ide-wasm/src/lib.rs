@@ -166,15 +166,22 @@ impl Session {
 
     /// Replaces the set of library image names (see
     /// [`BrowserWorld::set_library_images`]).
+    ///
+    /// Keeps the cached document when the set is unchanged.
     pub fn set_library_images(&mut self, names: &[String]) {
-        self.world.set_library_images(names);
-        self.dirty = true;
+        if self.world.set_library_images(names) {
+            self.dirty = true;
+        }
     }
 
     /// Supplies the bytes of a library image.
+    ///
+    /// Keeps the cached document when the name is not in the set, since the
+    /// bytes are then ignored.
     pub fn add_library_image(&mut self, name: &str, bytes: &[u8]) {
-        self.world.add_library_image(name, bytes);
-        self.dirty = true;
+        if self.world.add_library_image(name, bytes) {
+            self.dirty = true;
+        }
     }
 
     /// Returns and forgets the library images that lookups needed but whose
@@ -885,5 +892,24 @@ mod tests {
         // parallel threads, far below the 4,000 ids interning per name and
         // directory would take.
         assert!(after - before < 500, "{} file ids interned", after - before - 1);
+    }
+
+    #[test]
+    fn no_op_library_changes_keep_the_cached_document() {
+        let mut s = session_with("#image(\"logo.svg\")");
+        s.set_library_images(&names(&["logo.svg", "other.svg"]));
+        s.add_library_image("logo.svg", SVG);
+        s.compile_impl("main.typ").expect("compiles");
+        assert!(!s.dirty);
+
+        // Bytes for a name outside the set are ignored, so nothing changed.
+        s.add_library_image("unknown.svg", SVG);
+        assert!(!s.dirty, "a name outside the set");
+        // The same set, in another order and with an invalid name.
+        s.set_library_images(&names(&["other.svg", "a/b.svg", "logo.svg"]));
+        assert!(!s.dirty, "an unchanged set");
+
+        s.set_library_images(&names(&["logo.svg"]));
+        assert!(s.dirty, "a changed set");
     }
 }
