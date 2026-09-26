@@ -107,10 +107,7 @@ fn check_coverage(bytes: &[u8]) -> Result<(), String> {
     let mut file_total = 0;
     for index in 0..count {
         let Ok(face) = ttf_parser::Face::parse(bytes, index) else { continue };
-        let Some(cmap) = face.raw_face().table(ttf_parser::Tag::from_bytes(b"cmap"))
-        else {
-            continue;
-        };
+        let Some(cmap) = cmap_table(face.raw_face()) else { continue };
         let face_total = cmap_codepoints(cmap, MAX_FACE_CODEPOINTS)?;
         if face_total > MAX_FACE_CODEPOINTS {
             return Err(format!("font face {index} declares too many codepoints"));
@@ -121,6 +118,28 @@ fn check_coverage(bytes: &[u8]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The `cmap` table the font parser reads for a face.
+///
+/// Mirrors how the parser collects tables: a linear pass over the table
+/// directory, which need not be sorted, where the last `cmap` record wins.
+/// A record whose end overflows is passed over, and one whose range lies
+/// outside the file leaves the face without a `cmap`. A binary search of the
+/// directory could pick a different table, or none, than the one the face is
+/// read with.
+fn cmap_table<'a>(raw: &ttf_parser::RawFace<'a>) -> Option<&'a [u8]> {
+    let tag = ttf_parser::Tag::from_bytes(b"cmap");
+    let mut cmap = None;
+    for record in raw.table_records {
+        if record.tag != tag {
+            continue;
+        }
+        let start = record.offset as usize;
+        let Some(end) = start.checked_add(record.length as usize) else { continue };
+        cmap = raw.data.get(start..end);
+    }
+    cmap
 }
 
 /// Sums the codepoints declared by every encoding record of a `cmap` table,
@@ -364,19 +383,51 @@ mod tests {
     /// Replaces a font's `cmap` table with `cmap`, appended at the end.
     fn with_cmap(font: &[u8], cmap: &[u8]) -> Vec<u8> {
         let mut out = font.to_vec();
-        while out.len() % 4 != 0 {
-            out.push(0);
-        }
-        let offset = out.len() as u32;
-        let tables = u16::from_be_bytes([out[4], out[5]]) as usize;
-        let record = (0..tables)
-            .map(|i| 12 + 16 * i)
-            .find(|&at| &out[at..at + 4] == b"cmap")
-            .expect("the font has a cmap");
-        out[record + 8..record + 12].copy_from_slice(&offset.to_be_bytes());
-        out[record + 12..record + 16].copy_from_slice(&(cmap.len() as u32).to_be_bytes());
-        out.extend_from_slice(cmap);
+        let record = record_of(&out, *b"cmap");
+        repoint(&mut out, record, cmap);
         out
+    }
+
+    /// The position of the first table record tagged `tag`.
+    fn record_of(font: &[u8], tag: [u8; 4]) -> usize {
+        let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+        (0..tables)
+            .map(|i| 12 + 16 * i)
+            .find(|&at| font[at..at + 4] == tag)
+            .expect("the font has the table")
+    }
+
+    /// Appends `table` and points the table record at `record` to it.
+    fn repoint(font: &mut Vec<u8>, record: usize, table: &[u8]) {
+        while font.len() % 4 != 0 {
+            font.push(0);
+        }
+        let offset = font.len() as u32;
+        font[record + 8..record + 12].copy_from_slice(&offset.to_be_bytes());
+        font[record + 12..record + 16]
+            .copy_from_slice(&(table.len() as u32).to_be_bytes());
+        font.extend_from_slice(table);
+    }
+
+    /// Moves the `cmap` record to the front of the table directory, which
+    /// leaves the directory unsorted.
+    fn cmap_first(mut font: Vec<u8>) -> Vec<u8> {
+        let record = record_of(&font, *b"cmap");
+        font[12..record + 16].rotate_right(16);
+        font
+    }
+
+    /// Gives the font two `cmap` records: the original one points at
+    /// `first`, and the later `post` record, retagged, at `last`.
+    fn two_cmaps(first: &[u8], last: &[u8]) -> Vec<u8> {
+        let mut font = some_font().to_vec();
+        let original = record_of(&font, *b"cmap");
+        let later = record_of(&font, *b"post");
+        assert!(later > original);
+        font[later..later + 4].copy_from_slice(b"cmap");
+        repoint(&mut font, original, first);
+        repoint(&mut font, later, last);
+        font
     }
 
     /// A `cmap` whose `records` encoding records all point at one subtable.
@@ -462,5 +513,28 @@ mod tests {
         quickly_rejected(&font);
         let font = with_cmap(some_font(), &cmap(100, &format4(0, 0xFFFE)));
         quickly_rejected(&font);
+    }
+
+    #[test]
+    fn a_cmap_first_in_an_unsorted_directory_is_still_checked() {
+        let benign = cmap(1, &format12(&[(0x20, 0x7E)]));
+        let font = cmap_first(with_cmap(some_font(), &benign));
+        assert_eq!(font_faces(&font).expect("a font").len(), 1);
+
+        let reversed = cmap(1, &format12(&[(0x7E, 0x20)]));
+        let font = cmap_first(with_cmap(some_font(), &reversed));
+        assert!(quickly_rejected(&font).contains("cmap"));
+
+        let wide = cmap(1, &format12(&[(0, 0x10FFFF); 5]));
+        quickly_rejected(&cmap_first(with_cmap(some_font(), &wide)));
+    }
+
+    #[test]
+    fn of_two_cmap_records_the_last_one_is_checked() {
+        let benign = cmap(1, &format12(&[(0x20, 0x7E)]));
+        let reversed = cmap(1, &format12(&[(0x7E, 0x20)]));
+        assert!(quickly_rejected(&two_cmaps(&benign, &reversed)).contains("cmap"));
+        let faces = font_faces(&two_cmaps(&reversed, &benign)).expect("a font");
+        assert_eq!(faces.len(), 1);
     }
 }
