@@ -4,6 +4,7 @@
 //! style, weight and stretch the compiler will match `text(font: ..)` against,
 //! without re-implementing any of Typst's naming rules.
 
+use rustc_hash::FxHashMap;
 use typst::foundations::Bytes;
 use typst::text::{Font, FontFlags, FontStyle};
 
@@ -99,7 +100,9 @@ const MAX_FILE_CODEPOINTS: u64 = 16 * 0x110000;
 /// Counts, from the raw table bytes, how many codepoints each face's
 /// subtables declare, before the face is read. Every encoding record is
 /// counted, since several records may point at the same subtable and each
-/// one is listed again. The count stops as soon as a limit is crossed, so
+/// one is listed again; each counts as at least one, as does every step the
+/// parser takes through a subtable, so the count bounds the parser's work
+/// and not only its output. The count stops as soon as a limit is crossed, so
 /// the check itself stays bounded. A face the font parser cannot read is
 /// left to the reader, which skips it.
 fn check_coverage(bytes: &[u8]) -> Result<(), String> {
@@ -148,13 +151,33 @@ fn cmap_table<'a>(raw: &ttf_parser::RawFace<'a>) -> Option<&'a [u8]> {
 /// Errors on a format 12 or 13 group that is reversed or ends past U+10FFFF.
 /// A subtable too short to hold what it declares counts as empty, since the
 /// font parser does not read it either.
+///
+/// Each subtable is counted once and its count charged to every record that
+/// points at it, so the check costs one pass over the table's bytes plus one
+/// step per record however many records share a subtable. A count cut short
+/// by the limit pushes the sum past it at once, so no cut count is reused.
 fn cmap_codepoints(cmap: &[u8], limit: u64) -> Result<u64, String> {
     let records = read_u16(cmap, 2).unwrap_or(0);
+    let mut counted = FxHashMap::<u32, u64>::default();
     let mut total = 0;
     for record in 0..usize::from(records) {
         let Some(offset) = read_u32(cmap, 4 + 8 * record + 4) else { break };
-        let Some(subtable) = cmap.get(offset as usize..) else { continue };
-        total += subtable_codepoints(subtable, limit.saturating_sub(total))?;
+        let count = match counted.get(&offset) {
+            Some(&count) => count,
+            None => {
+                let count = match cmap.get(offset as usize..) {
+                    Some(subtable) => {
+                        subtable_codepoints(subtable, limit.saturating_sub(total))?
+                    }
+                    None => 0,
+                };
+                counted.insert(offset, count);
+                count
+            }
+        };
+        // Every record counts as at least one, even one that lists nothing,
+        // so that the record count alone moves toward the limit.
+        total += count.max(1);
         if total > limit {
             break;
         }
@@ -169,14 +192,16 @@ fn subtable_codepoints(data: &[u8], limit: u64) -> Result<u64, String> {
     let count = match format {
         0 => 256,
         2 => {
-            // 256 sub-header keys, then sub-headers of 8 bytes each.
+            // 256 sub-header keys, then sub-headers of 8 bytes each. The
+            // parser visits every key, so each counts as at least one, even
+            // one whose sub-header lists nothing.
             let mut total = 0;
             for byte in 0..256 {
                 let Some(key) = read_u16(data, 6 + 2 * byte) else { return Ok(0) };
                 let sub = usize::from(key / 8);
                 total += match sub {
                     0 => 1,
-                    _ => u64::from(read_u16(data, 518 + 8 * sub + 2).unwrap_or(0)),
+                    _ => u64::from(read_u16(data, 518 + 8 * sub + 2).unwrap_or(0)).max(1),
                 };
             }
             total
@@ -536,5 +561,25 @@ mod tests {
         assert!(quickly_rejected(&two_cmaps(&benign, &reversed)).contains("cmap"));
         let faces = font_faces(&two_cmaps(&reversed, &benign)).expect("a font");
         assert_eq!(faces.len(), 1);
+    }
+
+    /// A format 2 subtable whose 256 keys all point at one empty sub-header.
+    fn format2_empty() -> Vec<u8> {
+        let mut out = vec![0, 2, 0, 0, 0, 0];
+        for _ in 0..256 {
+            out.extend_from_slice(&8_u16.to_be_bytes());
+        }
+        out.extend_from_slice(&[0; 16]);
+        let len = out.len() as u16;
+        out[2..4].copy_from_slice(&len.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn empty_format2_subtables_still_count_their_work() {
+        // Each record lists nothing, but the parser walks all 256 keys of its
+        // subtable, so 65,535 records are over 16 million steps.
+        let font = with_cmap(some_font(), &cmap(u16::MAX, &format2_empty()));
+        quickly_rejected(&font);
     }
 }
