@@ -1,5 +1,6 @@
 //! The JavaScript-facing surface of the crate.
 
+use wasm_bindgen::JsError;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -113,12 +114,44 @@ impl IdeSession {
             None => JsValue::NULL,
         }
     }
+
+    /// Replaces the set of library image names: images a project file that
+    /// does not exist resolves to by its bare file name. Invalid names are
+    /// ignored.
+    #[wasm_bindgen(js_name = setLibraryImages)]
+    pub fn set_library_images(&mut self, names: Vec<String>) {
+        self.0.set_library_images(&names);
+    }
+
+    /// Supplies the bytes of a library image. Ignored unless `name` is in the
+    /// current set.
+    #[wasm_bindgen(js_name = addLibraryImage)]
+    pub fn add_library_image(&mut self, name: &str, bytes: &[u8]) {
+        self.0.add_library_image(name, bytes);
+    }
+
+    /// Returns, sorted, the library images the last lookups needed but whose
+    /// bytes have not been supplied yet, and forgets them.
+    #[wasm_bindgen(js_name = takeMissingLibraryImages)]
+    pub fn take_missing_library_images(&mut self) -> Vec<String> {
+        self.0.take_missing_library_images()
+    }
 }
 
 impl Default for IdeSession {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Reads every face of a font file.
+///
+/// Returns `[{ index, family, style, weight, stretch, monospace, serif, math,
+/// variable }]` and throws when no face can be read.
+#[wasm_bindgen(js_name = fontFaces)]
+pub fn font_faces(bytes: &[u8]) -> Result<JsValue, JsError> {
+    let faces = crate::font_faces(bytes).map_err(|message| JsError::new(&message))?;
+    serde_wasm_bindgen::to_value(&faces).map_err(|error| JsError::new(&error.to_string()))
 }
 
 /// Serializes a result, falling back to `null` if that somehow fails.
