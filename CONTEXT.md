@@ -35,9 +35,8 @@ Validation, chunking, indexing, rendering, …
 `typst-cnd` is the exporter library. The supported entry point is
 `typst compile <file> --format cnd` (or an output path ending in `.cnd`),
 which brings every standard CLI option (`--root`, `--font-path`,
-`--ignore-system-fonts`, `--deps`) plus two generic additions:
-`--inputs-file` (a JSON object of string values for `sys.inputs`) and
-`--fallback-dir` (missing project files are looked up by file name there).
+`--ignore-system-fonts`, `--deps`) plus one generic addition:
+`--inputs-file` (a JSON object of string values for `sys.inputs`).
 The standalone `typst-cnd` binary remains for existing callers.
 
 ## Where typst-cnd hooks into Typst
