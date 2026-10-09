@@ -47,6 +47,13 @@ pub struct Ancestry {
     /// node renders its own children, so a paragraph found inside one is that
     /// container's content seen a second time.
     in_container: FxHashSet<Location>,
+    /// Elements that sit inside a list, an enum, a definition list or a
+    /// quote. Each of these carries the text of a list nested in it — as an
+    /// item's children, a description's text, the quote's text — so such a
+    /// list is not a node of its own. A figure is deliberately absent: it
+    /// keeps only its caption, so a list inside it is that text's only
+    /// carrier.
+    in_list_like: FxHashSet<Location>,
 }
 
 impl Ancestry {
@@ -77,6 +84,12 @@ impl Ancestry {
     /// block, an equation's numbering.
     pub fn is_in_emitted_container(&self, location: Location) -> bool {
         self.in_container.contains(&location)
+    }
+
+    /// Whether `location` sits inside a list, an enum, a definition list or a
+    /// quote, which carries its text.
+    pub fn is_in_list_like(&self, location: Location) -> bool {
+        self.in_list_like.contains(&location)
     }
 }
 
@@ -112,6 +125,15 @@ fn is_emitted_container(elem: Element) -> bool {
         || elem == OutlineElem::ELEM
 }
 
+/// Whether a list laid out inside `elem` has its text carried by `elem`'s
+/// node. See [`Ancestry::is_in_list_like`].
+fn is_list_like(elem: Element) -> bool {
+    elem == ListElem::ELEM
+        || elem == EnumElem::ELEM
+        || elem == TermsElem::ELEM
+        || elem == QuoteElem::ELEM
+}
+
 /// A tag that is currently open while walking the frames.
 struct Open {
     location: Location,
@@ -121,6 +143,7 @@ struct Open {
     par_range: Option<Option<SourceRange>>,
     is_artifact: bool,
     is_container: bool,
+    is_list_like: bool,
     /// Glyph runs drawn for this paragraph inside / outside artifact-marked
     /// content. A paragraph all of whose glyphs are drawn inside an artifact
     /// is page furniture, whichever way the two tags happen to nest.
@@ -149,12 +172,16 @@ fn walk(frame: &Frame, engine: &Engine, stack: &mut Vec<Open>, ancestry: &mut An
                 if stack.iter().any(|open| open.is_container) {
                     ancestry.in_container.insert(location);
                 }
+                if stack.iter().any(|open| open.is_list_like) {
+                    ancestry.in_list_like.insert(location);
+                }
 
                 stack.push(Open {
                     location,
                     par_range,
                     is_artifact: inner.elem() == ArtifactElem::ELEM,
                     is_container: is_emitted_container(inner.elem()),
+                    is_list_like: is_list_like(inner.elem()),
                     glyphs_in_artifact: 0,
                     glyphs_outside_artifact: 0,
                 });

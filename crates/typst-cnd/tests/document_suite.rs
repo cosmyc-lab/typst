@@ -8,7 +8,7 @@ use common::{
     incoming_count, label_exists, paragraph_texts_in_order, table_stats,
     tags_under_heading, walk_nodes,
 };
-use typst_cnd::{CndNode, TableKind};
+use typst_cnd::{CndNode, ListItem, TableKind, cnd_to_json};
 
 /// `(bibliography key, citation form, supplement)` on one node.
 type CiteTuple = (String, Option<String>, Option<String>);
@@ -1217,6 +1217,7 @@ fn example_files_exist() {
         "nonflat_markers.typ",
         "newsletter/main.typ",
         "paragraph_identity.typ",
+        "nested_lists.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1658,4 +1659,119 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
         .expect("the second half of the split link body");
     let CndNode::Paragraph(second_half) = second_half else { unreachable!() };
     assert!(second_half.base.links.is_empty(), "same known gap, other half");
+}
+
+/// `(text, number)` of each item, for compact assertions on one level.
+fn item_summary(items: &[ListItem]) -> Vec<(&str, Option<i32>)> {
+    items.iter().map(|item| (item.text.as_str(), item.number)).collect()
+}
+
+/// The emitted list whose first item's text starts with `prefix`.
+fn list_starting_with<'a>(
+    lists: &[&'a typst_cnd::ListNode],
+    prefix: &str,
+) -> &'a typst_cnd::ListNode {
+    lists
+        .iter()
+        .copied()
+        .find(|list| list.items.first().is_some_and(|item| item.text.starts_with(prefix)))
+        .unwrap_or_else(|| panic!("no list starting with {prefix:?}"))
+}
+
+#[test]
+fn nested_list_items_are_children_of_their_parent() {
+    let cnd = cnd_for_example("nested_lists.typ");
+    let lists = find_lists(&cnd.nodes);
+
+    // One list node per list written at the top level, plus the one inside
+    // the figure (whose text the figure does not carry). The nested lists
+    // and the list inside the quote are not lists of their own.
+    let mut firsts: Vec<&str> =
+        lists.iter().map(|list| list.items[0].text.as_str()).collect();
+    firsts.sort_unstable();
+    assert_eq!(
+        firsts,
+        [
+            "NA1 top one",
+            "NB1 enum one",
+            "NC1 bullet with enum children",
+            "ND1 bullet with explicit numbers",
+            "NE1 explicit list inside",
+            "NG2 list item in figure",
+        ]
+    );
+
+    // Three bullet levels.
+    let a = list_starting_with(&lists, "NA1");
+    assert_eq!(
+        item_summary(&a.items),
+        [("NA1 top one", None), ("NA2 top two", None), ("NA6 top three", None)]
+    );
+    assert_eq!(
+        item_summary(&a.items[1].children),
+        [("NA3 child one", None), ("NA4 child two", None)]
+    );
+    assert_eq!(
+        item_summary(&a.items[1].children[1].children),
+        [("NA5 grandchild", None)]
+    );
+    assert!(a.items[1].children[0].children.is_empty());
+
+    // Bullets under an enum.
+    let b = list_starting_with(&lists, "NB1");
+    assert!(b.ordered);
+    assert_eq!(
+        item_summary(&b.items),
+        [("NB1 enum one", Some(1)), ("NB2 enum two", Some(2))]
+    );
+    assert_eq!(
+        item_summary(&b.items[1].children),
+        [("NB3 bullet in enum", None), ("NB4 bullet in enum", None)]
+    );
+
+    // An enum under a bullet, started at 5 by a set rule.
+    let c = list_starting_with(&lists, "NC1");
+    assert_eq!(item_summary(&c.items), [("NC1 bullet with enum children", None)]);
+    assert_eq!(
+        item_summary(&c.items[0].children),
+        [("NC2 enum at five", Some(5)), ("NC3 enum at six", Some(6))]
+    );
+
+    // An enum under a bullet, started at 5 by explicit markup.
+    let d = list_starting_with(&lists, "ND1");
+    assert_eq!(item_summary(&d.items), [("ND1 bullet with explicit numbers", None)]);
+    assert_eq!(
+        item_summary(&d.items[0].children),
+        [("ND2 explicit five", Some(5)), ("ND3 follows five", Some(6))]
+    );
+
+    // An explicit `#list` call inside an item.
+    let e = list_starting_with(&lists, "NE1");
+    assert_eq!(item_summary(&e.items), [("NE1 explicit list inside", None)]);
+    assert_eq!(
+        item_summary(&e.items[0].children),
+        [("NE2 explicit child", None), ("NE3 explicit child", None)]
+    );
+
+    // Every authored line of the lists, the quote's and the figure's
+    // included, is in the document exactly once.
+    let json = cnd_to_json(&cnd).expect("serialize");
+    for token in [
+        "NA1", "NA2", "NA3", "NA4", "NA5", "NA6", "NB1", "NB2", "NB3", "NB4", "NC1",
+        "NC2", "NC3", "ND1", "ND2", "ND3", "NE1", "NE2", "NE3", "NF1", "NF2", "NF3",
+        "NG2", "NG3", "NH1",
+    ] {
+        assert_eq!(json.matches(token).count(), 1, "{token} must appear exactly once");
+    }
+
+    // The quote carries its own list.
+    let quote = cnd
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            CndNode::Quote(quote) => Some(quote),
+            _ => None,
+        })
+        .expect("a quote");
+    assert!(quote.text.contains("NF2") && quote.text.contains("NF3"), "{:?}", quote.text);
 }

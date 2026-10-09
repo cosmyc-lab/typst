@@ -1,7 +1,6 @@
 use std::ops::ControlFlow;
 
 use ecow::{EcoString, eco_vec};
-use rustc_hash::FxHashSet;
 use typst_library::WorldExt;
 use typst_library::engine::Engine;
 use typst_library::foundations::{
@@ -10,9 +9,8 @@ use typst_library::foundations::{
 use typst_library::introspection::{Introspector, Location, Tag, TagElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    CiteElem, EnumElem, EnumItem, FigureCaption, FigureElem, FootnoteElem, HeadingElem,
-    LinkElem, ListElem, ListItem, ParElem, QuoteElem, RefElem, Supplement, TableElem,
-    TermsElem,
+    CiteElem, EnumElem, FigureCaption, FigureElem, FootnoteElem, HeadingElem, LinkElem,
+    ListElem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_library::visualize::ImageElem;
@@ -163,242 +161,6 @@ fn range_contains(outer: SourceRange, inner: SourceRange) -> bool {
     outer.file == inner.file && inner.start >= outer.start && inner.end <= outer.end
 }
 
-fn is_strictly_nested(inner: SourceRange, outer: SourceRange) -> bool {
-    range_contains(outer, inner) && inner != outer
-}
-
-fn build_list_enum_ranges(
-    engine: &Engine,
-    introspector: &dyn Introspector,
-) -> Vec<SourceRange> {
-    let mut ranges = Vec::new();
-    for selector in [ListElem::ELEM.select(), EnumElem::ELEM.select()] {
-        for elem in introspector.query(&selector) {
-            if let Some(range) = source_range(engine, elem.span()) {
-                ranges.push(range);
-            }
-        }
-    }
-    // Definition-list item ranges: a list/enum whose source sits inside a
-    // term item's range is nested description content (inlined into the
-    // term's text), not a standalone node. `TermItem` elements are not
-    // independently introspectable — reach them through `TermsElem.children`.
-    for elem in introspector.query(&TermsElem::ELEM.select()) {
-        let Some(terms) = elem.to_packed::<TermsElem>() else {
-            continue;
-        };
-        for item in &terms.children {
-            if let Some(range) = source_range(engine, item.span()) {
-                ranges.push(range);
-            }
-        }
-    }
-    ranges
-}
-
-fn build_inline_nested_list_enum_locations(
-    engine: &Engine,
-    introspector: &dyn Introspector,
-) -> FxHashSet<Location> {
-    let mut locations = FxHashSet::default();
-
-    for elem in introspector.query(&ListElem::ELEM.select()) {
-        let Some(list) = elem.to_packed::<ListElem>() else {
-            continue;
-        };
-        for item in &list.children {
-            collect_inline_list_enum_locations(
-                engine,
-                introspector,
-                &item.body,
-                &mut locations,
-            );
-        }
-    }
-
-    for elem in introspector.query(&EnumElem::ELEM.select()) {
-        let Some(enum_) = elem.to_packed::<EnumElem>() else {
-            continue;
-        };
-        for item in &enum_.children {
-            collect_inline_list_enum_locations(
-                engine,
-                introspector,
-                &item.body,
-                &mut locations,
-            );
-        }
-    }
-
-    locations
-}
-
-fn collect_inline_list_enum_locations(
-    engine: &Engine,
-    introspector: &dyn Introspector,
-    body: &Content,
-    locations: &mut FxHashSet<Location>,
-) {
-    if let Some(list) = body.query_first_naive(&ListElem::ELEM.select()) {
-        if let Some(loc) = list
-            .location()
-            .or_else(|| location_for_content(engine, introspector, &list))
-        {
-            locations.insert(loc);
-        }
-        if let Some(list) = list.to_packed::<ListElem>() {
-            for item in &list.children {
-                collect_inline_list_enum_locations(
-                    engine,
-                    introspector,
-                    &item.body,
-                    locations,
-                );
-            }
-        }
-    }
-    if let Some(enum_) = body.query_first_naive(&EnumElem::ELEM.select()) {
-        if let Some(loc) = enum_
-            .location()
-            .or_else(|| location_for_content(engine, introspector, &enum_))
-        {
-            locations.insert(loc);
-        }
-        if let Some(enum_) = enum_.to_packed::<EnumElem>() {
-            for item in &enum_.children {
-                collect_inline_list_enum_locations(
-                    engine,
-                    introspector,
-                    &item.body,
-                    locations,
-                );
-            }
-        }
-    }
-}
-
-fn location_for_content(
-    engine: &Engine,
-    introspector: &dyn Introspector,
-    content: &Content,
-) -> Option<Location> {
-    let target = source_range(engine, content.span())?;
-    for selector in [ListElem::ELEM.select(), EnumElem::ELEM.select()] {
-        for elem in introspector.query(&selector) {
-            if source_range(engine, elem.span()) == Some(target) {
-                return elem.location();
-            }
-        }
-    }
-    None
-}
-
-fn is_nested_list_or_enum(
-    engine: &Engine,
-    introspector: &dyn Introspector,
-    content: &Content,
-    list_enum_ranges: &[SourceRange],
-    inline_nested_locations: &FxHashSet<Location>,
-) -> bool {
-    if let Some(loc) = content.location()
-        && inline_nested_locations.contains(&loc)
-    {
-        return true;
-    }
-    if is_inline_nested_list_or_enum(engine, introspector, content) {
-        return true;
-    }
-    let Some(inner) = source_range(engine, content.span()) else {
-        return false;
-    };
-    if list_enum_ranges.iter().any(|outer| is_strictly_nested(inner, *outer)) {
-        return true;
-    }
-    is_list_or_enum_inside_item(engine, introspector, inner)
-}
-
-fn is_inline_nested_list_or_enum(
-    engine: &Engine,
-    introspector: &dyn Introspector,
-    content: &Content,
-) -> bool {
-    let Some(target) = source_range(engine, content.span()) else {
-        return false;
-    };
-
-    for elem in introspector.query(&ListElem::ELEM.select()) {
-        let Some(list) = elem.to_packed::<ListElem>() else {
-            continue;
-        };
-        for item in &list.children {
-            if inline_list_or_enum_in_body(engine, &item.body, target) {
-                return true;
-            }
-        }
-    }
-
-    for elem in introspector.query(&EnumElem::ELEM.select()) {
-        let Some(enum_) = elem.to_packed::<EnumElem>() else {
-            continue;
-        };
-        for item in &enum_.children {
-            if inline_list_or_enum_in_body(engine, &item.body, target) {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-fn inline_list_or_enum_in_body(
-    engine: &Engine,
-    body: &Content,
-    target: SourceRange,
-) -> bool {
-    for selector in [ListElem::ELEM.select(), EnumElem::ELEM.select()] {
-        if let Some(found) = body.query_first_naive(&selector) {
-            if source_range(engine, found.span()) == Some(target) {
-                return true;
-            }
-            if let Some(list) = found.to_packed::<ListElem>() {
-                for item in &list.children {
-                    if inline_list_or_enum_in_body(engine, &item.body, target) {
-                        return true;
-                    }
-                }
-            }
-            if let Some(enum_) = found.to_packed::<EnumElem>() {
-                for item in &enum_.children {
-                    if inline_list_or_enum_in_body(engine, &item.body, target) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-fn is_list_or_enum_inside_item(
-    engine: &Engine,
-    introspector: &dyn Introspector,
-    inner: SourceRange,
-) -> bool {
-    let item_selectors = [ListItem::ELEM.select(), EnumItem::ELEM.select()];
-    for selector in item_selectors {
-        for elem in introspector.query(&selector) {
-            let Some(item_range) = source_range(engine, elem.span()) else {
-                continue;
-            };
-            if is_strictly_nested(inner, item_range) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn build_skip_ranges(
     engine: &Engine,
     introspector: &dyn Introspector,
@@ -447,9 +209,6 @@ pub fn convert_from_introspector(
     ctx: &mut ConvertContext,
 ) -> typst_library::diag::SourceResult<()> {
     let skip_ranges = build_skip_ranges(engine, introspector);
-    let list_enum_ranges = build_list_enum_ranges(engine, introspector);
-    let inline_nested_locations =
-        build_inline_nested_list_enum_locations(engine, introspector);
     let doc_selector = doc_selector();
     let mut items: Vec<(Location, Content)> = Vec::new();
 
@@ -499,32 +258,17 @@ pub fn convert_from_introspector(
         items.push((loc, elem));
     }
 
-    for elem in introspector.query(&ListElem::ELEM.select()) {
-        if is_nested_list_or_enum(
-            engine,
-            introspector,
-            &elem,
-            &list_enum_ranges,
-            &inline_nested_locations,
-        ) {
-            continue;
+    // A list laid out inside another list, an enum, a definition list or a
+    // quote is that node's content: nested items are its children, a
+    // description or a quote carries the text.
+    for selector in [ListElem::ELEM.select(), EnumElem::ELEM.select()] {
+        for elem in introspector.query(&selector) {
+            let Some(loc) = elem.location() else { continue };
+            if ancestry.is_in_list_like(loc) {
+                continue;
+            }
+            items.push((loc, elem));
         }
-        let Some(loc) = elem.location() else { continue };
-        items.push((loc, elem));
-    }
-
-    for elem in introspector.query(&EnumElem::ELEM.select()) {
-        if is_nested_list_or_enum(
-            engine,
-            introspector,
-            &elem,
-            &list_enum_ranges,
-            &inline_nested_locations,
-        ) {
-            continue;
-        }
-        let Some(loc) = elem.location() else { continue };
-        items.push((loc, elem));
     }
 
     for elem in introspector.query(&TermsElem::ELEM.select()) {
