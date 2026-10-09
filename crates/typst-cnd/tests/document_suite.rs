@@ -1218,6 +1218,10 @@ fn example_files_exist() {
         "newsletter/main.typ",
         "paragraph_identity.typ",
         "nested_lists.typ",
+        "list_in_float_long.typ",
+        "list_in_float_short.typ",
+        "list_in_footnote_item.typ",
+        "list_in_footnote_par.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1774,4 +1778,83 @@ fn nested_list_items_are_children_of_their_parent() {
         })
         .expect("a quote");
     assert!(quote.text.contains("NF2") && quote.text.contains("NF3"), "{:?}", quote.text);
+}
+
+/// How many times each word occurs in the serialized CND.
+fn word_counts(cnd: &typst_cnd::Cnd) -> std::collections::HashMap<String, usize> {
+    let json = cnd_to_json(cnd).expect("serialize");
+    let mut counts = std::collections::HashMap::new();
+    for word in json.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
+        *counts.entry(word.to_string()).or_default() += 1;
+    }
+    counts
+}
+
+/// The text of every list item, nested ones included.
+fn all_list_item_texts(cnd: &typst_cnd::Cnd) -> Vec<String> {
+    fn walk(items: &[ListItem], out: &mut Vec<String>) {
+        for item in items {
+            out.push(item.text.clone());
+            walk(&item.children, out);
+        }
+    }
+    let mut out = Vec::new();
+    for list in find_lists(&cnd.nodes) {
+        walk(&list.items, &mut out);
+    }
+    out
+}
+
+#[test]
+fn lists_in_floats_beside_open_lists_are_kept_once() {
+    // A float is laid out wherever it fits, which can be while a list,
+    // written elsewhere, spans the page. The list inside the float's figure
+    // must not be taken for that list's nested content.
+    for name in ["list_in_float_long.typ", "list_in_float_short.typ"] {
+        let cnd = cnd_for_example(name);
+        let counts = word_counts(&cnd);
+        let last = if name == "list_in_float_long.typ" { 29 } else { 2 };
+        let mut tokens = vec!["FLB1".to_string(), "FLB2".into(), "FLT1".into()];
+        for i in 0..=last {
+            tokens.push(format!("PA{i}"));
+            tokens.push(format!("QA{i}"));
+        }
+        for token in tokens {
+            assert_eq!(
+                counts.get(&token).copied().unwrap_or(0),
+                1,
+                "{name}: {token} must appear exactly once"
+            );
+        }
+        let texts = all_list_item_texts(&cnd);
+        for token in ["FLB1", "FLB2", "FLT1"] {
+            assert!(
+                texts.iter().any(|text| text.contains(token)),
+                "{name}: {token} must be carried by a list node"
+            );
+        }
+    }
+}
+
+#[test]
+fn lists_in_footnotes_live_in_the_footnote_pool_only() {
+    for (name, tokens) in [
+        ("list_in_footnote_item.typ", &["FL1", "FL2"][..]),
+        ("list_in_footnote_par.typ", &["FL3"][..]),
+    ] {
+        let cnd = cnd_for_example(name);
+        let texts = all_list_item_texts(&cnd);
+        let counts = word_counts(&cnd);
+        for token in tokens {
+            assert!(
+                !texts.iter().any(|text| text.contains(token)),
+                "{name}: {token} must not be in a body list node: {texts:?}"
+            );
+            assert!(
+                cnd.footnotes.iter().any(|note| note.text.contains(token)),
+                "{name}: {token} must be in the footnote pool"
+            );
+            assert_eq!(counts.get(*token).copied(), Some(1), "{name}: {token} once");
+        }
+    }
 }

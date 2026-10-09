@@ -19,9 +19,9 @@ use std::ops::ControlFlow;
 use rustc_hash::{FxHashMap, FxHashSet};
 use typst_library::WorldExt;
 use typst_library::engine::Engine;
-use typst_library::foundations::{Content, Element, NativeElement};
+use typst_library::foundations::{Content, Element, NativeElement, StyleChain};
 use typst_library::introspection::{Location, Tag};
-use typst_library::layout::{Frame, FrameItem};
+use typst_library::layout::{Frame, FrameItem, PlaceElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
     ArtifactElem, BibliographyElem, EnumElem, FigureElem, FootnoteEntry, HeadingElem,
@@ -47,13 +47,9 @@ pub struct Ancestry {
     /// node renders its own children, so a paragraph found inside one is that
     /// container's content seen a second time.
     in_container: FxHashSet<Location>,
-    /// Elements that sit inside a list, an enum, a definition list or a
-    /// quote. Each of these carries the text of a list nested in it — as an
-    /// item's children, a description's text, the quote's text — so such a
-    /// list is not a node of its own. A figure is deliberately absent: it
-    /// keeps only its caption, so a list inside it is that text's only
-    /// carrier.
-    in_list_like: FxHashSet<Location>,
+    /// Elements whose text is carried by an enclosing node, so that a list
+    /// among them is not a node of its own. See [`list_scope`].
+    list_carried: FxHashSet<Location>,
 }
 
 impl Ancestry {
@@ -86,10 +82,11 @@ impl Ancestry {
         self.in_container.contains(&location)
     }
 
-    /// Whether `location` sits inside a list, an enum, a definition list or a
-    /// quote, which carries its text.
-    pub fn is_in_list_like(&self, location: Location) -> bool {
-        self.in_list_like.contains(&location)
+    /// Whether a list at `location` has its text carried by an enclosing
+    /// node — a list, an enum, a definition list, a quote, or the footnote
+    /// pool — and so is not a node of its own.
+    pub fn is_list_carried(&self, location: Location) -> bool {
+        self.list_carried.contains(&location)
     }
 }
 
@@ -125,13 +122,47 @@ fn is_emitted_container(elem: Element) -> bool {
         || elem == OutlineElem::ELEM
 }
 
-/// Whether a list laid out inside `elem` has its text carried by `elem`'s
-/// node. See [`Ancestry::is_in_list_like`].
-fn is_list_like(elem: Element) -> bool {
-    elem == ListElem::ELEM
+/// What an element does to the text of a list laid out inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListScope {
+    /// Nothing: the decision is up to an element further out.
+    Transparent,
+    /// It carries the list's text: a list or an enum (as an item's
+    /// children), a definition list (a description's text), a quote (its
+    /// text), a footnote entry (the `footnotes` pool).
+    Carrier,
+    /// It ends the search, and the list is a node of its own. A figure keeps
+    /// only its caption, so a list inside it is that text's only carrier. A
+    /// float is laid out wherever it fits — possibly while a long list,
+    /// whose tags are still open, spans the page — so the elements open
+    /// around it in the frames are not what it was written in.
+    Barrier,
+}
+
+/// The nearest enclosing element that is not transparent decides whether a
+/// list is carried. Asking only "is any list-like element open?" would let a
+/// float placed beside an open list lose the list inside it.
+fn list_scope(inner: &Content) -> ListScope {
+    let elem = inner.elem();
+    if elem == ListElem::ELEM
         || elem == EnumElem::ELEM
         || elem == TermsElem::ELEM
         || elem == QuoteElem::ELEM
+        || elem == FootnoteEntry::ELEM
+    {
+        ListScope::Carrier
+    } else if elem == FigureElem::ELEM
+        // Materialized, so `float` holds its realized value (see
+        // `extract::is_excluded_scope`). A `place` that does not float is
+        // laid out where it is written, inside its real ancestors.
+        || inner
+            .to_packed::<PlaceElem>()
+            .is_some_and(|place| place.float.get(StyleChain::default()))
+    {
+        ListScope::Barrier
+    } else {
+        ListScope::Transparent
+    }
 }
 
 /// A tag that is currently open while walking the frames.
@@ -143,7 +174,7 @@ struct Open {
     par_range: Option<Option<SourceRange>>,
     is_artifact: bool,
     is_container: bool,
-    is_list_like: bool,
+    list_scope: ListScope,
     /// Glyph runs drawn for this paragraph inside / outside artifact-marked
     /// content. A paragraph all of whose glyphs are drawn inside an artifact
     /// is page furniture, whichever way the two tags happen to nest.
@@ -172,8 +203,14 @@ fn walk(frame: &Frame, engine: &Engine, stack: &mut Vec<Open>, ancestry: &mut An
                 if stack.iter().any(|open| open.is_container) {
                     ancestry.in_container.insert(location);
                 }
-                if stack.iter().any(|open| open.is_list_like) {
-                    ancestry.in_list_like.insert(location);
+                if stack
+                    .iter()
+                    .rev()
+                    .map(|open| open.list_scope)
+                    .find(|scope| *scope != ListScope::Transparent)
+                    == Some(ListScope::Carrier)
+                {
+                    ancestry.list_carried.insert(location);
                 }
 
                 stack.push(Open {
@@ -181,7 +218,7 @@ fn walk(frame: &Frame, engine: &Engine, stack: &mut Vec<Open>, ancestry: &mut An
                     par_range,
                     is_artifact: inner.elem() == ArtifactElem::ELEM,
                     is_container: is_emitted_container(inner.elem()),
-                    is_list_like: is_list_like(inner.elem()),
+                    list_scope: list_scope(inner),
                     glyphs_in_artifact: 0,
                     glyphs_outside_artifact: 0,
                 });

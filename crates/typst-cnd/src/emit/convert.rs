@@ -258,13 +258,13 @@ pub fn convert_from_introspector(
         items.push((loc, elem));
     }
 
-    // A list laid out inside another list, an enum, a definition list or a
-    // quote is that node's content: nested items are its children, a
-    // description or a quote carries the text.
+    // A list laid out inside another list, an enum, a definition list, a
+    // quote or a footnote entry is that node's content: nested items are its
+    // children, a description, a quote or the footnote pool carries the text.
     for selector in [ListElem::ELEM.select(), EnumElem::ELEM.select()] {
         for elem in introspector.query(&selector) {
             let Some(loc) = elem.location() else { continue };
-            if ancestry.is_in_list_like(loc) {
+            if ancestry.is_list_carried(loc) {
                 continue;
             }
             items.push((loc, elem));
