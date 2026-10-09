@@ -182,8 +182,9 @@ fn is_float(inner: &Content) -> bool {
 
 /// What identifies a float's body once it is drawn away from its tags.
 struct Float {
-    /// Where the `place` is written. A paragraph whose own range lies inside
-    /// it is that float's content, whatever text it realizes to.
+    /// Where the `place` is written (see [`float_range`]). A paragraph whose
+    /// own range lies inside it is that float's content, whatever text it
+    /// realizes to.
     range: Option<SourceRange>,
     /// The body's text, for a paragraph with no range of its own (a string
     /// passed through `upper`, `text`…), which only its words can identify.
@@ -213,7 +214,7 @@ fn floats(frame: &Frame, engine: &Engine, out: &mut Vec<Float>) {
                     && let Some(place) = inner.to_packed::<PlaceElem>()
                 {
                     out.push(Float {
-                        range: content_range(engine, inner),
+                        range: float_range(engine, inner),
                         text: paragraphs_text(&place.body),
                     });
                 }
@@ -221,6 +222,28 @@ fn floats(frame: &Frame, engine: &Engine, out: &mut Vec<Float>) {
             _ => {}
         }
     }
+}
+
+/// How far a floating `place` reaches in the source: the call itself and
+/// whatever its body writes from there on.
+///
+/// Unlike [`content_range`], this ignores body spans that start before the
+/// call — content defined earlier by a `#let` and only used here. Their hull
+/// would stretch from that definition to the call and take in every
+/// paragraph written in between.
+fn float_range(engine: &Engine, place: &Content) -> Option<SourceRange> {
+    let call = source_range(engine, place.span())?;
+    let mut range = call;
+    let _ = place.traverse(&mut |element| {
+        if let Some(found) = source_range(engine, element.span())
+            && found.file == call.file
+            && found.start >= call.start
+        {
+            range.end = range.end.max(found.end);
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    Some(range)
 }
 
 /// The normalized text of `body`, with a space where a paragraph break
@@ -264,8 +287,9 @@ struct OpenPar {
     content: Content,
     /// Its normalized text, extracted at most once.
     text: OnceCell<String>,
-    /// Whether it is (part of) a float's body (see [`Float::holds`]).
-    float_body: bool,
+    /// The floats it is (part of) the body of, as indices into the
+    /// document's floats (see [`Float::holds`]). Usually empty.
+    floats: Vec<usize>,
 }
 
 impl OpenPar {
@@ -296,9 +320,11 @@ fn walk(
                         range: content_range(engine, inner),
                         content: inner.clone(),
                         text: OnceCell::new(),
-                        float_body: false,
+                        floats: Vec::new(),
                     };
-                    par.float_body = floats.iter().any(|float| float.holds(&par));
+                    par.floats = (0..floats.len())
+                        .filter(|&index| floats[index].holds(&par))
+                        .collect();
                     par
                 });
                 if let Some(par) = &par
@@ -447,16 +473,18 @@ fn content_range(engine: &Engine, content: &Content) -> Option<SourceRange> {
 /// inside a later paragraph that spans the page, and that may well repeat
 /// the float's sentence. Nothing in the frames around the body says it is a
 /// float, so a paragraph that is a float's body — by its source range, or by
-/// its words when it has no range (see [`floats`]) — is never taken for a box
-/// in another paragraph, whichever signal would otherwise apply; at worst a
-/// box that happens to say the same as a float is kept twice.
+/// its words (see [`floats`]) — is never taken for a box in a paragraph that
+/// the same float does not hold, whichever signal would otherwise apply; at
+/// worst a box that happens to say the same as a float is kept twice.
 fn covering_par(stack: &[Open], par: &OpenPar) -> Option<Location> {
     let nearest = stack.iter().rev().find(|open| open.par.is_some())?;
     let parent = nearest.par.as_ref()?;
     // A float body is not a box of the paragraph it lands in. A box laid out
-    // inside a float body is part of that float too, so when the enclosing
-    // paragraph is a float body as well, the usual signals decide.
-    if par.float_body && !parent.float_body {
+    // inside a float body is part of that same float, so when both are held
+    // by one float, the usual signals decide.
+    if !par.floats.is_empty()
+        && !par.floats.iter().any(|index| parent.floats.contains(index))
+    {
         return None;
     }
     let covered = match (parent.range, par.range) {

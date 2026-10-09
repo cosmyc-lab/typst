@@ -1226,6 +1226,8 @@ fn example_files_exist() {
         "_box_identity_lib.typ",
         "box_float_text.typ",
         "_box_float_text_lib.typ",
+        "float_scope_let.typ",
+        "float_scope_helper.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1947,4 +1949,27 @@ fn floats_from_another_file_survive_matching_text() {
         1,
         "the floated word must survive beside a longer word: {paragraphs:?}"
     );
+}
+
+#[test]
+fn floats_defined_earlier_do_not_claim_the_paragraphs_in_between() {
+    // A float body built from an earlier `#let`, or a float helper defined in
+    // the preamble, spans in the source from the definition to the call. The
+    // paragraphs written in between are not that float's, and another float
+    // landing in one of them must survive.
+    let disclaimer = ["Yes indeed it is so."; 6].join(" ");
+    for (name, own) in [
+        ("float_scope_let.typ", "Wide note WZ."),
+        ("float_scope_helper.typ", "Aside: later note AZ"),
+    ] {
+        let cnd = cnd_for_example(name);
+        let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+        for float in [disclaimer.as_str(), own] {
+            let count = paragraphs.iter().filter(|p| p.trim() == float).count();
+            assert_eq!(
+                count, 1,
+                "{name}: {float:?} must be one paragraph: {paragraphs:?}"
+            );
+        }
+    }
 }
