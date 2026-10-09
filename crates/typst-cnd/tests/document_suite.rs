@@ -1925,10 +1925,22 @@ fn floats_from_another_file_survive_matching_text() {
     // containment; it must not be taken for a box body because the
     // paragraph it lands in holds the same sentence, or a longer word.
     let cnd = cnd_for_example("box_float_text.typ");
-    let float = ["Yes indeed it is so."; 6].join(" ");
     let paragraphs = paragraph_texts_in_order(&cnd.nodes);
-    let count = paragraphs.iter().filter(|p| p.trim() == float).count();
-    assert_eq!(count, 1, "the floated paragraph must appear once: {paragraphs:?}");
+    for float in [
+        ["Yes indeed it is so."; 6].join(" "),
+        // A float of two paragraphs: the break between them is no glue.
+        ["Kept one QA."; 3].join(" "),
+        ["Kept two QB."; 2].join(" "),
+        // A reference realizes to text the unrealized float does not have.
+        ["See Section 1 for QR details in full."; 5].join(" "),
+    ] {
+        // A reference's supplement is joined by a non-breaking space.
+        let count = paragraphs
+            .iter()
+            .filter(|p| p.split_whitespace().collect::<Vec<_>>().join(" ") == float)
+            .count();
+        assert_eq!(count, 1, "{float:?} must be one paragraph: {paragraphs:?}");
+    }
     let counts = word_counts(&cnd);
     assert_eq!(
         counts.get("Draft").copied().unwrap_or(0),

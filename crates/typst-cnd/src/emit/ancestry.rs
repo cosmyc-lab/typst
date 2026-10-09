@@ -21,13 +21,15 @@ use std::ops::ControlFlow;
 use rustc_hash::{FxHashMap, FxHashSet};
 use typst_library::WorldExt;
 use typst_library::engine::Engine;
-use typst_library::foundations::{Content, Element, NativeElement, StyleChain};
+use typst_library::foundations::{
+    Content, Element, NativeElement, SequenceElem, StyleChain,
+};
 use typst_library::introspection::{Location, Tag};
 use typst_library::layout::{Frame, FrameItem, PlaceElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
     ArtifactElem, BibliographyElem, EnumElem, FigureElem, FootnoteEntry, HeadingElem,
-    ListElem, OutlineElem, ParElem, QuoteElem, TableElem, TermsElem,
+    ListElem, OutlineElem, ParElem, ParbreakElem, QuoteElem, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_syntax::{FileId, Span};
@@ -60,13 +62,13 @@ impl Ancestry {
     /// Reconstruct ancestry from a laid-out document's frames.
     pub fn from_document(paged: &typst_layout::PagedDocument, engine: &Engine) -> Self {
         let mut ancestry = Self::default();
-        let mut floats = Vec::new();
+        let mut found = Vec::new();
         for page in paged.pages() {
-            float_texts(&page.frame, &mut floats);
+            floats(&page.frame, engine, &mut found);
         }
         let mut stack: Vec<Open> = Vec::new();
         for page in paged.pages() {
-            walk(&page.frame, engine, &floats, &mut stack, &mut ancestry);
+            walk(&page.frame, engine, &found, &mut stack, &mut ancestry);
         }
         ancestry
     }
@@ -178,27 +180,63 @@ fn is_float(inner: &Content) -> bool {
         .is_some_and(|place| place.float.get(StyleChain::default()))
 }
 
-/// Collect the normalized text of every float's body.
+/// What identifies a float's body once it is drawn away from its tags.
+struct Float {
+    /// Where the `place` is written. A paragraph whose own range lies inside
+    /// it is that float's content, whatever text it realizes to.
+    range: Option<SourceRange>,
+    /// The body's text, for a paragraph with no range of its own (a string
+    /// passed through `upper`, `text`…), which only its words can identify.
+    text: String,
+}
+
+impl Float {
+    fn holds(&self, par: &OpenPar) -> bool {
+        par.range
+            .zip(self.range)
+            .is_some_and(|(inner, outer)| contains(outer, inner))
+            || occurs_as_words(&self.text, par.text())
+    }
+}
+
+/// Collect every float of the document.
 ///
-/// A separate pass, because a float placed at the top of a page is drawn
-/// before the point where it is written, and so before its own tags.
-fn float_texts(frame: &Frame, out: &mut Vec<String>) {
+/// A separate pass, because a float is drawn away from its tags: they open
+/// and close where it is written, and its body lands wherever it fits —
+/// possibly before them, at the top of the page.
+fn floats(frame: &Frame, engine: &Engine, out: &mut Vec<Float>) {
     for (_, item) in frame.items() {
         match item {
-            FrameItem::Group(group) => float_texts(&group.frame, out),
+            FrameItem::Group(group) => floats(&group.frame, engine, out),
             FrameItem::Tag(Tag::Start(inner, _)) => {
                 if is_float(inner)
                     && let Some(place) = inner.to_packed::<PlaceElem>()
                 {
-                    let text = normalized_text(&place.body);
-                    if !text.is_empty() {
-                        out.push(text);
-                    }
+                    out.push(Float {
+                        range: content_range(engine, inner),
+                        text: paragraphs_text(&place.body),
+                    });
                 }
             }
             _ => {}
         }
     }
+}
+
+/// The normalized text of `body`, with a space where a paragraph break
+/// separates two of its paragraphs — `extract_text` yields nothing for the
+/// break, which would glue the last word of one to the first of the next.
+fn paragraphs_text(body: &Content) -> String {
+    let Some(sequence) = body.to_packed::<SequenceElem>() else {
+        return normalized_text(body);
+    };
+    sequence
+        .children
+        .split(|child| child.is::<ParbreakElem>())
+        .map(|run| normalized_text(&Content::sequence(run.iter().cloned())))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A tag that is currently open while walking the frames.
@@ -226,7 +264,7 @@ struct OpenPar {
     content: Content,
     /// Its normalized text, extracted at most once.
     text: OnceCell<String>,
-    /// Whether its text is (part of) a float body's text.
+    /// Whether it is (part of) a float's body (see [`Float::holds`]).
     float_body: bool,
 }
 
@@ -239,7 +277,7 @@ impl OpenPar {
 fn walk(
     frame: &Frame,
     engine: &Engine,
-    floats: &[String],
+    floats: &[Float],
     stack: &mut Vec<Open>,
     ancestry: &mut Ancestry,
 ) {
@@ -260,8 +298,7 @@ fn walk(
                         text: OnceCell::new(),
                         float_body: false,
                     };
-                    par.float_body =
-                        floats.iter().any(|float| occurs_as_words(float, par.text()));
+                    par.float_body = floats.iter().any(|float| float.holds(&par));
                     par
                 });
                 if let Some(par) = &par
@@ -401,25 +438,29 @@ fn content_range(engine: &Engine, content: &Content) -> Option<SourceRange> {
 /// text occurs in that one paragraph's text. A body that does not — a
 /// reference resolved inside a helper, a package's drawing whose labels are
 /// not in any paragraph of the author's — is kept as a paragraph of its own:
-/// a duplicate costs less than a loss. The text must occur as whole words,
-/// so that a floated "Draft" is not found inside "Drafting".
+/// a duplicate costs less than a loss. The text must occur as words in the
+/// enclosing paragraph's, so that a floated "Draft" is not found inside
+/// "Drafting".
 ///
 /// A float settles it before the text is compared. Its tags open and close
 /// where it is written, but its body is drawn wherever it fits — possibly
 /// inside a later paragraph that spans the page, and that may well repeat
 /// the float's sentence. Nothing in the frames around the body says it is a
-/// float, so a paragraph whose text is a float body's text (see
-/// [`float_texts`]) is never taken for a box in another paragraph; at worst a
+/// float, so a paragraph that is a float's body — by its source range, or by
+/// its words when it has no range (see [`floats`]) — is never taken for a box
+/// in another paragraph, whichever signal would otherwise apply; at worst a
 /// box that happens to say the same as a float is kept twice.
 fn covering_par(stack: &[Open], par: &OpenPar) -> Option<Location> {
     let nearest = stack.iter().rev().find(|open| open.par.is_some())?;
     let parent = nearest.par.as_ref()?;
+    // A float body is not a box of the paragraph it lands in. A box laid out
+    // inside a float body is part of that float too, so when the enclosing
+    // paragraph is a float body as well, the usual signals decide.
+    if par.float_body && !parent.float_body {
+        return None;
+    }
     let covered = match (parent.range, par.range) {
         (Some(outer), Some(inner)) if outer.file == inner.file => contains(outer, inner),
-        // A float body is not a box of the paragraph it lands in. A box laid
-        // out inside a float body says the same as its float, so when the
-        // enclosing paragraph is a float body too, the words decide.
-        _ if par.float_body && !parent.float_body => false,
         _ => occurs_as_words(parent.text(), par.text()),
     };
     covered.then_some(nearest.location)
