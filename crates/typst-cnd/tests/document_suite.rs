@@ -1222,6 +1222,8 @@ fn example_files_exist() {
         "list_in_float_short.typ",
         "list_in_footnote_item.typ",
         "list_in_footnote_par.typ",
+        "box_identity.typ",
+        "_box_identity_lib.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1857,4 +1859,60 @@ fn lists_in_footnotes_live_in_the_footnote_pool_only() {
             assert_eq!(counts.get(*token).copied(), Some(1), "{name}: {token} once");
         }
     }
+}
+
+#[test]
+fn inline_box_bodies_are_emitted_once_whatever_their_origin() {
+    // A box body is realized as a paragraph of its own inside the line of the
+    // paragraph that holds it. Whether its spans are detached (a string
+    // passed through a styling function) or come from another file, it is
+    // part of that paragraph — and a floated body is still content.
+    let cnd = cnd_for_example("box_identity.typ");
+    let counts = word_counts(&cnd);
+    let mut tokens: Vec<String> = Vec::new();
+    for letter in 'A'..='J' {
+        tokens.push(format!("Q{letter}1"));
+        tokens.push(format!("Q{letter}2"));
+    }
+    tokens.extend(["QK1", "QL1", "QM1"].map(String::from));
+    for token in ["RA1", "RA2", "RB1", "RB2", "RC1", "RD1", "RE1", "RE2", "RF1"] {
+        tokens.push(token.into());
+    }
+    for token in ["SA1", "SA2", "SA3", "SA4"] {
+        tokens.push(token.into());
+    }
+    let mut wrong = Vec::new();
+    for token in &tokens {
+        let count = counts.get(token).copied().unwrap_or(0);
+        if count != 1 {
+            wrong.push(format!("{token}={count}"));
+        }
+    }
+    assert!(wrong.is_empty(), "each token must appear exactly once: {wrong:?}");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    assert!(
+        paragraphs.iter().any(|p| p.contains("SA3 FLOATED BODY")),
+        "the floated body must be a paragraph: {paragraphs:?}"
+    );
+    assert!(
+        paragraphs
+            .iter()
+            .any(|p| p.starts_with("RE1 see") && p.contains("RE2")),
+        "the imported box holding a reference stays in its paragraph: {paragraphs:?}"
+    );
+    // Known limit: a box body written in another file, whose reference
+    // resolves to text ("Section 1") that the unrealized paragraph around it
+    // does not have, is neither inside that paragraph's source nor found in
+    // its text. It is kept as a paragraph of its own: a duplicate, never a
+    // loss.
+    assert!(
+        paragraphs
+            .iter()
+            .any(|p| p.starts_with("RF1 then") && p.contains("RF2")),
+        "the paragraph around a box written in another file keeps it: {paragraphs:?}"
+    );
+    assert!(
+        counts.get("RF2").copied().unwrap_or(0) >= 1,
+        "a box written in another file holding a reference is never lost"
+    );
 }

@@ -10,7 +10,8 @@
 //! The laid-out frames carry the missing structure. Introspection tags appear
 //! in them as balanced `Tag::Start` / `Tag::End` pairs, and visiting the frame
 //! tree depth-first yields them in document order, so a stack reconstructs
-//! exact ancestry — no source-range or text-prefix heuristics.
+//! exact ancestry. Only whether a nested paragraph is part of the enclosing
+//! one needs a second signal; [`covering_par`] states it.
 //!
 //! [`Feature::CndSemantics`]: typst_library::Feature::CndSemantics
 
@@ -29,6 +30,8 @@ use typst_library::model::{
 };
 use typst_library::text::RawElem;
 use typst_syntax::{FileId, Span};
+
+use crate::emit::extract;
 
 /// Which of a laid-out element's ancestors matter to the emit pipeline.
 #[derive(Debug, Default)]
@@ -168,10 +171,9 @@ fn list_scope(inner: &Content) -> ListScope {
 /// A tag that is currently open while walking the frames.
 struct Open {
     location: Location,
-    /// The paragraph's own source range, against which a nested paragraph is
-    /// tested for being part of it. `None` for non-paragraphs and for a
-    /// paragraph with no usable span.
-    par_range: Option<Option<SourceRange>>,
+    /// What a nested paragraph is tested against for being part of this one.
+    /// `None` for non-paragraphs.
+    par: Option<OpenPar>,
     is_artifact: bool,
     is_container: bool,
     list_scope: ListScope,
@@ -180,6 +182,15 @@ struct Open {
     /// is page furniture, whichever way the two tags happen to nest.
     glyphs_in_artifact: u32,
     glyphs_outside_artifact: u32,
+}
+
+/// An open paragraph, as [`covering_par`] needs it.
+struct OpenPar {
+    /// The paragraph's own source range. `None` when it has no usable span.
+    range: Option<SourceRange>,
+    /// The paragraph itself, whose text is only extracted when the source
+    /// cannot settle the question.
+    content: Content,
 }
 
 fn walk(frame: &Frame, engine: &Engine, stack: &mut Vec<Open>, ancestry: &mut Ancestry) {
@@ -191,9 +202,12 @@ fn walk(frame: &Frame, engine: &Engine, stack: &mut Vec<Open>, ancestry: &mut An
                 let Some(location) = inner.location() else { continue };
                 let is_par = inner.elem() == ParElem::ELEM;
 
-                let par_range = is_par.then(|| content_range(engine, inner));
-                if let Some(range) = par_range
-                    && let Some(parent) = covering_par(stack, range)
+                let par = is_par.then(|| OpenPar {
+                    range: content_range(engine, inner),
+                    content: inner.clone(),
+                });
+                if let Some(par) = &par
+                    && let Some(parent) = covering_par(stack, par)
                 {
                     ancestry.covered_by_par.insert(location, parent);
                 }
@@ -215,7 +229,7 @@ fn walk(frame: &Frame, engine: &Engine, stack: &mut Vec<Open>, ancestry: &mut An
 
                 stack.push(Open {
                     location,
-                    par_range,
+                    par,
                     is_artifact: inner.elem() == ArtifactElem::ELEM,
                     is_container: is_emitted_container(inner.elem()),
                     list_scope: list_scope(inner),
@@ -231,7 +245,7 @@ fn walk(frame: &Frame, engine: &Engine, stack: &mut Vec<Open>, ancestry: &mut An
                     stack.iter().rposition(|open| open.location == *location)
                 {
                     for open in stack.drain(index..) {
-                        if open.par_range.is_some()
+                        if open.par.is_some()
                             && open.glyphs_outside_artifact == 0
                             && open.glyphs_in_artifact > 0
                         {
@@ -242,7 +256,7 @@ fn walk(frame: &Frame, engine: &Engine, stack: &mut Vec<Open>, ancestry: &mut An
             }
             FrameItem::Text(_) => {
                 let in_artifact = stack.iter().any(|open| open.is_artifact);
-                for open in stack.iter_mut().filter(|open| open.par_range.is_some()) {
+                for open in stack.iter_mut().filter(|open| open.par.is_some()) {
                     if in_artifact {
                         open.glyphs_in_artifact += 1;
                     } else {
@@ -300,33 +314,58 @@ fn content_range(engine: &Engine, content: &Content) -> Option<SourceRange> {
     range
 }
 
-/// The paragraph `range` is part of, if any.
-///
-/// Two independent signals must agree, and each guards a different mistake.
+/// The paragraph `par` is part of, if any.
 ///
 /// *Nesting in the laid-out frames* — the nearest enclosing open paragraph —
 /// is what identifies an inline `box`: its body is realized into a paragraph
-/// of its own, drawn inside the line of the paragraph that contains it. This
-/// is deliberately not a text comparison: the box body is realized and the
-/// enclosing paragraph's copy of it is not, so anything that only acquires
-/// text when realized — a `@reference`'s "Section 1", a citation's marker, a
-/// footnote's ordinal — appears in one and not the other, and a paragraph
-/// holding `#box[see @fig]` would compare unequal and be emitted twice.
+/// of its own, drawn inside the line of the paragraph that contains it.
+/// Nesting alone is not enough, though: `#place(float: true)[…]` written
+/// inside a paragraph is deferred to wherever it fits, and its tags can land
+/// inside a *later* paragraph that is still open — taking that for nesting
+/// would delete the float, which is content loss rather than duplication.
+/// So a second signal must confirm it, and which one depends on where the
+/// nested paragraph's spans come from.
 ///
-/// *Source containment* is what keeps a float out. `#place(float: true)[…]`
-/// written inside a paragraph is deferred to wherever it fits, and its tags
-/// can land inside a *later* paragraph's still-open range — nesting alone
-/// would delete it, which is content loss rather than duplication. A float
-/// body's source range is never inside the range of the paragraph it lands
-/// in: a block-level `place` ends the paragraph it was written in, so the
-/// paragraph that ends up enclosing it in the frames always begins after it.
-fn covering_par(stack: &[Open], range: Option<SourceRange>) -> Option<Location> {
-    let range = range?;
-    let nearest = stack.iter().rev().find(|open| open.par_range.is_some())?;
-    let parent = nearest.par_range.flatten()?;
-    contains(parent, range).then_some(nearest.location)
+/// *Source containment*, when both paragraphs have a range in the same file.
+/// It is deliberately preferred over a text comparison: the box body is
+/// realized and the enclosing paragraph's copy of it is not, so anything
+/// that only acquires text when realized — a `@reference`'s "Section 1", a
+/// citation's marker, a footnote's ordinal — appears in one and not the
+/// other. A float body's range is never inside the range of the paragraph it
+/// lands in: a block-level `place` ends the paragraph it was written in, so
+/// the paragraph that ends up enclosing it in the frames always begins after
+/// it.
+///
+/// *Text occurrence* otherwise — when the nested body's spans are detached
+/// (a string passed through `text`, `upper`, `strong`…) or come from another
+/// file (a helper imported from a template). The source says nothing about
+/// such a body, so it counts as part of the enclosing paragraph only if its
+/// text occurs in that one paragraph's text. A body that does not — a
+/// reference resolved inside a helper, a package's drawing whose labels are
+/// not in any paragraph of the author's — is kept as a paragraph of its own:
+/// a duplicate costs less than a loss.
+fn covering_par(stack: &[Open], par: &OpenPar) -> Option<Location> {
+    let nearest = stack.iter().rev().find(|open| open.par.is_some())?;
+    let parent = nearest.par.as_ref()?;
+    let covered = match (parent.range, par.range) {
+        (Some(outer), Some(inner)) if outer.file == inner.file => contains(outer, inner),
+        _ => {
+            let text = normalized_text(&par.content);
+            !text.is_empty() && normalized_text(&parent.content).contains(text.as_str())
+        }
+    };
+    covered.then_some(nearest.location)
 }
 
 fn contains(outer: SourceRange, inner: SourceRange) -> bool {
     outer.file == inner.file && inner.start >= outer.start && inner.end <= outer.end
+}
+
+/// A paragraph's text with its whitespace runs collapsed, so that a line
+/// break inside the box and a space in the enclosing line compare equal.
+fn normalized_text(content: &Content) -> String {
+    extract::extract_text(content)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
