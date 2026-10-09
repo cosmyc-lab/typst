@@ -1216,6 +1216,7 @@ fn example_files_exist() {
         "citations.typ",
         "nonflat_markers.typ",
         "newsletter/main.typ",
+        "paragraph_identity.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1245,6 +1246,43 @@ fn heading_show_rules_do_not_duplicate_headings_as_paragraphs() {
             "heading {heading:?} duplicated as a paragraph: {paragraphs:?}"
         );
     }
+}
+
+/// Paragraphs are deduplicated by element identity: a paragraph that merely
+/// starts like a heading, a list item or a callout title is the author's own
+/// and must survive, and inline PDF artifacts never reach a paragraph's text.
+#[test]
+fn paragraph_identity_dedupe_and_inline_artifacts() {
+    let cnd = cnd_for_example("paragraph_identity.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    for expected in [
+        "Decision taken by the team, without a spec.",
+        "First item of a list that is long enough, followed by more text.",
+        "A",
+        "Decision We keep option 3.",
+        "Before after.",
+        "Closing paragraph of the document.",
+        "Lead words trailing words.",
+    ] {
+        let count = paragraphs.iter().filter(|p| p.as_str() == expected).count();
+        assert_eq!(
+            count, 1,
+            "paragraph {expected:?} must appear exactly once, got: {paragraphs:?}"
+        );
+    }
+    assert!(
+        !paragraphs.iter().any(|p| p.contains("decoration")),
+        "artifact-only text leaked into a paragraph: {paragraphs:?}"
+    );
+    assert!(
+        !paragraphs.iter().any(|p| p.contains('\u{2605}')),
+        "inline artifact glyph leaked into a paragraph: {paragraphs:?}"
+    );
+    assert_eq!(
+        paragraphs.len(),
+        7,
+        "exactly the seven authored paragraphs, got: {paragraphs:?}"
+    );
 }
 
 /// Text carried by a layout-only container — a `block`, a grid cell, a

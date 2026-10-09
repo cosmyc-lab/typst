@@ -429,149 +429,12 @@ fn build_skip_ranges(
 
 fn should_skip_paragraph(
     engine: &Engine,
-    par: &Packed<ParElem>,
     content: &Content,
     skip_ranges: &[SourceRange],
-    skip_texts: &FxHashSet<String>,
 ) -> bool {
-    if let Some(par_range) = source_range(engine, content.span())
-        && skip_ranges.iter().any(|outer| range_contains(*outer, par_range))
-    {
-        return true;
-    }
-    skip_texts.contains(&normalize_paragraph_key(&extract::extract_text(&par.body)))
-        || paragraph_text_is_skipped(
-            &normalize_paragraph_key(&extract::extract_text(&par.body)),
-            skip_texts,
-        )
-}
-
-fn normalize_paragraph_key(text: &str) -> String {
-    text.chars()
-        .filter(|ch| {
-            !matches!(
-                ch,
-                '\u{201c}'
-                    | '\u{201d}'
-                    | '\u{2018}'
-                    | '\u{2019}'
-                    | '"'
-                    | '\u{00ab}'
-                    | '\u{00bb}'
-                    | '\u{2039}'
-                    | '\u{203a}'
-                    | '\u{202f}'
-                    | '\u{a0}'
-            )
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
-}
-
-fn paragraph_text_is_skipped(key: &str, skip_texts: &FxHashSet<String>) -> bool {
-    if key.is_empty() {
-        return false;
-    }
-    if skip_texts.contains(key) {
-        return true;
-    }
-    skip_texts
-        .iter()
-        .any(|skip| skip.starts_with(key) || (key.len() >= 10 && key.starts_with(skip)))
-}
-
-fn push_text_key(skip: &mut FxHashSet<String>, text: &str) {
-    let key = normalize_paragraph_key(text);
-    if !key.is_empty() {
-        skip.insert(key);
-    }
-}
-
-fn build_skip_paragraph_texts(introspector: &dyn Introspector) -> FxHashSet<String> {
-    let mut skip = FxHashSet::default();
-
-    for elem in introspector.query(&QuoteElem::ELEM.select()) {
-        let Some(quote) = elem.to_packed::<QuoteElem>() else {
-            continue;
-        };
-        push_text_key(&mut skip, &extract::extract_text(&quote.body));
-    }
-
-    for elem in introspector.query(&ListElem::ELEM.select()) {
-        let Some(list) = elem.to_packed::<ListElem>() else {
-            continue;
-        };
-        for item in &list.children {
-            collect_list_item_texts(item, &mut skip);
-        }
-    }
-
-    for elem in introspector.query(&EnumElem::ELEM.select()) {
-        let Some(enum_) = elem.to_packed::<EnumElem>() else {
-            continue;
-        };
-        for item in &enum_.children {
-            collect_enum_item_texts(item, &mut skip);
-        }
-    }
-
-    for elem in introspector.query(&TermsElem::ELEM.select()) {
-        let Some(terms) = elem.to_packed::<TermsElem>() else {
-            continue;
-        };
-        for item in &terms.children {
-            push_text_key(&mut skip, &extract::extract_text(&item.term));
-            push_text_key(&mut skip, &extract::extract_text(&item.description));
-        }
-    }
-
-    for elem in introspector.query(&FigureElem::ELEM.select()) {
-        let Some(figure) = elem.to_packed::<FigureElem>() else {
-            continue;
-        };
-        if let Some(caption) = figure.caption.get_cloned(StyleChain::default()) {
-            push_text_key(&mut skip, &extract::extract_text(&caption.body));
-        }
-    }
-
-    // Heading bodies, as the text-key net behind the range check above: a
-    // show rule can hand the body to synthesized content whose spans are
-    // detached (no source range to contain), yet the re-emitted paragraph
-    // still reads as the heading's own text. Same prefix-tolerant matching
-    // (and the same accepted trade-off) as every other kind here.
-    for elem in introspector.query(&HeadingElem::ELEM.select()) {
-        let Some(heading) = elem.to_packed::<HeadingElem>() else {
-            continue;
-        };
-        push_text_key(&mut skip, &extract::extract_text(&heading.body));
-    }
-
-    skip
-}
-
-fn collect_list_item_texts(item: &Packed<ListItem>, skip: &mut FxHashSet<String>) {
-    push_text_key(skip, &extract::extract_text(&item.body));
-    if let Some(nested) = item.body.query_first_naive(&ListElem::ELEM.select())
-        && let Some(list) = nested.to_packed::<ListElem>()
-    {
-        for child in &list.children {
-            collect_list_item_texts(child, skip);
-        }
-    }
-}
-
-fn collect_enum_item_texts(item: &Packed<EnumItem>, skip: &mut FxHashSet<String>) {
-    push_text_key(skip, &extract::extract_text(&item.body));
-    if let Some(nested) = item.body.query_first_naive(&EnumElem::ELEM.select())
-        && let Some(list) = nested.to_packed::<EnumElem>()
-    {
-        for child in &list.children {
-            collect_enum_item_texts(child, skip);
-        }
-    }
+    source_range(engine, content.span()).is_some_and(|par_range| {
+        skip_ranges.iter().any(|outer| range_contains(*outer, par_range))
+    })
 }
 
 /// Build CND nodes from introspector queries (post-layout, stable locations).
@@ -584,7 +447,6 @@ pub fn convert_from_introspector(
     ctx: &mut ConvertContext,
 ) -> typst_library::diag::SourceResult<()> {
     let skip_ranges = build_skip_ranges(engine, introspector);
-    let skip_texts = build_skip_paragraph_texts(introspector);
     let list_enum_ranges = build_list_enum_ranges(engine, introspector);
     let inline_nested_locations =
         build_inline_nested_list_enum_locations(engine, introspector);
@@ -709,7 +571,14 @@ pub fn convert_from_introspector(
         if ancestry.is_in_emitted_container(loc) {
             continue;
         }
-        if should_skip_paragraph(engine, par, &elem, &skip_ranges, &skip_texts) {
+        if should_skip_paragraph(engine, &elem, &skip_ranges) {
+            continue;
+        }
+        // A paragraph made only of text that belongs to another node (a
+        // heading body re-emitted by a show rule, a boxed block quote) or to
+        // no node (a PDF artifact) has nothing of its own left. One that was
+        // empty to begin with is not affected.
+        if extract::is_emptied_by_exclusion(&par.body) {
             continue;
         }
         items.push((loc, elem));
