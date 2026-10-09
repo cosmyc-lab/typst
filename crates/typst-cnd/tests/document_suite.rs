@@ -1224,6 +1224,8 @@ fn example_files_exist() {
         "list_in_footnote_par.typ",
         "box_identity.typ",
         "_box_identity_lib.typ",
+        "box_float_text.typ",
+        "_box_float_text_lib.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1914,5 +1916,23 @@ fn inline_box_bodies_are_emitted_once_whatever_their_origin() {
     assert!(
         counts.get("RF2").copied().unwrap_or(0) >= 1,
         "a box written in another file holding a reference is never lost"
+    );
+}
+
+#[test]
+fn floats_from_another_file_survive_matching_text() {
+    // A float whose spans are in another file is not tested by source
+    // containment; it must not be taken for a box body because the
+    // paragraph it lands in holds the same sentence, or a longer word.
+    let cnd = cnd_for_example("box_float_text.typ");
+    let float = ["Yes indeed it is so."; 6].join(" ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    let count = paragraphs.iter().filter(|p| p.trim() == float).count();
+    assert_eq!(count, 1, "the floated paragraph must appear once: {paragraphs:?}");
+    let counts = word_counts(&cnd);
+    assert_eq!(
+        counts.get("Draft").copied().unwrap_or(0),
+        1,
+        "the floated word must survive beside a longer word: {paragraphs:?}"
     );
 }
