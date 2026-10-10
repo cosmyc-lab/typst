@@ -1232,6 +1232,11 @@ fn example_files_exist() {
         "float_holds_by_range_quote.typ",
         "_float_holds_lib.typ",
         "_float_holds_chapter.typ",
+        "float_held_by_text.typ",
+        "_float_text_chapter.typ",
+        "float_held_by_text_detached.typ",
+        "float_held_by_text_whole.typ",
+        "float_held_by_text_prefix.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -2005,5 +2010,51 @@ fn a_float_quoting_another_file_does_not_claim_its_paragraph() {
             2,
             "{name}: the chapter and the note quoting it must both stay: {paragraphs:?}"
         );
+    }
+}
+
+#[test]
+fn a_float_held_only_by_words_is_never_absorbed() {
+    // A preamble helper's float reaches, in the source, over the long
+    // paragraph, and its body quotes the note word for word (or the long
+    // paragraph in full). The note lands in the long paragraph, which is no
+    // float's body: the note must survive, whether it has a source range of
+    // its own (in an included chapter) or none (a string through `upper`).
+    let lower = ["Yes indeed it is so."; 6].join(" ");
+    let upper = lower.to_uppercase();
+    let long = |note: &str| {
+        format!(
+            "Long paragraph that spans pages: one two three four five six seven \
+             eight nine ten. {note} eleven twelve thirteen fourteen fifteen \
+             sixteen seventeen eighteen nineteen twenty twentyone twentytwo \
+             twentythree twentyfour twentyfive twentysix twentyseven \
+             twentyeight twentynine thirty."
+        )
+    };
+    for (name, note, others) in [
+        ("float_held_by_text.typ", &lower, vec![(format!("Quoted: {lower}"), 1)]),
+        (
+            "float_held_by_text_detached.typ",
+            &upper,
+            vec![(format!("Quoted: {upper}"), 1), (long(&upper), 1)],
+        ),
+        ("float_held_by_text_whole.typ", &lower, vec![(long(&lower), 2)]),
+        ("float_held_by_text_prefix.typ", &lower, vec![(long(&lower), 1)]),
+    ] {
+        let cnd = cnd_for_example(name);
+        let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+        let count = |text: &str| paragraphs.iter().filter(|p| p.trim() == text).count();
+        assert_eq!(
+            count(note),
+            1,
+            "{name}: {note:?} must be one paragraph: {paragraphs:?}"
+        );
+        for (text, expected) in others {
+            assert_eq!(
+                count(&text),
+                expected,
+                "{name}: {text:?} must be {expected} paragraph(s): {paragraphs:?}"
+            );
+        }
     }
 }

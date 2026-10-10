@@ -186,6 +186,10 @@ struct Float {
     /// own range lies inside it is that float's content, whatever text it
     /// realizes to.
     range: Option<SourceRange>,
+    /// What the body is made of (see [`body_spans`]): a paragraph built from
+    /// any of it is part of the body, not merely a paragraph that the call
+    /// reaches across in the source.
+    body: FxHashSet<Span>,
     /// The body's text, for a paragraph whose range says nothing about the
     /// float (a string passed through `upper`, `text`…, a body built from an
     /// earlier `#let`), which only its words can identify.
@@ -198,6 +202,19 @@ impl Float {
         par.range
             .zip(self.range)
             .is_some_and(|(inner, outer)| contains(outer, inner))
+    }
+
+    /// Whether `par` is built from some of this float's body.
+    fn holds_in_body(&self, par: &OpenPar) -> bool {
+        par.content
+            .traverse(&mut |element| {
+                if self.body.contains(&element.span()) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .is_break()
     }
 
     /// Whether `par` says nothing the float's body does not say.
@@ -221,6 +238,7 @@ fn floats(frame: &Frame, engine: &Engine, out: &mut Vec<Float>) {
                 {
                     out.push(Float {
                         range: float_range(engine, inner),
+                        body: body_spans(&place.body),
                         text: paragraphs_text(&place.body),
                     });
                 }
@@ -241,10 +259,9 @@ fn floats(frame: &Frame, engine: &Engine, out: &mut Vec<Float>) {
 /// It does not settle every case. A helper defined in the preamble,
 /// `#let aside(x) = place(…)[#x]`, has its `place` span there and its body at
 /// the call site, so the range still reaches across the paragraphs written in
-/// between. What keeps that harmless is the scope of the protection, not the
-/// range: such a paragraph is held by this float only, and that does not
-/// shelter a box of it from a match, nor another float that lands in it (see
-/// [`covering_par`]).
+/// between, and they count as surely held by this float. That is why a
+/// range never makes a paragraph a float's *body* on its own: that also
+/// takes its words and its spans (see `OpenPar::body_of`).
 fn float_range(engine: &Engine, place: &Content) -> Option<SourceRange> {
     let call = source_range(engine, place.span())?;
     let mut range = call;
@@ -258,6 +275,23 @@ fn float_range(engine: &Engine, place: &Content) -> Option<SourceRange> {
         ControlFlow::<()>::Continue(())
     });
     Some(range)
+}
+
+/// The spans of everything a float's body holds. Unlike a source range,
+/// this does not reach across the text written between two of them: a
+/// helper defined in the preamble, `#let aside(x) = place(…)[Aside: #x]`,
+/// holds spans both there and at its call, and a paragraph written in between
+/// shares none of them.
+fn body_spans(body: &Content) -> FxHashSet<Span> {
+    let mut spans = FxHashSet::default();
+    let _ = body.traverse(&mut |element| {
+        let span = element.span();
+        if !span.is_detached() {
+            spans.insert(span);
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    spans
 }
 
 /// The normalized text of `body`, with a space where a paragraph break
@@ -305,13 +339,19 @@ struct OpenPar {
     /// document's floats: by its range, or by its words. This is what
     /// shelters it from the paragraph it lands in. Usually empty.
     floats: Vec<usize>,
-    /// The floats it is surely part of, which a paragraph laid out inside it
-    /// may share: by its range when it has one, by its words only when it
-    /// has none. A paragraph written elsewhere — in another file, say — is
-    /// not a float's body merely because the float repeats its words, and
-    /// counting it as one would leave unsheltered whatever other float lands
-    /// in it with the same words.
+    /// The floats it is surely part of: by its range when it has one, by its
+    /// words only when it has none. A paragraph written elsewhere — in
+    /// another file, say — is not a float's body merely because the float
+    /// repeats its words.
     floats_by_source: Vec<usize>,
+    /// The floats whose body it is, as far as a paragraph laid out inside it
+    /// is concerned. A paragraph with a range of its own must lie in the
+    /// float's range, be built from some of the body's own content (see
+    /// [`body_spans`]), and say nothing the body does not say; one without a
+    /// range, only the last. The range alone is not enough: a helper defined
+    /// in the preamble reaches across the paragraphs written before its call
+    /// (see [`float_range`]), and may well quote one of them.
+    body_of: Vec<usize>,
 }
 
 impl OpenPar {
@@ -344,15 +384,22 @@ fn walk(
                         text: OnceCell::new(),
                         floats: Vec::new(),
                         floats_by_source: Vec::new(),
+                        body_of: Vec::new(),
                     };
                     for (index, float) in floats.iter().enumerate() {
                         let by_range = float.holds_by_range(&par);
-                        let by_text = !by_range && float.holds_by_text(&par);
+                        let by_text = float.holds_by_text(&par);
                         if by_range || by_text {
                             par.floats.push(index);
                         }
-                        if by_range || (by_text && par.range.is_none()) {
+                        let sure = by_range || (by_text && par.range.is_none());
+                        if sure {
                             par.floats_by_source.push(index);
+                        }
+                        let in_body =
+                            float.holds_in_body(&par) || (by_text && par.range.is_none());
+                        if sure && in_body && by_text {
+                            par.body_of.push(index);
                         }
                     }
                     par
@@ -498,26 +545,46 @@ fn content_range(engine: &Engine, content: &Content) -> Option<SourceRange> {
 /// enclosing paragraph's, so that a floated "Draft" is not found inside
 /// "Drafting".
 ///
-/// A float settles it before the text is compared. Its tags open and close
-/// where it is written, but its body is drawn wherever it fits — possibly
-/// inside a later paragraph that spans the page, and that may well repeat
-/// the float's sentence. Nothing in the frames around the body says it is a
-/// float, so a paragraph that is a float's body — by its source range, or by
-/// its words (see [`floats`]) — is never taken for a box in a paragraph that
-/// the same float does not hold, whichever signal would otherwise apply; at
-/// worst a box that happens to say the same as a float is kept twice. On the
-/// enclosing side, a paragraph with a range of its own is held only by the
-/// float whose range contains it: another float repeating its words — one
-/// that quotes a paragraph from another file — does not make it that float's
-/// body.
+/// A float settles it first. Its tags open and close where it is written,
+/// but its body is drawn wherever it fits — possibly inside a later
+/// paragraph that spans the page, and that may well repeat the float's
+/// sentence. Nothing in the frames around the body says it is a float, so a
+/// paragraph that any float may hold (`OpenPar::floats`: by its range, or
+/// by its words) is never covered, whichever signal would otherwise apply,
+/// unless both of these hold:
+///
+/// - the enclosing paragraph is the body of one of those floats
+///   (`OpenPar::body_of`), and
+/// - it is the body of every float that surely holds the nested paragraph
+///   (`OpenPar::floats_by_source`).
+///
+/// Then the nested paragraph is a box inside that body, and the usual
+/// signals decide. A paragraph no float may hold follows the usual signals
+/// alone.
+///
+/// A float's body is a frame of its own, so no other float lands inside one
+/// of its paragraphs: requiring the enclosing paragraph to *be* a float's
+/// body, not merely to be reached by the float's range or repeated by its
+/// words, is what keeps a float from being taken for a box. The second
+/// condition is a backstop: a paragraph surely held by some other float is
+/// that float's, not a box of this body. Only an enclosing paragraph with no
+/// range of its own is taken for a body on its words alone. The cost is
+/// duplication, not loss: a box inside a float body that the float holds
+/// only by words — a body built from an earlier `#let` — is kept twice, and
+/// so is a box inside a float whose body realizes to other words than it is
+/// written with.
 fn covering_par(stack: &[Open], par: &OpenPar) -> Option<Location> {
     let nearest = stack.iter().rev().find(|open| open.par.is_some())?;
     let parent = nearest.par.as_ref()?;
-    // A float body is not a box of the paragraph it lands in. A box laid out
-    // inside a float body is part of that same float, so when the parent is
-    // surely that float's too, the usual signals decide.
+    // A paragraph any float may hold is never covered, unless the parent is
+    // the body of one of those floats, and of every float that surely holds
+    // the paragraph: then it is a box in that body.
     if !par.floats.is_empty()
-        && !par.floats.iter().any(|index| parent.floats_by_source.contains(index))
+        && (!par.floats.iter().any(|index| parent.body_of.contains(index))
+            || !par
+                .floats_by_source
+                .iter()
+                .all(|index| parent.body_of.contains(index)))
     {
         return None;
     }
