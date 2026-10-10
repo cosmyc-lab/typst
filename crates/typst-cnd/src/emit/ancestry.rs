@@ -204,10 +204,35 @@ struct Float {
     /// The elements open where the `place` is written: what it really sits
     /// in, unlike what is open where its body is drawn.
     ancestors: FxHashSet<Location>,
-    /// Whether the `place` is written inside a PDF artifact. Its body is
-    /// drawn away from the artifact's tags, so only this says that the body
-    /// is decorative too (cnd-sdk spec §2).
-    in_artifact: bool,
+    /// Where the body of a float written inside a PDF artifact is written,
+    /// when that is certain (see [`decorative_range`]). Its body is drawn
+    /// away from the artifact's tags, so only this says that what the
+    /// float holds is decorative too (cnd-sdk spec §2).
+    decorative: Option<SourceRange>,
+}
+
+/// The source of a float written inside a PDF artifact, if the `place` call
+/// itself spells out its whole body: `#pdf.artifact(place(top, float: true)[…])`.
+///
+/// Anything written inside that call is the float's own, decorative content.
+/// A float whose body comes from elsewhere — a helper's `place` with the body
+/// passed in, a `#let` shown again — has a [`float_range`] that reaches
+/// across other text, or a body written outside the call: no range proves
+/// which content is decorative then, so none is claimed, and kept text is
+/// never at stake. Such a float's content is emitted (a leak, not a loss).
+fn decorative_range(engine: &Engine, place: &Content) -> Option<SourceRange> {
+    let call = source_range(engine, place.span())?;
+    let mut compact = true;
+    let _ = place.traverse(&mut |element| {
+        if let Some(found) = source_range(engine, element.span())
+            && !contains(call, found)
+        {
+            compact = false;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    });
+    compact.then_some(call)
 }
 
 impl Float {
@@ -264,7 +289,11 @@ fn floats(
                         body: body_spans(&place.body),
                         text: paragraphs_text(&place.body),
                         ancestors: open.iter().copied().collect(),
-                        in_artifact: open.iter().any(|open| artifacts.contains(open)),
+                        decorative: open
+                            .iter()
+                            .any(|open| artifacts.contains(open))
+                            .then(|| decorative_range(engine, inner))
+                            .flatten(),
                     });
                 }
                 if let Some(location) = inner.location() {
@@ -290,6 +319,10 @@ fn floats(
 /// thousands of each.
 struct Floats {
     all: Vec<Float>,
+    /// The source ranges of the floats written inside a PDF artifact whose
+    /// whole body is written inside their `place` call (see
+    /// [`decorative_range`]). Usually empty.
+    decorative: Vec<SourceRange>,
     /// Which floats' bodies hold each span (see [`body_spans`]). Usually
     /// one; several when the same content is the body of several floats.
     by_span: FxHashMap<Span, Vec<usize>>,
@@ -346,7 +379,8 @@ impl Floats {
                 entry.reach = reach;
             }
         }
-        Self { all, by_span, by_start, by_word }
+        let decorative = all.iter().filter_map(|float| float.decorative).collect();
+        Self { all, decorative, by_span, by_start, by_word }
     }
 
     /// The floats whose body holds the element written at `span`.
@@ -601,33 +635,18 @@ fn walk(
                     ancestry.covered_by_par.insert(location, parent);
                 }
                 // A float written inside an artifact is drawn away from it:
-                // what such a float surely holds is decorative too. "Surely"
-                // as for list scoping: a paragraph by source (never by a
-                // match of words alone), any other element by its span in the
-                // body *and* its place in the float's own source range — so
-                // content reused from a `#let` stays kept wherever it shows.
-                let held_by_artifact_float = match &par {
-                    Some(par) => {
-                        !par.floats_by_source.is_empty()
-                            && par
-                                .floats_by_source
-                                .iter()
-                                .all(|index| floats.all[*index].in_artifact)
+                // what is written inside such a float's own `place` call is
+                // decorative too (see [`decorative_range`]). A paragraph is
+                // judged by its own source range, any other element by its
+                // span's; content shown from elsewhere has its range there.
+                let held_by_artifact_float = !floats.decorative.is_empty()
+                    && match &par {
+                        Some(par) => par.range,
+                        None => source_range(engine, inner.span()),
                     }
-                    None => {
-                        !in_floats.is_empty()
-                            && in_floats
-                                .iter()
-                                .all(|index| floats.all[*index].in_artifact)
-                            && source_range(engine, inner.span()).is_some_and(|range| {
-                                in_floats.iter().any(|index| {
-                                    floats.all[*index]
-                                        .range
-                                        .is_some_and(|outer| contains(outer, range))
-                                })
-                            })
-                    }
-                };
+                    .is_some_and(|range| {
+                        floats.decorative.iter().any(|outer| contains(*outer, range))
+                    });
                 if held_by_artifact_float || stack.iter().any(|open| open.is_artifact) {
                     ancestry.in_artifact.insert(location);
                 }

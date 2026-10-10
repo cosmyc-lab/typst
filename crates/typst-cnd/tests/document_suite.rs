@@ -2439,3 +2439,34 @@ fn collect_footnote_labels(nodes: &[CndNode], out: &mut Vec<String>) {
         }
     }
 }
+
+/// A decorative float whose `place` comes from a helper must not take kept
+/// text with it: its source range spans the paragraphs written between the
+/// helper and the call, and content reused from a `#let` shares its spans.
+/// A float nested in a decorative one is decorative too.
+#[test]
+fn decorative_float_helpers_never_drop_kept_text() {
+    let cnd = cnd_for_example("decorative_float_helpers.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    for expected in [
+        "Kept alpha paragraph.",
+        "Kept beta paragraph.",
+        "Kept gamma paragraph.",
+        "Kept aside words.",
+        "Kept delta between.",
+        "Kept end.",
+    ] {
+        assert!(
+            paragraphs.iter().any(|p| p == expected),
+            "kept paragraph {expected:?} lost: {paragraphs:?}"
+        );
+    }
+    let json = serde_json::to_string(&cnd).unwrap();
+    for kept in ["Kept list item", "Kept reused item", "Kept reused cell"] {
+        assert!(json.contains(kept), "kept content {kept:?} lost: {json}");
+    }
+    assert!(
+        !json.contains("Ornament"),
+        "a float written inside a decorative float leaked: {json}"
+    );
+}
