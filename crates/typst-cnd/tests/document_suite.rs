@@ -1237,6 +1237,7 @@ fn example_files_exist() {
         "float_held_by_text_detached.typ",
         "float_held_by_text_whole.typ",
         "float_held_by_text_prefix.typ",
+        "float_held_by_text_reused.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -2019,7 +2020,8 @@ fn a_float_held_only_by_words_is_never_absorbed() {
     // paragraph, and its body quotes the note word for word (or the long
     // paragraph in full). The note lands in the long paragraph, which is no
     // float's body: the note must survive, whether it has a source range of
-    // its own (in an included chapter) or none (a string through `upper`).
+    // its own (in an included chapter) or none (a string through `upper`),
+    // and even when the long paragraph is content the float also shows.
     let lower = ["Yes indeed it is so."; 6].join(" ");
     let upper = lower.to_uppercase();
     let long = |note: &str| {
@@ -2040,6 +2042,7 @@ fn a_float_held_only_by_words_is_never_absorbed() {
         ),
         ("float_held_by_text_whole.typ", &lower, vec![(long(&lower), 2)]),
         ("float_held_by_text_prefix.typ", &lower, vec![(long(&lower), 1)]),
+        ("float_held_by_text_reused.typ", &lower, vec![(long(&lower), 2)]),
     ] {
         let cnd = cnd_for_example(name);
         let paragraphs = paragraph_texts_in_order(&cnd.nodes);
