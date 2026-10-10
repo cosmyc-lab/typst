@@ -1220,6 +1220,10 @@ fn example_files_exist() {
         "nested_lists.typ",
         "list_in_float_long.typ",
         "list_in_float_short.typ",
+        "list_in_bare_float.typ",
+        "list_in_bare_float_block.typ",
+        "par_in_float_beside_list.typ",
+        "float_in_list_item.typ",
         "list_in_footnote_item.typ",
         "list_in_footnote_par.typ",
         "box_identity.typ",
@@ -1856,6 +1860,79 @@ fn lists_in_floats_beside_open_lists_are_kept_once() {
             );
         }
     }
+}
+
+#[test]
+fn lists_in_bare_floats_beside_open_lists_are_kept_once() {
+    // Without a figure around it, nothing in the frames encloses the drawn
+    // list: the float's tags close where it is written. The list open
+    // around the drawn body is not what the float was written in.
+    for (name, tokens) in [
+        ("list_in_bare_float.typ", &["FLB1", "FLB2", "FLT1", "FLT2"][..]),
+        ("list_in_bare_float_block.typ", &["FLB1"][..]),
+    ] {
+        let cnd = cnd_for_example(name);
+        let counts = word_counts(&cnd);
+        let texts = all_list_item_texts(&cnd);
+        for token in tokens {
+            assert_eq!(
+                counts.get(*token).copied().unwrap_or(0),
+                1,
+                "{name}: {token} must appear exactly once"
+            );
+            assert!(
+                texts.iter().any(|text| text.contains(token)),
+                "{name}: {token} must be carried by a list node"
+            );
+        }
+        for i in 0..30 {
+            for prefix in ["PA", "QA"] {
+                let token = format!("{prefix}{i}");
+                if prefix == "QA" && name != "list_in_bare_float.typ" {
+                    continue;
+                }
+                assert_eq!(
+                    counts.get(&token).copied().unwrap_or(0),
+                    1,
+                    "{name}: {token} must appear exactly once"
+                );
+            }
+        }
+    }
+
+    // The list nested in the float's own list stays its child.
+    let cnd = cnd_for_example("list_in_bare_float.typ");
+    let parent = find_lists(&cnd.nodes)
+        .into_iter()
+        .flat_map(|list| list.items.iter())
+        .find(|item| item.text.contains("FLT1"))
+        .expect("FLT1 item");
+    assert!(
+        parent.children.iter().any(|child| child.text.contains("FLT2")),
+        "FLT2 must be FLT1's child, not a list of its own"
+    );
+}
+
+#[test]
+fn a_float_paragraph_beside_an_open_list_is_kept() {
+    let cnd = cnd_for_example("par_in_float_beside_list.typ");
+    let counts = word_counts(&cnd);
+    assert_eq!(counts.get("FPB1").copied().unwrap_or(0), 1, "FPB1 must appear once");
+    assert!(
+        paragraph_texts_in_order(&cnd.nodes)
+            .iter()
+            .any(|text| text.contains("FPB1")),
+        "FPB1 must be a paragraph"
+    );
+}
+
+#[test]
+fn a_float_written_in_a_list_item_is_kept_once() {
+    // The item carries the float's text; the float is written in the list,
+    // so the list open where its body is drawn is a real ancestor.
+    let cnd = cnd_for_example("float_in_list_item.typ");
+    let counts = word_counts(&cnd);
+    assert_eq!(counts.get("FIL1").copied().unwrap_or(0), 1, "FIL1 must appear once");
 }
 
 #[test]

@@ -51,7 +51,8 @@ pub struct Ancestry {
     /// Elements that sit inside a container the emit pipeline turns into a
     /// node of its own — a list, a table, a code block, an equation. Such a
     /// node renders its own children, so a paragraph found inside one is that
-    /// container's content seen a second time.
+    /// container's content seen a second time. Only a container that the
+    /// element is written in counts (see [`Open::encloses`]).
     in_container: FxHashSet<Location>,
     /// Elements whose text is carried by an enclosing node, so that a list
     /// among them is not a node of its own. See [`list_scope`].
@@ -63,12 +64,15 @@ impl Ancestry {
     pub fn from_document(paged: &typst_layout::PagedDocument, engine: &Engine) -> Self {
         let mut ancestry = Self::default();
         let mut found = Vec::new();
+        // Tags stay open across pages, as in `walk`.
+        let mut open = Vec::new();
         for page in paged.pages() {
-            floats(&page.frame, engine, &mut found);
+            floats(&page.frame, engine, &mut open, &mut found);
         }
+        let floats = Floats::new(found);
         let mut stack: Vec<Open> = Vec::new();
         for page in paged.pages() {
-            walk(&page.frame, engine, &found, &mut stack, &mut ancestry);
+            walk(&page.frame, engine, &floats, &mut stack, &mut ancestry);
         }
         ancestry
     }
@@ -142,16 +146,17 @@ enum ListScope {
     /// text), a footnote entry (the `footnotes` pool).
     Carrier,
     /// It ends the search, and the list is a node of its own. A figure keeps
-    /// only its caption, so a list inside it is that text's only carrier. A
-    /// float is laid out wherever it fits — possibly while a long list,
-    /// whose tags are still open, spans the page — so the elements open
-    /// around it in the frames are not what it was written in.
+    /// only its caption, so a list inside it is that text's only carrier.
     Barrier,
 }
 
 /// The nearest enclosing element that is not transparent decides whether a
-/// list is carried. Asking only "is any list-like element open?" would let a
-/// float placed beside an open list lose the list inside it.
+/// list is carried: a list inside a figure inside a list item is the
+/// figure's, not the item's.
+///
+/// Only elements that enclose the list in the source count (see
+/// [`Open::encloses`]): a float's body is drawn away from its tags, possibly
+/// while a list written elsewhere is still open around it.
 fn list_scope(inner: &Content) -> ListScope {
     let elem = inner.elem();
     if elem == ListElem::ELEM
@@ -161,11 +166,7 @@ fn list_scope(inner: &Content) -> ListScope {
         || elem == FootnoteEntry::ELEM
     {
         ListScope::Carrier
-    } else if elem == FigureElem::ELEM
-        // A `place` that does not float is laid out where it is written,
-        // inside its real ancestors.
-        || is_float(inner)
-    {
+    } else if elem == FigureElem::ELEM {
         ListScope::Barrier
     } else {
         ListScope::Transparent
@@ -194,6 +195,9 @@ struct Float {
     /// float (a string passed through `upper`, `text`…, a body built from an
     /// earlier `#let`), which only its words can identify.
     text: String,
+    /// The elements open where the `place` is written: what it really sits
+    /// in, unlike what is open where its body is drawn.
+    ancestors: FxHashSet<Location>,
 }
 
 impl Float {
@@ -228,10 +232,15 @@ impl Float {
 /// A separate pass, because a float is drawn away from its tags: they open
 /// and close where it is written, and its body lands wherever it fits —
 /// possibly before them, at the top of the page.
-fn floats(frame: &Frame, engine: &Engine, out: &mut Vec<Float>) {
+fn floats(
+    frame: &Frame,
+    engine: &Engine,
+    open: &mut Vec<Location>,
+    out: &mut Vec<Float>,
+) {
     for (_, item) in frame.items() {
         match item {
-            FrameItem::Group(group) => floats(&group.frame, engine, out),
+            FrameItem::Group(group) => floats(&group.frame, engine, open, out),
             FrameItem::Tag(Tag::Start(inner, _)) => {
                 if is_float(inner)
                     && let Some(place) = inner.to_packed::<PlaceElem>()
@@ -240,11 +249,49 @@ fn floats(frame: &Frame, engine: &Engine, out: &mut Vec<Float>) {
                         range: float_range(engine, inner),
                         body: body_spans(&place.body),
                         text: paragraphs_text(&place.body),
+                        ancestors: open.iter().copied().collect(),
                     });
+                }
+                if let Some(location) = inner.location() {
+                    open.push(location);
+                }
+            }
+            // As in `walk`, pop to the matching start.
+            FrameItem::Tag(Tag::End(location, ..)) => {
+                if let Some(index) = open.iter().rposition(|open| open == location) {
+                    open.truncate(index);
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// The document's floats, with an index from the spans of their bodies.
+struct Floats {
+    all: Vec<Float>,
+    /// Which floats' bodies hold each span (see [`body_spans`]). Usually
+    /// one; several when the same content is the body of several floats.
+    by_span: FxHashMap<Span, Vec<usize>>,
+}
+
+impl Floats {
+    fn new(all: Vec<Float>) -> Self {
+        let mut by_span: FxHashMap<Span, Vec<usize>> = FxHashMap::default();
+        for (index, float) in all.iter().enumerate() {
+            // Each span's list is filled in float order whatever order the
+            // set yields its spans in.
+            #[allow(clippy::iter_over_hash_type)]
+            for span in &float.body {
+                by_span.entry(*span).or_default().push(index);
+            }
+        }
+        Self { all, by_span }
+    }
+
+    /// The floats whose body holds the element written at `span`.
+    fn holding(&self, span: Span) -> &[usize] {
+        self.by_span.get(&span).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -313,6 +360,9 @@ fn paragraphs_text(body: &Content) -> String {
 /// A tag that is currently open while walking the frames.
 struct Open {
     location: Location,
+    /// The floats whose body holds this element's own span (see
+    /// [`Floats::holding`]). Empty for the document's flow.
+    floats: Vec<usize>,
     /// What a nested paragraph is tested against for being part of this one.
     /// `None` for non-paragraphs.
     par: Option<OpenPar>,
@@ -354,6 +404,35 @@ struct OpenPar {
     body_of: Vec<usize>,
 }
 
+impl Open {
+    /// Whether this open element can be what an element held by `floats`
+    /// was written in.
+    ///
+    /// A float's tags open and close where it is written, and its body is
+    /// drawn wherever it fits — possibly while a list, a quote or a table
+    /// written elsewhere spans the page and is still open around it in the
+    /// frames. Taking that for nesting would lose the float's list (taken
+    /// for nested items) or its paragraphs (taken for the container's own
+    /// text). So an element its own span puts in some float's body is only
+    /// enclosed by elements of that same body, or by an element the float
+    /// itself is written in — a list item holding the `place` renders its
+    /// text.
+    ///
+    /// The test is one-sided. An element whose span says nothing (a body
+    /// built by a show rule, detached text) keeps whatever is open around
+    /// it, as does everything in the flow: flow content is never drawn
+    /// inside a float's body. Content reused both in the flow and in a
+    /// float maps to that float, so its flow copy may be emitted on its own
+    /// as well — a duplicate, not a loss.
+    fn encloses(&self, floats: &Floats, held_by: &[usize]) -> bool {
+        held_by.is_empty()
+            || held_by.iter().any(|index| {
+                self.floats.contains(index)
+                    || floats.all[*index].ancestors.contains(&self.location)
+            })
+    }
+}
+
 impl OpenPar {
     fn text(&self) -> &str {
         self.text.get_or_init(|| normalized_text(&self.content))
@@ -363,7 +442,7 @@ impl OpenPar {
 fn walk(
     frame: &Frame,
     engine: &Engine,
-    floats: &[Float],
+    floats: &Floats,
     stack: &mut Vec<Open>,
     ancestry: &mut Ancestry,
 ) {
@@ -376,6 +455,7 @@ fn walk(
             FrameItem::Tag(Tag::Start(inner, _)) => {
                 let Some(location) = inner.location() else { continue };
                 let is_par = inner.elem() == ParElem::ELEM;
+                let in_floats = floats.holding(inner.span()).to_vec();
 
                 let par = is_par.then(|| {
                     let mut par = OpenPar {
@@ -386,7 +466,7 @@ fn walk(
                         floats_by_source: Vec::new(),
                         body_of: Vec::new(),
                     };
-                    for (index, float) in floats.iter().enumerate() {
+                    for (index, float) in floats.all.iter().enumerate() {
                         let by_range = float.holds_by_range(&par);
                         let by_text = float.holds_by_text(&par);
                         if by_range || by_text {
@@ -412,12 +492,16 @@ fn walk(
                 if stack.iter().any(|open| open.is_artifact) {
                     ancestry.in_artifact.insert(location);
                 }
-                if stack.iter().any(|open| open.is_container) {
+                if stack
+                    .iter()
+                    .any(|open| open.is_container && open.encloses(floats, &in_floats))
+                {
                     ancestry.in_container.insert(location);
                 }
                 if stack
                     .iter()
                     .rev()
+                    .filter(|open| open.encloses(floats, &in_floats))
                     .map(|open| open.list_scope)
                     .find(|scope| *scope != ListScope::Transparent)
                     == Some(ListScope::Carrier)
@@ -427,6 +511,7 @@ fn walk(
 
                 stack.push(Open {
                     location,
+                    floats: in_floats,
                     par,
                     is_artifact: inner.elem() == ArtifactElem::ELEM,
                     is_container: is_emitted_container(inner.elem()),
