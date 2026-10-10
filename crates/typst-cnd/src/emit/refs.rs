@@ -1,5 +1,4 @@
 use ecow::eco_vec;
-use std::ops::ControlFlow;
 use typst_library::foundations::{Content, Label, NativeElement, Selector};
 use typst_library::introspection::Introspector;
 use typst_library::math::EquationElem;
@@ -269,7 +268,9 @@ fn ref_edges_from_content(content: &Content) -> Vec<(RefSourceKind, usize, Label
     let mut current: Option<(RefSourceKind, usize)> = None;
     let mut par_index = 0_usize;
     let mut heading_index = 0_usize;
-    let _ = content.traverse(&mut |element| {
+    // Decorative content emits no node, so its paragraphs and headings are
+    // not counted, and its references yield no edge.
+    crate::emit::extract::traverse_kept(content, &mut |element| {
         if element.to_packed::<ParElem>().is_some() {
             current = Some((RefSourceKind::Paragraph, par_index));
             par_index += 1;
@@ -281,7 +282,6 @@ fn ref_edges_from_content(content: &Content) -> Vec<(RefSourceKind, usize, Label
         {
             out.push((kind, index, reference.target));
         }
-        ControlFlow::<()>::Continue(())
     });
     out
 }
@@ -349,6 +349,14 @@ fn resolve_label(
     }
 
     let content = introspector.query_label(label).ok()?;
+    // A label on decorative content names nothing (cnd-sdk spec §2): no
+    // fallback below may hand its references to some other node.
+    if content
+        .location()
+        .is_some_and(|loc| ctx.artifact_locations.contains(&loc))
+    {
+        return None;
+    }
     if let Some(loc) = content.location()
         && let Some(id) = ctx.location_to_id.get(&loc).copied()
     {

@@ -2354,3 +2354,153 @@ fn a_figure_around_a_helper_drawing_keeps_its_caption_and_image() {
     // the figure's child is the decorative grid with empty cells, and the
     // label text (HA1) is lost.
 }
+
+/// Content wrapped in `pdf.artifact` is decorative and never reaches the CND
+/// (cnd-sdk spec §2, "Decorative content"): no node of any kind, no `refs`
+/// edge to a label inside it, no footnote pool entry or edge for a footnote
+/// written inside it — not even through a kept re-reference — and no
+/// footnote or citation edge from a marker written inside it.
+#[test]
+fn decorative_content_is_never_emitted() {
+    let cnd = cnd_for_example("decorative_content.typ");
+    assert_pool_refs_resolve(&cnd);
+
+    let json = serde_json::to_string(&cnd).unwrap();
+    assert!(
+        !json.to_lowercase().contains("ornament"),
+        "decorative content reached the CND: {json}"
+    );
+
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    for expected in ["Kept paragraph.", "Inline word kept."] {
+        assert!(
+            paragraphs.iter().any(|p| p == expected),
+            "kept paragraph {expected:?} missing: {paragraphs:?}"
+        );
+    }
+    assert!(
+        paragraphs.iter().any(|p| p.starts_with("Kept text refers to")),
+        "the paragraph referring to decorative labels is kept: {paragraphs:?}"
+    );
+
+    let notes: Vec<&str> = cnd.footnotes.iter().map(|f| f.text.as_str()).collect();
+    assert_eq!(notes, ["Kept note."], "only the kept footnote is pooled");
+    assert_eq!(
+        cnd.footnotes[0].label, "3",
+        "a kept footnote keeps the ordinal the page shows"
+    );
+    let mut edges = Vec::new();
+    collect_footnote_labels(&cnd.nodes, &mut edges);
+    assert_eq!(
+        edges,
+        ["3"],
+        "one footnote edge, from the kept marker; none from decorative markers"
+    );
+
+    // `refs` labels and `links` hrefs are part of the JSON checked above, so
+    // a decorative `@kept-fig` or `#link(..)` would surface as an edge to
+    // "kept-fig" here: the only node pointing at the kept figure is none.
+    assert_eq!(
+        incoming_count(&cnd.nodes, "kept-fig"),
+        0,
+        "a reference or link written in decorative content adds no edge"
+    );
+    assert!(
+        paragraphs.iter().any(|p| p == "Kept reused words."),
+        "content reused in a decorative float stays where it is kept: {paragraphs:?}"
+    );
+    assert!(
+        paragraphs.iter().any(|p| p == "Kept after the decorative block."),
+        "the paragraph after a decorative block is kept: {paragraphs:?}"
+    );
+
+    let cites = cites_of_paragraph(&cnd.nodes, "Kept cites")
+        .expect("the citing paragraph is kept");
+    assert_eq!(cites, ["smith2024"], "a decorative citation adds no edge");
+}
+
+fn cites_of_paragraph(nodes: &[CndNode], prefix: &str) -> Option<Vec<String>> {
+    nodes.iter().find_map(|node| match node {
+        CndNode::Paragraph(p) if p.text.starts_with(prefix) => {
+            Some(p.base.cites.iter().map(|c| c.label.clone()).collect())
+        }
+        CndNode::Heading(h) => cites_of_paragraph(&h.children, prefix),
+        _ => None,
+    })
+}
+
+fn collect_footnote_labels(nodes: &[CndNode], out: &mut Vec<String>) {
+    for node in nodes {
+        out.extend(node.base().footnotes.iter().map(|r| r.label.clone()));
+        match node {
+            CndNode::Heading(h) => collect_footnote_labels(&h.children, out),
+            CndNode::Figure(f) => collect_footnote_labels(&f.children, out),
+            _ => {}
+        }
+    }
+}
+
+/// A decorative float whose `place` comes from a helper must not take kept
+/// text with it, nor leak: its source range spans the paragraphs written
+/// between the helper and the call, and content reused from a `#let` shares
+/// its spans. A float nested in a decorative one is decorative too, and so is
+/// a heading a show rule wraps in an artifact.
+#[test]
+fn decorative_float_helpers_never_drop_kept_text() {
+    let cnd = cnd_for_example("decorative_float_helpers.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    for expected in [
+        "Kept alpha paragraph.",
+        "Kept beta paragraph.",
+        "Kept gamma paragraph.",
+        "Kept aside words.",
+        "Kept delta between.",
+        "Kept end.",
+    ] {
+        assert!(
+            paragraphs.iter().any(|p| p == expected),
+            "kept paragraph {expected:?} lost: {paragraphs:?}"
+        );
+    }
+    let json = serde_json::to_string(&cnd).unwrap();
+    for kept in ["Kept list item", "Kept reused item", "Kept reused cell"] {
+        assert!(json.contains(kept), "kept content {kept:?} lost: {json}");
+    }
+    assert_eq!(
+        json.matches("Kept reused item").count(),
+        1,
+        "the decorative float's copy of a `#let` is dropped, the kept one stays"
+    );
+    assert_eq!(
+        json.matches("Shared item").count(),
+        1,
+        "a `#let` in a kept float and in a decorative block appears once"
+    );
+    assert!(!json.contains("Ornament"), "decorative content leaked: {json}");
+}
+
+/// A kept float drawn while a multi-page artifact is still open in the
+/// frames stays kept, and content written inside a decorative float but
+/// shown in the flow through `metadata` or `state` is kept where it shows.
+#[test]
+fn decorative_multipage_keeps_flow_and_kept_floats() {
+    let cnd = cnd_for_example("decorative_multipage.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    for expected in [
+        "Kept intro.",
+        "Kept via metadata query.",
+        "Kept via state.",
+        "Kept float paragraph written after.",
+        "Kept end.",
+    ] {
+        assert!(
+            paragraphs.iter().any(|p| p == expected),
+            "kept paragraph {expected:?} lost: {paragraphs:?}"
+        );
+    }
+    let json = serde_json::to_string(&cnd).unwrap();
+    for kept in ["Kept context float item", "Kept context cell"] {
+        assert!(json.contains(kept), "kept float content {kept:?} lost: {json}");
+    }
+    assert!(!json.contains("Ornament"), "decorative content leaked: {json}");
+}

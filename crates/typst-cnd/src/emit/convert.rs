@@ -88,6 +88,10 @@ pub struct ConvertContext {
     /// keep citation keys out of the cross-reference index (a `@key`
     /// citation is a `RefElem` but resolves in the bibliography, not nodes).
     pub bib_key_to_id: rustc_hash::FxHashMap<Label, Uuid>,
+    /// Locations inside a PDF artifact (see `Ancestry::is_artifact`). A
+    /// label on decorative content names nothing in the CND (cnd-sdk spec
+    /// §2), so `refs::resolve_label` must not fall back to another node.
+    pub artifact_locations: rustc_hash::FxHashSet<Location>,
 }
 
 impl ConvertContext {
@@ -548,11 +552,10 @@ pub fn finalize_headings(ctx: &mut ConvertContext, stack: &mut Vec<HeadingFrame>
 
 pub fn collect_ref_targets(content: &Content) -> Vec<Label> {
     let mut labels = Vec::new();
-    let _ = content.traverse(&mut |element| {
+    extract::traverse_kept(content, &mut |element| {
         if let Some(reference) = element.to_packed::<RefElem>() {
             labels.push(reference.target);
         }
-        ControlFlow::<()>::Continue(())
     });
     labels.sort_by_key(|label| label.resolve().to_string());
     labels.dedup_by_key(|label| label.resolve());
@@ -576,13 +579,12 @@ pub fn collect_ref_targets(content: &Content) -> Vec<Label> {
 /// lists additively (unlike cite/footnote's single, location-keyed list).
 fn collect_link_targets(content: &Content) -> Vec<LinkDest> {
     let mut out = Vec::new();
-    let _ = content.traverse(&mut |element| {
+    extract::traverse_kept(content, &mut |element| {
         if let Some(link) = element.to_packed::<LinkElem>()
             && let Some(dest) = extract::link_dest(&link.dest)
         {
             out.push(dest);
         }
-        ControlFlow::<()>::Continue(())
     });
     out
 }

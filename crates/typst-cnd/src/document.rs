@@ -94,6 +94,7 @@ impl Output for CndDocument {
             &info,
             &ancestry,
         )?;
+        ctx.artifact_locations = ancestry.artifact_locations().clone();
         refs::rebuild_label_index(&mut ctx, introspector.as_ref());
         convert::apply_metadata(&mut ctx);
 
@@ -111,8 +112,14 @@ impl Output for CndDocument {
         // markers were captured per node during conversion (as introspection
         // tags, since the realized flow keeps only rendered markers); resolve
         // them to FootnoteRef/CiteRef edges against the pools.
-        pools::resolve_footnotes(engine, introspector.as_ref(), styles, &mut ctx)?;
-        pools::resolve_cite_edges(&mut ctx);
+        pools::resolve_footnotes(
+            engine,
+            introspector.as_ref(),
+            styles,
+            &ancestry,
+            &mut ctx,
+        )?;
+        pools::resolve_cite_edges(&mut ctx, &ancestry);
 
         let footnotes = ctx.footnotes.clone();
         let bibliography = ctx.bibliography.clone();

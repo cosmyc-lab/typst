@@ -20,6 +20,7 @@ use typst_library::introspection::{Counter, Introspector};
 use typst_library::model::{BibliographyElem, FootnoteElem, RenderedEntry, Works};
 use uuid::Uuid;
 
+use crate::emit::ancestry::Ancestry;
 use crate::emit::convert::ConvertContext;
 use crate::emit::extract::extract_text;
 use crate::emit::refs::find_node_mut;
@@ -33,10 +34,16 @@ use crate::model::{BibEntry, CiteRef, Footnote, FootnoteRef};
 /// re-reference reuses the original's pool id, so several markers point at
 /// one entry. Pool order is the introspector's document order; each entry's
 /// `label` is the rendered footnote ordinal and `text` is the flat body.
+///
+/// A footnote declared inside a PDF artifact is decorative (cnd-sdk spec §2):
+/// it gets no pool entry, so neither its own marker nor a kept re-reference
+/// to it resolves to an edge. A re-reference written inside an artifact
+/// resolves to nothing either, even to a kept footnote.
 pub fn resolve_footnotes(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     styles: StyleChain,
+    ancestry: &Ancestry,
     ctx: &mut ConvertContext,
 ) -> typst_library::diag::SourceResult<()> {
     let counter = Counter::of(FootnoteElem::ELEM);
@@ -55,6 +62,9 @@ pub fn resolve_footnotes(
         let Some(own_loc) = footnote.location() else {
             continue;
         };
+        if ancestry.is_artifact(own_loc) {
+            continue;
+        }
         let id = *ctx.footnote_loc_to_id.entry(own_loc).or_insert_with(Uuid::new_v4);
         if !ctx.footnotes.iter().any(|f| f.id == id) {
             let text =
@@ -76,6 +86,9 @@ pub fn resolve_footnotes(
         let Some(own_loc) = footnote.location() else {
             continue;
         };
+        if ancestry.is_artifact(own_loc) {
+            continue;
+        }
         let Ok(decl_loc) = footnote.declaration_location(engine) else {
             continue;
         };
@@ -188,10 +201,16 @@ type FootnoteEdge = (Uuid, Uuid, Option<(i64, i64)>);
 /// marker's text span is carried through, except for a suppressed
 /// (`form: "none"`) citation, which renders no text and so has no span
 /// (ADR 0013 / proposal 0004).
-pub fn resolve_cite_edges(ctx: &mut ConvertContext) {
+///
+/// A citation written inside a PDF artifact is decorative (cnd-sdk spec §2)
+/// and yields no edge.
+pub fn resolve_cite_edges(ctx: &mut ConvertContext, ancestry: &Ancestry) {
     let mut edges: Vec<(Uuid, CiteRef)> = Vec::new();
     for (node_id, record) in ctx.records_sorted() {
         for marker in &record.cite_markers {
+            if ancestry.is_artifact(marker.loc) {
+                continue;
+            }
             // The edge names its target by label now, but the lookup still
             // gates it: a `@key` with no bibliography entry must not
             // produce an unresolvable `cites` edge.
