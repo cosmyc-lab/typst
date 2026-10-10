@@ -24,8 +24,8 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{
     Content, Element, NativeElement, SequenceElem, StyleChain,
 };
-use typst_library::introspection::{Location, Tag, TagElem};
-use typst_library::layout::{Frame, FrameItem, PlaceElem};
+use typst_library::introspection::{Introspector, Location, Tag};
+use typst_library::layout::{Frame, FrameItem, GroupItem, PlaceElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
     ArtifactElem, BibliographyElem, EnumElem, FigureElem, FootnoteEntry, HeadingElem,
@@ -66,14 +66,22 @@ impl Ancestry {
         let mut found = Vec::new();
         // Tags stay open across pages, as in `walk`.
         let mut open = Vec::new();
-        let mut artifacts = FxHashSet::default();
         for page in paged.pages() {
-            floats(&page.frame, engine, &mut open, &mut artifacts, &mut found);
+            floats(&page.frame, engine, &mut open, &mut found);
         }
         let floats = Floats::new(found);
+        let places = FloatPlaces::of(paged);
         let mut stack: Vec<Open> = Vec::new();
         for page in paged.pages() {
-            walk(&page.frame, engine, &floats, &mut stack, &mut ancestry);
+            walk(
+                &page.frame,
+                engine,
+                &floats,
+                &places,
+                DrawScope::FLOW,
+                &mut stack,
+                &mut ancestry,
+            );
         }
         ancestry
     }
@@ -204,56 +212,6 @@ struct Float {
     /// The elements open where the `place` is written: what it really sits
     /// in, unlike what is open where its body is drawn.
     ancestors: FxHashSet<Location>,
-    /// Where the body of a float written inside a PDF artifact is written,
-    /// when that is certain (see [`decorative_range`]). Its body is drawn
-    /// away from the artifact's tags, so only this says that what the
-    /// float holds is decorative too (cnd-sdk spec §2).
-    decorative: Option<SourceRange>,
-}
-
-/// Whether every span in `content` — introspection tags' elements included —
-/// that has a source position lies inside `call`.
-fn spans_within(engine: &Engine, content: &Content, call: SourceRange) -> bool {
-    let inside =
-        |span: Span| source_range(engine, span).is_none_or(|r| contains(call, r));
-    content
-        .traverse(&mut |element| {
-            let tagged =
-                element.to_packed::<TagElem>().is_none_or(|tag| match &tag.tag {
-                    Tag::Start(inner, _) => inside(inner.span()),
-                    Tag::End(..) => true,
-                });
-            if tagged && inside(element.span()) {
-                ControlFlow::Continue(())
-            } else {
-                ControlFlow::Break(())
-            }
-        })
-        .is_continue()
-}
-
-/// The source of a float written inside a PDF artifact, if the `place` call
-/// itself spells out its whole body: `#pdf.artifact(place(top, float: true)[…])`.
-///
-/// Anything written inside that call is the float's own, decorative content.
-/// A float whose body comes from elsewhere — a helper's `place` with the body
-/// passed in, a `#let` shown again — has a [`float_range`] that reaches
-/// across other text, or a body written outside the call: no range proves
-/// which content is decorative then, so none is claimed, and kept text is
-/// never at stake. Such a float's content is emitted (a leak, not a loss).
-fn decorative_range(engine: &Engine, place: &Content) -> Option<SourceRange> {
-    let call = source_range(engine, place.span())?;
-    let mut compact = true;
-    let _ = place.traverse(&mut |element| {
-        if let Some(found) = source_range(engine, element.span())
-            && !contains(call, found)
-        {
-            compact = false;
-            return ControlFlow::Break(());
-        }
-        ControlFlow::Continue(())
-    });
-    compact.then_some(call)
 }
 
 impl Float {
@@ -295,12 +253,11 @@ fn floats(
     frame: &Frame,
     engine: &Engine,
     open: &mut Vec<Location>,
-    artifacts: &mut FxHashSet<Location>,
     out: &mut Vec<Float>,
 ) {
     for (_, item) in frame.items() {
         match item {
-            FrameItem::Group(group) => floats(&group.frame, engine, open, artifacts, out),
+            FrameItem::Group(group) => floats(&group.frame, engine, open, out),
             FrameItem::Tag(Tag::Start(inner, _)) => {
                 if is_float(inner)
                     && let Some(place) = inner.to_packed::<PlaceElem>()
@@ -310,17 +267,9 @@ fn floats(
                         body: body_spans(&place.body),
                         text: paragraphs_text(&place.body),
                         ancestors: open.iter().copied().collect(),
-                        decorative: open
-                            .iter()
-                            .any(|open| artifacts.contains(open))
-                            .then(|| decorative_range(engine, inner))
-                            .flatten(),
                     });
                 }
                 if let Some(location) = inner.location() {
-                    if inner.elem() == ArtifactElem::ELEM {
-                        artifacts.insert(location);
-                    }
                     open.push(location);
                 }
             }
@@ -340,10 +289,6 @@ fn floats(
 /// thousands of each.
 struct Floats {
     all: Vec<Float>,
-    /// The source ranges of the floats written inside a PDF artifact whose
-    /// whole body is written inside their `place` call (see
-    /// [`decorative_range`]). Usually empty.
-    decorative: Vec<SourceRange>,
     /// Which floats' bodies hold each span (see [`body_spans`]). Usually
     /// one; several when the same content is the body of several floats.
     by_span: FxHashMap<Span, Vec<usize>>,
@@ -400,8 +345,7 @@ impl Floats {
                 entry.reach = reach;
             }
         }
-        let decorative = all.iter().filter_map(|float| float.decorative).collect();
-        Self { all, decorative, by_span, by_start, by_word }
+        Self { all, by_span, by_start, by_word }
     }
 
     /// The floats whose body holds the element written at `span`.
@@ -522,12 +466,6 @@ fn paragraphs_text(body: &Content) -> String {
 /// A tag that is currently open while walking the frames.
 struct Open {
     location: Location,
-    /// The element's own source range, if its span has one.
-    range: Option<SourceRange>,
-    /// The floats an artifact open around this element must enclose (see
-    /// [`Open::encloses`]) for the element to be decorative: a paragraph's
-    /// sure floats, else the floats its span puts it in.
-    held_by: Vec<usize>,
     /// The floats whose body holds this element's own span (see
     /// [`Floats::holding`]). Empty for the document's flow.
     floats: Vec<usize>,
@@ -542,6 +480,10 @@ struct Open {
     /// is page furniture, whichever way the two tags happen to nest.
     glyphs_in_artifact: u32,
     glyphs_outside_artifact: u32,
+    /// Whether this element becomes a node made of text alone — a paragraph,
+    /// a heading, a list, a term list, a quote — so that drawing all of its
+    /// text inside artifacts makes it decorative (see [`is_text_node`]).
+    is_text_node: bool,
 }
 
 /// An open paragraph, as [`covering_par`] needs it.
@@ -607,10 +549,161 @@ impl OpenPar {
     }
 }
 
+/// Whether `inner` becomes a node made of text alone. When every glyph such
+/// an element draws lies inside artifacts — a show rule that wraps a heading
+/// in `pdf.artifact`, whose own tags then sit outside the artifact — it is
+/// decorative. A figure or a table is left out: it may hold an image whose
+/// meaning no glyph count sees.
+fn is_text_node(inner: &Content) -> bool {
+    let elem = inner.elem();
+    elem == HeadingElem::ELEM
+        || elem == ListElem::ELEM
+        || elem == EnumElem::ELEM
+        || elem == TermsElem::ELEM
+        || elem == QuoteElem::ELEM
+}
+
+/// The document's floating `place`s, by location, and which of them are
+/// decorative: written inside a PDF artifact, or inside the body of a
+/// decorative float.
+struct FloatPlaces {
+    all: FxHashSet<Location>,
+    decorative: FxHashSet<Location>,
+}
+
+impl FloatPlaces {
+    fn of(paged: &typst_layout::PagedDocument) -> Self {
+        let all: FxHashSet<Location> = paged
+            .introspector()
+            .query(&PlaceElem::ELEM.select())
+            .iter()
+            .filter(|place| is_float(place))
+            .filter_map(|place| place.location())
+            .collect();
+        if all.is_empty() {
+            return Self { all, decorative: FxHashSet::default() };
+        }
+
+        // Where each float is written: inside an artifact opened in its own
+        // body scope, and inside which float's body, if any.
+        let mut written: FxHashMap<Location, (bool, Option<Location>)> =
+            FxHashMap::default();
+        let mut open: Vec<(Location, bool)> = Vec::new();
+        for page in paged.pages() {
+            Self::scan(&page.frame, &all, 0, None, &mut open, &mut written);
+        }
+
+        fn decorative_place(
+            place: Location,
+            written: &FxHashMap<Location, (bool, Option<Location>)>,
+            depth: usize,
+        ) -> bool {
+            match written.get(&place) {
+                Some((true, _)) => true,
+                Some((false, Some(outer))) if depth < 64 => {
+                    decorative_place(*outer, written, depth + 1)
+                }
+                _ => false,
+            }
+        }
+        let decorative = all
+            .iter()
+            .copied()
+            .filter(|place| decorative_place(*place, &written, 0))
+            .collect();
+        Self { all, decorative }
+    }
+
+    fn scan(
+        frame: &Frame,
+        all: &FxHashSet<Location>,
+        base: usize,
+        body_of: Option<Location>,
+        open: &mut Vec<(Location, bool)>,
+        written: &mut FxHashMap<Location, (bool, Option<Location>)>,
+    ) {
+        for (_, item) in frame.items() {
+            match item {
+                FrameItem::Group(group) => match group.parent {
+                    Some(parent) if all.contains(&parent.location) => Self::scan(
+                        &group.frame,
+                        all,
+                        open.len(),
+                        Some(parent.location),
+                        open,
+                        written,
+                    ),
+                    _ => Self::scan(&group.frame, all, base, body_of, open, written),
+                },
+                FrameItem::Tag(Tag::Start(inner, _)) => {
+                    let Some(location) = inner.location() else { continue };
+                    if all.contains(&location) {
+                        let in_artifact = open
+                            .get(base.min(open.len())..)
+                            .is_some_and(|open| open.iter().any(|(_, art)| *art));
+                        written.insert(location, (in_artifact, body_of));
+                    }
+                    open.push((location, inner.elem() == ArtifactElem::ELEM));
+                }
+                FrameItem::Tag(Tag::End(location, ..)) => {
+                    if let Some(index) =
+                        open.iter().rposition(|(open, _)| open == location)
+                    {
+                        open.truncate(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Where frame content is drawn, as far as decoration goes (cnd-sdk spec §2,
+/// "Decorative content").
+///
+/// A float's body is not drawn between its `place` tags but in a group of its
+/// own, at the top or bottom of the page, which layout marks with the float
+/// as its logical parent ([`FrameParent`]). Inside that group, what is open
+/// on the stack from the page's flow — a long artifact still open across the
+/// page break, say — has nothing to do with the body: the body is decorative
+/// exactly when its `place` was written inside an artifact (see
+/// [`decorative_floats`]), or when an artifact opens inside the body itself.
+#[derive(Debug, Clone, Copy)]
+struct DrawScope {
+    /// Inside the body of a float written inside an artifact.
+    decorative: bool,
+    /// The stack depth where the current float body starts; `0` in the flow.
+    base: usize,
+}
+
+impl DrawScope {
+    const FLOW: Self = Self { decorative: false, base: 0 };
+
+    /// The scope of a group's content: a float's body starts afresh.
+    fn enter(self, group: &GroupItem, places: &FloatPlaces, depth: usize) -> Self {
+        match group.parent {
+            Some(parent) if places.all.contains(&parent.location) => Self {
+                decorative: places.decorative.contains(&parent.location),
+                base: depth,
+            },
+            _ => self,
+        }
+    }
+
+    /// Whether what is drawn here, with `stack` open, is decorative.
+    fn in_artifact(self, stack: &[Open]) -> bool {
+        self.decorative
+            || stack
+                .get(self.base.min(stack.len())..)
+                .is_some_and(|open| open.iter().any(|open| open.is_artifact))
+    }
+}
 fn walk(
     frame: &Frame,
     engine: &Engine,
     floats: &Floats,
+    places: &FloatPlaces,
+    scope: DrawScope,
     stack: &mut Vec<Open>,
     ancestry: &mut Ancestry,
 ) {
@@ -618,7 +711,8 @@ fn walk(
         match item {
             // Depth-first keeps the tag stream in document order.
             FrameItem::Group(group) => {
-                walk(&group.frame, engine, floats, stack, ancestry);
+                let scope = scope.enter(group, places, stack.len());
+                walk(&group.frame, engine, floats, places, scope, stack, ancestry);
             }
             FrameItem::Tag(Tag::Start(inner, _)) => {
                 let Some(location) = inner.location() else { continue };
@@ -661,47 +755,7 @@ fn walk(
                 {
                     ancestry.covered_by_par.insert(location, parent);
                 }
-                let held_by = match &par {
-                    Some(par) if !par.floats_by_source.is_empty() => {
-                        par.floats_by_source.clone()
-                    }
-                    _ => in_floats.clone(),
-                };
-                let range = source_range(engine, inner.span());
-                // An artifact open in the frames encloses this element only as
-                // `encloses` says: a kept float drawn at the top of a page
-                // while a long artifact is still open is not decorative.
-                let in_open_artifact = stack
-                    .iter()
-                    .any(|open| open.is_artifact && open.encloses(floats, &held_by));
-                // A float written inside an artifact is drawn away from it:
-                // what is written inside such a float's own `place` call is
-                // decorative too (see [`decorative_range`]), but only where it
-                // is drawn as that float's body. Content written there and
-                // shown in the flow — a `metadata` value queried, a `state`
-                // read in `context` — carries a span from outside the call
-                // (the `context`) in itself or around it, so every span in
-                // the element and every open ancestor's must lie inside the
-                // call too.
-                let held_by_artifact_float = !floats.decorative.is_empty()
-                    && match &par {
-                        Some(par) => par.range,
-                        None => range,
-                    }
-                    .and_then(|range| {
-                        floats
-                            .decorative
-                            .iter()
-                            .copied()
-                            .find(|outer| contains(*outer, range))
-                    })
-                    .is_some_and(|call| {
-                        stack
-                            .iter()
-                            .all(|open| open.range.is_none_or(|r| contains(call, r)))
-                            && spans_within(engine, inner, call)
-                    });
-                if held_by_artifact_float || in_open_artifact {
+                if scope.in_artifact(stack) {
                     ancestry.in_artifact.insert(location);
                 }
                 if stack
@@ -723,16 +777,14 @@ fn walk(
 
                 stack.push(Open {
                     location,
-                    range,
-                    held_by,
                     floats: in_floats,
                     par,
-                    is_artifact: inner.elem() == ArtifactElem::ELEM
-                        || held_by_artifact_float,
+                    is_artifact: inner.elem() == ArtifactElem::ELEM,
                     is_container: is_emitted_container(inner.elem()),
                     list_scope: list_scope(inner),
                     glyphs_in_artifact: 0,
                     glyphs_outside_artifact: 0,
+                    is_text_node: is_par || is_text_node(inner),
                 });
             }
             FrameItem::Tag(Tag::End(location, ..)) => {
@@ -743,7 +795,7 @@ fn walk(
                     stack.iter().rposition(|open| open.location == *location)
                 {
                     for open in stack.drain(index..) {
-                        if open.par.is_some()
+                        if open.is_text_node
                             && open.glyphs_outside_artifact == 0
                             && open.glyphs_in_artifact > 0
                         {
@@ -753,22 +805,8 @@ fn walk(
                 }
             }
             FrameItem::Text(_) => {
-                // Per paragraph: an artifact open in the frames only counts
-                // for a paragraph it encloses (see above).
-                let any_artifact = stack.iter().any(|open| open.is_artifact);
-                let in_artifact: Vec<bool> = stack
-                    .iter()
-                    .map(|par| {
-                        any_artifact
-                            && stack.iter().any(|open| {
-                                open.is_artifact && open.encloses(floats, &par.held_by)
-                            })
-                    })
-                    .collect();
-                for (open, in_artifact) in stack.iter_mut().zip(in_artifact) {
-                    if open.par.is_none() {
-                        continue;
-                    }
+                let in_artifact = scope.in_artifact(stack);
+                for open in stack.iter_mut().filter(|open| open.is_text_node) {
                     if in_artifact {
                         open.glyphs_in_artifact += 1;
                     } else {

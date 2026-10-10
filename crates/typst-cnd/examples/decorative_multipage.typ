@@ -22,4 +22,12 @@ Kept intro.
 ]]
 #place(top, float: true)[Kept float paragraph written after.]
 
+#pdf.artifact[#for i in range(25) [Ornament second run #i.
+
+]]
+#place(top, float: true)[#context [
+  - Kept context float item
+  #table(columns: 1, [Kept context cell])
+]]
+
 Kept end.

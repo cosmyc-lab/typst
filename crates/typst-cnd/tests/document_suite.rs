@@ -2441,9 +2441,10 @@ fn collect_footnote_labels(nodes: &[CndNode], out: &mut Vec<String>) {
 }
 
 /// A decorative float whose `place` comes from a helper must not take kept
-/// text with it: its source range spans the paragraphs written between the
-/// helper and the call, and content reused from a `#let` shares its spans.
-/// A float nested in a decorative one is decorative too.
+/// text with it, nor leak: its source range spans the paragraphs written
+/// between the helper and the call, and content reused from a `#let` shares
+/// its spans. A float nested in a decorative one is decorative too, and so is
+/// a heading a show rule wraps in an artifact.
 #[test]
 fn decorative_float_helpers_never_drop_kept_text() {
     let cnd = cnd_for_example("decorative_float_helpers.typ");
@@ -2465,10 +2466,17 @@ fn decorative_float_helpers_never_drop_kept_text() {
     for kept in ["Kept list item", "Kept reused item", "Kept reused cell"] {
         assert!(json.contains(kept), "kept content {kept:?} lost: {json}");
     }
-    assert!(
-        !json.contains("Ornament"),
-        "a float written inside a decorative float leaked: {json}"
+    assert_eq!(
+        json.matches("Kept reused item").count(),
+        1,
+        "the decorative float's copy of a `#let` is dropped, the kept one stays"
     );
+    assert_eq!(
+        json.matches("Shared item").count(),
+        1,
+        "a `#let` in a kept float and in a decorative block appears once"
+    );
+    assert!(!json.contains("Ornament"), "decorative content leaked: {json}");
 }
 
 /// A kept float drawn while a multi-page artifact is still open in the
@@ -2491,5 +2499,8 @@ fn decorative_multipage_keeps_flow_and_kept_floats() {
         );
     }
     let json = serde_json::to_string(&cnd).unwrap();
+    for kept in ["Kept context float item", "Kept context cell"] {
+        assert!(json.contains(kept), "kept float content {kept:?} lost: {json}");
+    }
     assert!(!json.contains("Ornament"), "decorative content leaked: {json}");
 }
