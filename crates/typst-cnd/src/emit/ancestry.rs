@@ -223,7 +223,10 @@ impl Float {
 
     /// Whether `par` says nothing the float's body does not say.
     fn holds_by_text(&self, par: &OpenPar) -> bool {
-        occurs_as_words(&self.text, par.text())
+        // Most paragraphs are longer than any float's text; skipping them
+        // here spares setting up a search for each one.
+        let text = par.text();
+        text.len() <= self.text.len() && occurs_as_words(&self.text, text)
     }
 }
 
@@ -267,17 +270,35 @@ fn floats(
     }
 }
 
-/// The document's floats, with an index from the spans of their bodies.
+/// The document's floats, indexed so that a paragraph or a tag is only
+/// tested against the few floats that can hold it: a long document has
+/// thousands of each.
 struct Floats {
     all: Vec<Float>,
     /// Which floats' bodies hold each span (see [`body_spans`]). Usually
     /// one; several when the same content is the body of several floats.
     by_span: FxHashMap<Span, Vec<usize>>,
+    /// The floats with a source range, per file, sorted by where it starts.
+    by_start: FxHashMap<FileId, Vec<RangeEntry>>,
+    /// The floats whose text has each word (a maximal run of letters and
+    /// digits) in it.
+    by_word: FxHashMap<String, Vec<usize>>,
+}
+
+/// A float's source range in [`Floats::by_start`].
+struct RangeEntry {
+    start: usize,
+    end: usize,
+    /// The furthest end of this range and of every one sorted before it.
+    reach: usize,
+    index: usize,
 }
 
 impl Floats {
     fn new(all: Vec<Float>) -> Self {
         let mut by_span: FxHashMap<Span, Vec<usize>> = FxHashMap::default();
+        let mut by_start: FxHashMap<FileId, Vec<RangeEntry>> = FxHashMap::default();
+        let mut by_word: FxHashMap<String, Vec<usize>> = FxHashMap::default();
         for (index, float) in all.iter().enumerate() {
             // Each span's list is filled in float order whatever order the
             // set yields its spans in.
@@ -285,14 +306,85 @@ impl Floats {
             for span in &float.body {
                 by_span.entry(*span).or_default().push(index);
             }
+            if let Some(range) = float.range {
+                by_start.entry(range.file).or_default().push(RangeEntry {
+                    start: range.start,
+                    end: range.end,
+                    reach: range.end,
+                    index,
+                });
+            }
+            for word in words(&float.text) {
+                let floats = by_word.entry(word.to_owned()).or_default();
+                if floats.last() != Some(&index) {
+                    floats.push(index);
+                }
+            }
         }
-        Self { all, by_span }
+        // Each file's list is sorted on its own, whatever order they come in.
+        #[allow(clippy::iter_over_hash_type)]
+        for entries in by_start.values_mut() {
+            entries.sort_by_key(|entry| entry.start);
+            let mut reach = 0;
+            for entry in entries.iter_mut() {
+                reach = reach.max(entry.end);
+                entry.reach = reach;
+            }
+        }
+        Self { all, by_span, by_start, by_word }
     }
 
     /// The floats whose body holds the element written at `span`.
     fn holding(&self, span: Span) -> &[usize] {
         self.by_span.get(&span).map_or(&[], Vec::as_slice)
     }
+
+    /// The floats that may hold `par` by its range or by its words (see
+    /// [`Float::holds_by_range`], [`Float::holds_by_text`]), sorted; a
+    /// superset, which those two tests narrow down.
+    fn candidates(&self, par: &OpenPar) -> Vec<usize> {
+        let mut out = Vec::new();
+        if self.all.is_empty() {
+            return out;
+        }
+        // A float holding the paragraph's range starts at or before it, and
+        // one sorted earlier still can only if some range that far back
+        // reaches the paragraph's end.
+        if let Some(range) = par.range
+            && let Some(entries) = self.by_start.get(&range.file)
+        {
+            let after = entries.partition_point(|entry| entry.start <= range.start);
+            for entry in entries[..after].iter().rev() {
+                if entry.reach < range.end {
+                    break;
+                }
+                if entry.end >= range.end {
+                    out.push(entry.index);
+                }
+            }
+        }
+        // Text that occurs as words in a float's text has each of its own
+        // words there whole (see `occurs_as_words`), so the floats having
+        // its rarest word are enough. Text with no word at all (punctuation
+        // alone) can be anywhere.
+        let rarest = words(par.text())
+            .map(|word| self.by_word.get(word).map_or(&[][..], Vec::as_slice))
+            .min_by_key(|floats| floats.len());
+        match rarest {
+            Some(floats) => out.extend(floats),
+            None if !par.text().is_empty() => out.extend(0..self.all.len()),
+            None => {}
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+/// The maximal runs of letters and digits in `text`.
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
 }
 
 /// How far a floating `place` reaches in the source: the call itself and
@@ -466,7 +558,8 @@ fn walk(
                         floats_by_source: Vec::new(),
                         body_of: Vec::new(),
                     };
-                    for (index, float) in floats.all.iter().enumerate() {
+                    for index in floats.candidates(&par) {
+                        let float = &floats.all[index];
                         let by_range = float.holds_by_range(&par);
                         let by_text = float.holds_by_text(&par);
                         if by_range || by_text {
@@ -476,9 +569,12 @@ fn walk(
                         if sure {
                             par.floats_by_source.push(index);
                         }
-                        let in_body =
-                            float.holds_in_body(&par) || (by_text && par.range.is_none());
-                        if sure && in_body && by_text {
+                        // Traversing the paragraph is the costly test, and
+                        // rarely needed: last.
+                        if sure
+                            && by_text
+                            && (par.range.is_none() || float.holds_in_body(&par))
+                        {
                             par.body_of.push(index);
                         }
                     }
@@ -715,4 +811,32 @@ fn normalized_text(content: &Content) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{occurs_as_words, words};
+
+    /// `Floats::candidates` looks a float up by one word of the text it
+    /// searches for: wherever that text occurs as words, each of its words
+    /// must be one of the float's own.
+    #[test]
+    fn text_occurring_as_words_has_its_words_whole() {
+        for (haystack, needle) in [
+            ("Float 10 body with a few words.", "body with"),
+            ("He said “Yes indeed” twice.", "“Yes indeed”"),
+            ("(see note) and more", "(see note)"),
+            ("état-major, à l’ouest", "major, à"),
+            ("x1 y2", "y2"),
+        ] {
+            assert!(occurs_as_words(haystack, needle), "{needle:?} in {haystack:?}");
+            for word in words(needle) {
+                assert!(
+                    words(haystack).any(|own| own == word),
+                    "{word:?} must be a word of {haystack:?}"
+                );
+            }
+        }
+        assert!(!occurs_as_words("Drafting", "Draft"));
+    }
 }
