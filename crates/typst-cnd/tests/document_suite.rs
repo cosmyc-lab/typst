@@ -2470,3 +2470,26 @@ fn decorative_float_helpers_never_drop_kept_text() {
         "a float written inside a decorative float leaked: {json}"
     );
 }
+
+/// A kept float drawn while a multi-page artifact is still open in the
+/// frames stays kept, and content written inside a decorative float but
+/// shown in the flow through `metadata` or `state` is kept where it shows.
+#[test]
+fn decorative_multipage_keeps_flow_and_kept_floats() {
+    let cnd = cnd_for_example("decorative_multipage.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    for expected in [
+        "Kept intro.",
+        "Kept via metadata query.",
+        "Kept via state.",
+        "Kept float paragraph written after.",
+        "Kept end.",
+    ] {
+        assert!(
+            paragraphs.iter().any(|p| p == expected),
+            "kept paragraph {expected:?} lost: {paragraphs:?}"
+        );
+    }
+    let json = serde_json::to_string(&cnd).unwrap();
+    assert!(!json.contains("Ornament"), "decorative content leaked: {json}");
+}

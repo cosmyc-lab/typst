@@ -24,7 +24,7 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{
     Content, Element, NativeElement, SequenceElem, StyleChain,
 };
-use typst_library::introspection::{Location, Tag};
+use typst_library::introspection::{Location, Tag, TagElem};
 use typst_library::layout::{Frame, FrameItem, PlaceElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
@@ -209,6 +209,27 @@ struct Float {
     /// away from the artifact's tags, so only this says that what the
     /// float holds is decorative too (cnd-sdk spec §2).
     decorative: Option<SourceRange>,
+}
+
+/// Whether every span in `content` — introspection tags' elements included —
+/// that has a source position lies inside `call`.
+fn spans_within(engine: &Engine, content: &Content, call: SourceRange) -> bool {
+    let inside =
+        |span: Span| source_range(engine, span).is_none_or(|r| contains(call, r));
+    content
+        .traverse(&mut |element| {
+            let tagged =
+                element.to_packed::<TagElem>().is_none_or(|tag| match &tag.tag {
+                    Tag::Start(inner, _) => inside(inner.span()),
+                    Tag::End(..) => true,
+                });
+            if tagged && inside(element.span()) {
+                ControlFlow::Continue(())
+            } else {
+                ControlFlow::Break(())
+            }
+        })
+        .is_continue()
 }
 
 /// The source of a float written inside a PDF artifact, if the `place` call
@@ -501,6 +522,12 @@ fn paragraphs_text(body: &Content) -> String {
 /// A tag that is currently open while walking the frames.
 struct Open {
     location: Location,
+    /// The element's own source range, if its span has one.
+    range: Option<SourceRange>,
+    /// The floats an artifact open around this element must enclose (see
+    /// [`Open::encloses`]) for the element to be decorative: a paragraph's
+    /// sure floats, else the floats its span puts it in.
+    held_by: Vec<usize>,
     /// The floats whose body holds this element's own span (see
     /// [`Floats::holding`]). Empty for the document's flow.
     floats: Vec<usize>,
@@ -634,20 +661,47 @@ fn walk(
                 {
                     ancestry.covered_by_par.insert(location, parent);
                 }
+                let held_by = match &par {
+                    Some(par) if !par.floats_by_source.is_empty() => {
+                        par.floats_by_source.clone()
+                    }
+                    _ => in_floats.clone(),
+                };
+                let range = source_range(engine, inner.span());
+                // An artifact open in the frames encloses this element only as
+                // `encloses` says: a kept float drawn at the top of a page
+                // while a long artifact is still open is not decorative.
+                let in_open_artifact = stack
+                    .iter()
+                    .any(|open| open.is_artifact && open.encloses(floats, &held_by));
                 // A float written inside an artifact is drawn away from it:
                 // what is written inside such a float's own `place` call is
-                // decorative too (see [`decorative_range`]). A paragraph is
-                // judged by its own source range, any other element by its
-                // span's; content shown from elsewhere has its range there.
+                // decorative too (see [`decorative_range`]), but only where it
+                // is drawn as that float's body. Content written there and
+                // shown in the flow — a `metadata` value queried, a `state`
+                // read in `context` — carries a span from outside the call
+                // (the `context`) in itself or around it, so every span in
+                // the element and every open ancestor's must lie inside the
+                // call too.
                 let held_by_artifact_float = !floats.decorative.is_empty()
                     && match &par {
                         Some(par) => par.range,
-                        None => source_range(engine, inner.span()),
+                        None => range,
                     }
-                    .is_some_and(|range| {
-                        floats.decorative.iter().any(|outer| contains(*outer, range))
+                    .and_then(|range| {
+                        floats
+                            .decorative
+                            .iter()
+                            .copied()
+                            .find(|outer| contains(*outer, range))
+                    })
+                    .is_some_and(|call| {
+                        stack
+                            .iter()
+                            .all(|open| open.range.is_none_or(|r| contains(call, r)))
+                            && spans_within(engine, inner, call)
                     });
-                if held_by_artifact_float || stack.iter().any(|open| open.is_artifact) {
+                if held_by_artifact_float || in_open_artifact {
                     ancestry.in_artifact.insert(location);
                 }
                 if stack
@@ -669,6 +723,8 @@ fn walk(
 
                 stack.push(Open {
                     location,
+                    range,
+                    held_by,
                     floats: in_floats,
                     par,
                     is_artifact: inner.elem() == ArtifactElem::ELEM
@@ -697,8 +753,22 @@ fn walk(
                 }
             }
             FrameItem::Text(_) => {
-                let in_artifact = stack.iter().any(|open| open.is_artifact);
-                for open in stack.iter_mut().filter(|open| open.par.is_some()) {
+                // Per paragraph: an artifact open in the frames only counts
+                // for a paragraph it encloses (see above).
+                let any_artifact = stack.iter().any(|open| open.is_artifact);
+                let in_artifact: Vec<bool> = stack
+                    .iter()
+                    .map(|par| {
+                        any_artifact
+                            && stack.iter().any(|open| {
+                                open.is_artifact && open.encloses(floats, &par.held_by)
+                            })
+                    })
+                    .collect();
+                for (open, in_artifact) in stack.iter_mut().zip(in_artifact) {
+                    if open.par.is_none() {
+                        continue;
+                    }
                     if in_artifact {
                         open.glyphs_in_artifact += 1;
                     } else {
