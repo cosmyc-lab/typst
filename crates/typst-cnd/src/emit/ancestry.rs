@@ -732,19 +732,20 @@ fn content_range(engine: &Engine, content: &Content) -> Option<SourceRange> {
 /// sentence. Nothing in the frames around the body says it is a float, so a
 /// paragraph that any float may hold (`OpenPar::floats`: by its range, or
 /// by its words) is never covered, whichever signal would otherwise apply,
-/// unless all three of these hold:
+/// unless both of these hold:
 ///
 /// - some float surely holds the nested paragraph
-///   (`OpenPar::floats_by_source` is not empty),
-/// - the enclosing paragraph is the body of one of the floats that may hold
-///   it (`OpenPar::body_of`), and
-/// - it is the body of every float that surely holds it.
+///   (`OpenPar::floats_by_source` is not empty), and
+/// - the enclosing paragraph is the body (`OpenPar::body_of`) of every float
+///   that surely holds it.
 ///
-/// The first condition is not implied by the third: an empty set is a subset
-/// of anything, so without it a paragraph that floats hold only by its words
-/// — none surely — would be absorbed by any float body repeating those words,
-/// including content shown both in the flow and through a float helper. An
-/// empty sure set therefore never permits absorption.
+/// The first condition is not implied by the second: an empty set is a
+/// subset of anything, so without it a paragraph that floats hold only by
+/// its words — none surely — would be absorbed by any float body repeating
+/// those words, including content shown both in the flow and through a
+/// float helper. An empty sure set therefore never permits absorption.
+/// Together they make the enclosing paragraph the body of a float that may
+/// hold the nested one, since a float that surely holds it also may.
 ///
 /// Then the nested paragraph is a box inside that body, and the usual
 /// signals decide. A paragraph no float may hold follows the usual signals
@@ -753,10 +754,11 @@ fn content_range(engine: &Engine, content: &Content) -> Option<SourceRange> {
 /// A float's body is a frame of its own, so no other float lands inside one
 /// of its paragraphs: requiring the enclosing paragraph to *be* a float's
 /// body, not merely to be reached by the float's range or repeated by its
-/// words, is what keeps a float from being taken for a box. The second
-/// condition is a backstop: a paragraph surely held by some other float is
-/// that float's, not a box of this body. Only an enclosing paragraph with no
-/// range of its own is taken for a body on its words alone. The cost is
+/// words, is what keeps a float from being taken for a box. Requiring it of
+/// *every* float that surely holds the nested paragraph keeps a paragraph of
+/// some other float from being taken for a box of this body. Only an
+/// enclosing paragraph with no range of its own is taken for a body on its
+/// words alone. The cost is
 /// duplication, not loss: a box inside a float body that the float holds
 /// only by words — a body built from an earlier `#let` — is kept twice, and
 /// so is a box inside a float whose body realizes to other words than it is
@@ -765,12 +767,11 @@ fn covering_par(stack: &[Open], par: &OpenPar) -> Option<Location> {
     let nearest = stack.iter().rev().find(|open| open.par.is_some())?;
     let parent = nearest.par.as_ref()?;
     // A paragraph any float may hold is never covered, unless some float
-    // surely holds it, and the parent is the body of one of those floats and
-    // of every float that surely holds the paragraph: then it is a box in
-    // that body. An empty sure set never permits absorption.
+    // surely holds it and the parent is the body of every float that surely
+    // holds it: then it is a box in that body. An empty sure set never
+    // permits absorption.
     if !par.floats.is_empty()
         && (par.floats_by_source.is_empty()
-            || !par.floats.iter().any(|index| parent.body_of.contains(index))
             || !par
                 .floats_by_source
                 .iter()

@@ -22,7 +22,7 @@ Before #pdf.artifact[★] after.
 
 #pdf.artifact[decoration]
 
-Closing paragraph of the document.
+Paragraph after the artifact.
 
 // A quote made a block quote by a set rule is emitted as its own node, even
 // when a show rule boxes it into the surrounding paragraph.

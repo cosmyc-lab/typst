@@ -1292,7 +1292,7 @@ fn paragraph_identity_dedupe_and_inline_artifacts() {
         "A",
         "Decision We keep option 3.",
         "Before after.",
-        "Closing paragraph of the document.",
+        "Paragraph after the artifact.",
         "Lead words trailing words.",
     ] {
         let count = paragraphs.iter().filter(|p| p.as_str() == expected).count();
@@ -2236,7 +2236,7 @@ fn figure_bodies_are_not_duplicated() {
             "{token} must appear exactly once"
         );
     }
-    // wave 2: a figure keeps only its caption when its body is not an image,
+    // Known gap: a figure keeps only its caption when its body is not an image,
     // a raw block, a table or a grid it can reach: the paragraph of the
     // framed body (FA1) and the cells of a grid built under `context` (FC1,
     // FC2) are lost, and the list (FA2) is emitted beside the figure rather
@@ -2325,7 +2325,7 @@ fn a_figure_carries_its_raw_block() {
             (Some("RC2 caption styled no context"), vec!["rc1: 1"]),
         ]
     );
-    // wave 2: each raw block is also emitted as a code node beside its
+    // Known gap: each raw block is also emitted as a code node beside its
     // figure, so its text appears twice.
 }
 
@@ -2350,7 +2350,7 @@ fn a_figure_around_a_helper_drawing_keeps_its_caption_and_image() {
         .collect();
     assert_eq!(images.len(), 1, "the image is emitted once: {images:?}");
     assert!(images[0].contains("newsletter-cover.png"), "{images:?}");
-    // wave 2: the image escapes the figure and is emitted bare beside it,
+    // Known gap: the image escapes the figure and is emitted bare beside it,
     // the figure's child is the decorative grid with empty cells, and the
     // label text (HA1) is lost.
 }
