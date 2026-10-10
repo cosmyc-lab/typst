@@ -1228,6 +1228,10 @@ fn example_files_exist() {
         "_box_float_text_lib.typ",
         "float_scope_let.typ",
         "float_scope_helper.typ",
+        "float_holds_by_range.typ",
+        "float_holds_by_range_quote.typ",
+        "_float_holds_lib.typ",
+        "_float_holds_chapter.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1971,5 +1975,35 @@ fn floats_defined_earlier_do_not_claim_the_paragraphs_in_between() {
                 "{name}: {float:?} must be one paragraph: {paragraphs:?}"
             );
         }
+    }
+}
+
+#[test]
+fn a_float_quoting_another_file_does_not_claim_its_paragraph() {
+    // The second note quotes, word for word, a paragraph written in an
+    // included file. That paragraph has a source range of its own, outside
+    // the float's, so it is not the float's body: another float landing in it
+    // is kept, and so is the quoting float itself.
+    let long = std::fs::read_to_string(example_path("_float_holds_chapter.typ"))
+        .expect("chapter file");
+    let long = long.trim();
+    for (name, first) in [
+        ("float_holds_by_range.typ", ["Yes indeed it is so."; 6].join(" ")),
+        ("float_holds_by_range_quote.typ", ["Zed note here."; 6].join(" ")),
+    ] {
+        let first = first.as_str();
+        let cnd = cnd_for_example(name);
+        let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+        let count = |text: &str| paragraphs.iter().filter(|p| p.trim() == text).count();
+        assert_eq!(
+            count(first),
+            1,
+            "{name}: {first:?} must be one paragraph: {paragraphs:?}"
+        );
+        assert_eq!(
+            count(long),
+            2,
+            "{name}: the chapter and the note quoting it must both stay: {paragraphs:?}"
+        );
     }
 }
