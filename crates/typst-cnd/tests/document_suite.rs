@@ -1238,6 +1238,12 @@ fn example_files_exist() {
         "float_held_by_text_whole.typ",
         "float_held_by_text_prefix.typ",
         "float_held_by_text_reused.typ",
+        "handbuilt_toc.typ",
+        "figure_bodies.typ",
+        "terms_and_paragraphs.typ",
+        "quote_with_list.typ",
+        "figure_raw.typ",
+        "figure_helper_drawing.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -2060,4 +2066,214 @@ fn a_float_held_only_by_words_is_never_absorbed() {
             );
         }
     }
+}
+
+/// Every node of the tree, depth first, with heading and figure children.
+fn all_nodes(nodes: &[CndNode]) -> Vec<&CndNode> {
+    fn walk<'a>(nodes: &'a [CndNode], out: &mut Vec<&'a CndNode>) {
+        for node in nodes {
+            out.push(node);
+            match node {
+                CndNode::Heading(h) => walk(&h.children, out),
+                CndNode::Figure(f) => walk(&f.children, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(nodes, &mut out);
+    out
+}
+
+#[test]
+fn handbuilt_toc_emits_each_boxed_number_once() {
+    // The number in a styled box is part of its grid cell's paragraph: it
+    // must come out once, not once more as a paragraph of its own. The title
+    // cells repeat headings, which stay nodes of their own.
+    let cnd = cnd_for_example("handbuilt_toc.typ");
+    let counts = word_counts(&cnd);
+    for token in ["TP1", "TP2"] {
+        assert_eq!(
+            counts.get(token).copied(),
+            Some(1),
+            "{token} must appear exactly once"
+        );
+    }
+    let headings = heading_texts(&cnd.nodes);
+    assert_eq!(headings, ["TA1 first part", "TB1 second part"]);
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    for body in ["TA2 body.", "TB2 body."] {
+        assert_eq!(
+            paragraphs.iter().filter(|p| p.as_str() == body).count(),
+            1,
+            "{body:?} must be one paragraph: {paragraphs:?}"
+        );
+    }
+}
+
+#[test]
+fn figure_bodies_are_not_duplicated() {
+    let cnd = cnd_for_example("figure_bodies.typ");
+    let nodes = all_nodes(&cnd.nodes);
+    let captions: Vec<&str> = nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Figure(f) => f.caption.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        captions,
+        [
+            "FA3 caption one",
+            "FB5 caption grid",
+            "FC3 caption context grid",
+            "FD3 caption block grid",
+            "FF3 caption table",
+        ]
+    );
+    let cells: Vec<&str> = nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Table(t) => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| t.cells.iter().map(|c| c.text.as_str()))
+        .collect();
+    for cell in ["FB1 key", "FB4 value", "FD1 key", "FD2 value", "FF1 key", "FF2 value"] {
+        assert_eq!(
+            cells.iter().filter(|c| **c == cell).count(),
+            1,
+            "{cell:?} must be one table cell: {cells:?}"
+        );
+    }
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    assert_eq!(paragraphs, ["FE1 bare grid key", "FE2 bare grid value"]);
+    // The list inside the framed figure body is kept once, as a list.
+    assert_eq!(all_list_item_texts(&cnd), ["FA2 list item in figure"]);
+    let counts = word_counts(&cnd);
+    for token in ["FA2", "FB1", "FB4", "FD1", "FE1", "FE2"] {
+        assert_eq!(
+            counts.get(token).copied(),
+            Some(1),
+            "{token} must appear exactly once"
+        );
+    }
+    // wave 2: a figure keeps only its caption when its body is not an image,
+    // a raw block, a table or a grid it can reach: the paragraph of the
+    // framed body (FA1) and the cells of a grid built under `context` (FC1,
+    // FC2) are lost, and the list (FA2) is emitted beside the figure rather
+    // than inside it.
+}
+
+#[test]
+fn terms_never_swallow_paragraphs_that_start_like_them() {
+    let cnd = cnd_for_example("terms_and_paragraphs.typ");
+    let nodes = all_nodes(&cnd.nodes);
+    let terms: Vec<(&str, &str)> = nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Terms(t) => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| t.items.iter().map(|i| (i.term.as_str(), i.description.as_str())))
+        .collect();
+    assert_eq!(terms, [("Status", "accepted"), ("Owner", "someone")]);
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    assert_eq!(
+        paragraphs,
+        [
+            "Status of the rollout is still open, and this sentence stays.",
+            "Owner wanted. This sentence stays as well.",
+            "The owner field is set, and this sentence does not start with a term.",
+        ]
+    );
+}
+
+#[test]
+fn a_list_in_a_quote_is_carried_by_the_quote_only() {
+    let cnd = cnd_for_example("quote_with_list.typ");
+    assert!(find_lists(&cnd.nodes).is_empty(), "the quote carries its list");
+    let quote = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|n| match n {
+            CndNode::Quote(q) => Some(q),
+            _ => None,
+        })
+        .expect("a quote");
+    for token in ["QW1", "QW2", "QW3"] {
+        assert!(quote.text.contains(token), "{token} in the quote: {:?}", quote.text);
+    }
+    let counts = word_counts(&cnd);
+    for token in ["QW1", "QW2", "QW3", "QW4"] {
+        assert_eq!(
+            counts.get(token).copied(),
+            Some(1),
+            "{token} must appear exactly once"
+        );
+    }
+    assert_eq!(paragraph_texts_in_order(&cnd.nodes), ["QW4 after."]);
+}
+
+#[test]
+fn a_figure_carries_its_raw_block() {
+    let cnd = cnd_for_example("figure_raw.typ");
+    let figures: Vec<_> = cnd
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Figure(f) => Some(f),
+            _ => None,
+        })
+        .collect();
+    let carried: Vec<(Option<&str>, Vec<&str>)> = figures
+        .iter()
+        .map(|f| {
+            let code = f
+                .children
+                .iter()
+                .filter_map(|c| match c {
+                    CndNode::Code(code) => Some(code.text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            (f.caption.as_deref(), code)
+        })
+        .collect();
+    assert_eq!(
+        carried,
+        [
+            (Some("RA2 caption"), vec!["ra1: 1"]),
+            (Some("RB2 caption styled"), vec!["rb1: 1"]),
+            (Some("RC2 caption styled no context"), vec!["rc1: 1"]),
+        ]
+    );
+    // wave 2: each raw block is also emitted as a code node beside its
+    // figure, so its text appears twice.
+}
+
+#[test]
+fn a_figure_around_a_helper_drawing_keeps_its_caption_and_image() {
+    let cnd = cnd_for_example("figure_helper_drawing.typ");
+    let nodes = all_nodes(&cnd.nodes);
+    let captions: Vec<&str> = nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Figure(f) => f.caption.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(captions, ["HA2 caption"]);
+    let images: Vec<&str> = nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Image(i) => i.path.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images.len(), 1, "the image is emitted once: {images:?}");
+    assert!(images[0].contains("newsletter-cover.png"), "{images:?}");
+    // wave 2: the image escapes the figure and is emitted bare beside it,
+    // the figure's child is the decorative grid with empty cells, and the
+    // label text (HA1) is lost.
 }
