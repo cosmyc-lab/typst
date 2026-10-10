@@ -8,7 +8,7 @@ use common::{
     incoming_count, label_exists, paragraph_texts_in_order, table_stats,
     tags_under_heading, walk_nodes,
 };
-use typst_cnd::{CndNode, TableKind};
+use typst_cnd::{CndNode, ListItem, TableKind, cnd_to_json};
 
 /// `(bibliography key, citation form, supplement)` on one node.
 type CiteTuple = (String, Option<String>, Option<String>);
@@ -1216,6 +1216,38 @@ fn example_files_exist() {
         "citations.typ",
         "nonflat_markers.typ",
         "newsletter/main.typ",
+        "paragraph_identity.typ",
+        "nested_lists.typ",
+        "list_in_float_long.typ",
+        "list_in_float_short.typ",
+        "list_in_bare_float.typ",
+        "list_in_bare_float_block.typ",
+        "par_in_float_beside_list.typ",
+        "float_in_list_item.typ",
+        "list_in_footnote_item.typ",
+        "list_in_footnote_par.typ",
+        "box_identity.typ",
+        "_box_identity_lib.typ",
+        "box_float_text.typ",
+        "_box_float_text_lib.typ",
+        "float_scope_let.typ",
+        "float_scope_helper.typ",
+        "float_holds_by_range.typ",
+        "float_holds_by_range_quote.typ",
+        "_float_holds_lib.typ",
+        "_float_holds_chapter.typ",
+        "float_held_by_text.typ",
+        "_float_text_chapter.typ",
+        "float_held_by_text_detached.typ",
+        "float_held_by_text_whole.typ",
+        "float_held_by_text_prefix.typ",
+        "float_held_by_text_reused.typ",
+        "handbuilt_toc.typ",
+        "figure_bodies.typ",
+        "terms_and_paragraphs.typ",
+        "quote_with_list.typ",
+        "figure_raw.typ",
+        "figure_helper_drawing.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1245,6 +1277,43 @@ fn heading_show_rules_do_not_duplicate_headings_as_paragraphs() {
             "heading {heading:?} duplicated as a paragraph: {paragraphs:?}"
         );
     }
+}
+
+/// Paragraphs are deduplicated by element identity: a paragraph that merely
+/// starts like a heading, a list item or a callout title is the author's own
+/// and must survive, and inline PDF artifacts never reach a paragraph's text.
+#[test]
+fn paragraph_identity_dedupe_and_inline_artifacts() {
+    let cnd = cnd_for_example("paragraph_identity.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    for expected in [
+        "Decision taken by the team, without a spec.",
+        "First item of a list that is long enough, followed by more text.",
+        "A",
+        "Decision We keep option 3.",
+        "Before after.",
+        "Paragraph after the artifact.",
+        "Lead words trailing words.",
+    ] {
+        let count = paragraphs.iter().filter(|p| p.as_str() == expected).count();
+        assert_eq!(
+            count, 1,
+            "paragraph {expected:?} must appear exactly once, got: {paragraphs:?}"
+        );
+    }
+    assert!(
+        !paragraphs.iter().any(|p| p.contains("decoration")),
+        "artifact-only text leaked into a paragraph: {paragraphs:?}"
+    );
+    assert!(
+        !paragraphs.iter().any(|p| p.contains('\u{2605}')),
+        "inline artifact glyph leaked into a paragraph: {paragraphs:?}"
+    );
+    assert_eq!(
+        paragraphs.len(),
+        7,
+        "exactly the seven authored paragraphs, got: {paragraphs:?}"
+    );
 }
 
 /// Text carried by a layout-only container — a `block`, a grid cell, a
@@ -1620,4 +1689,668 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
         .expect("the second half of the split link body");
     let CndNode::Paragraph(second_half) = second_half else { unreachable!() };
     assert!(second_half.base.links.is_empty(), "same known gap, other half");
+}
+
+/// `(text, number)` of each item, for compact assertions on one level.
+fn item_summary(items: &[ListItem]) -> Vec<(&str, Option<i32>)> {
+    items.iter().map(|item| (item.text.as_str(), item.number)).collect()
+}
+
+/// The emitted list whose first item's text starts with `prefix`.
+fn list_starting_with<'a>(
+    lists: &[&'a typst_cnd::ListNode],
+    prefix: &str,
+) -> &'a typst_cnd::ListNode {
+    lists
+        .iter()
+        .copied()
+        .find(|list| list.items.first().is_some_and(|item| item.text.starts_with(prefix)))
+        .unwrap_or_else(|| panic!("no list starting with {prefix:?}"))
+}
+
+#[test]
+fn nested_list_items_are_children_of_their_parent() {
+    let cnd = cnd_for_example("nested_lists.typ");
+    let lists = find_lists(&cnd.nodes);
+
+    // One list node per list written at the top level, plus the one inside
+    // the figure (whose text the figure does not carry). The nested lists
+    // and the list inside the quote are not lists of their own.
+    let mut firsts: Vec<&str> =
+        lists.iter().map(|list| list.items[0].text.as_str()).collect();
+    firsts.sort_unstable();
+    assert_eq!(
+        firsts,
+        [
+            "NA1 top one",
+            "NB1 enum one",
+            "NC1 bullet with enum children",
+            "ND1 bullet with explicit numbers",
+            "NE1 explicit list inside",
+            "NG2 list item in figure",
+        ]
+    );
+
+    // Three bullet levels.
+    let a = list_starting_with(&lists, "NA1");
+    assert_eq!(
+        item_summary(&a.items),
+        [("NA1 top one", None), ("NA2 top two", None), ("NA6 top three", None)]
+    );
+    assert_eq!(
+        item_summary(&a.items[1].children),
+        [("NA3 child one", None), ("NA4 child two", None)]
+    );
+    assert_eq!(
+        item_summary(&a.items[1].children[1].children),
+        [("NA5 grandchild", None)]
+    );
+    assert!(a.items[1].children[0].children.is_empty());
+
+    // Bullets under an enum.
+    let b = list_starting_with(&lists, "NB1");
+    assert!(b.ordered);
+    assert_eq!(
+        item_summary(&b.items),
+        [("NB1 enum one", Some(1)), ("NB2 enum two", Some(2))]
+    );
+    assert_eq!(
+        item_summary(&b.items[1].children),
+        [("NB3 bullet in enum", None), ("NB4 bullet in enum", None)]
+    );
+
+    // An enum under a bullet, started at 5 by a set rule.
+    let c = list_starting_with(&lists, "NC1");
+    assert_eq!(item_summary(&c.items), [("NC1 bullet with enum children", None)]);
+    assert_eq!(
+        item_summary(&c.items[0].children),
+        [("NC2 enum at five", Some(5)), ("NC3 enum at six", Some(6))]
+    );
+
+    // An enum under a bullet, started at 5 by explicit markup.
+    let d = list_starting_with(&lists, "ND1");
+    assert_eq!(item_summary(&d.items), [("ND1 bullet with explicit numbers", None)]);
+    assert_eq!(
+        item_summary(&d.items[0].children),
+        [("ND2 explicit five", Some(5)), ("ND3 follows five", Some(6))]
+    );
+
+    // An explicit `#list` call inside an item.
+    let e = list_starting_with(&lists, "NE1");
+    assert_eq!(item_summary(&e.items), [("NE1 explicit list inside", None)]);
+    assert_eq!(
+        item_summary(&e.items[0].children),
+        [("NE2 explicit child", None), ("NE3 explicit child", None)]
+    );
+
+    // Every authored line of the lists, the quote's and the figure's
+    // included, is in the document exactly once.
+    let json = cnd_to_json(&cnd).expect("serialize");
+    for token in [
+        "NA1", "NA2", "NA3", "NA4", "NA5", "NA6", "NB1", "NB2", "NB3", "NB4", "NC1",
+        "NC2", "NC3", "ND1", "ND2", "ND3", "NE1", "NE2", "NE3", "NF1", "NF2", "NF3",
+        "NG2", "NG3", "NH1",
+    ] {
+        assert_eq!(json.matches(token).count(), 1, "{token} must appear exactly once");
+    }
+
+    // The quote carries its own list.
+    let quote = cnd
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            CndNode::Quote(quote) => Some(quote),
+            _ => None,
+        })
+        .expect("a quote");
+    assert!(quote.text.contains("NF2") && quote.text.contains("NF3"), "{:?}", quote.text);
+}
+
+/// How many times each word occurs in the serialized CND.
+fn word_counts(cnd: &typst_cnd::Cnd) -> std::collections::HashMap<String, usize> {
+    let json = cnd_to_json(cnd).expect("serialize");
+    let mut counts = std::collections::HashMap::new();
+    for word in json.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
+        *counts.entry(word.to_string()).or_default() += 1;
+    }
+    counts
+}
+
+/// The text of every list item, nested ones included.
+fn all_list_item_texts(cnd: &typst_cnd::Cnd) -> Vec<String> {
+    fn walk(items: &[ListItem], out: &mut Vec<String>) {
+        for item in items {
+            out.push(item.text.clone());
+            walk(&item.children, out);
+        }
+    }
+    let mut out = Vec::new();
+    for list in find_lists(&cnd.nodes) {
+        walk(&list.items, &mut out);
+    }
+    out
+}
+
+#[test]
+fn lists_in_floats_beside_open_lists_are_kept_once() {
+    // A float is laid out wherever it fits, which can be while a list,
+    // written elsewhere, spans the page. The list inside the float's figure
+    // must not be taken for that list's nested content.
+    for name in ["list_in_float_long.typ", "list_in_float_short.typ"] {
+        let cnd = cnd_for_example(name);
+        let counts = word_counts(&cnd);
+        let last = if name == "list_in_float_long.typ" { 29 } else { 2 };
+        let mut tokens = vec!["FLB1".to_string(), "FLB2".into(), "FLT1".into()];
+        for i in 0..=last {
+            tokens.push(format!("PA{i}"));
+            tokens.push(format!("QA{i}"));
+        }
+        for token in tokens {
+            assert_eq!(
+                counts.get(&token).copied().unwrap_or(0),
+                1,
+                "{name}: {token} must appear exactly once"
+            );
+        }
+        let texts = all_list_item_texts(&cnd);
+        for token in ["FLB1", "FLB2", "FLT1"] {
+            assert!(
+                texts.iter().any(|text| text.contains(token)),
+                "{name}: {token} must be carried by a list node"
+            );
+        }
+    }
+}
+
+#[test]
+fn lists_in_bare_floats_beside_open_lists_are_kept_once() {
+    // Without a figure around it, nothing in the frames encloses the drawn
+    // list: the float's tags close where it is written. The list open
+    // around the drawn body is not what the float was written in.
+    for (name, tokens) in [
+        ("list_in_bare_float.typ", &["FLB1", "FLB2", "FLT1", "FLT2"][..]),
+        ("list_in_bare_float_block.typ", &["FLB1"][..]),
+    ] {
+        let cnd = cnd_for_example(name);
+        let counts = word_counts(&cnd);
+        let texts = all_list_item_texts(&cnd);
+        for token in tokens {
+            assert_eq!(
+                counts.get(*token).copied().unwrap_or(0),
+                1,
+                "{name}: {token} must appear exactly once"
+            );
+            assert!(
+                texts.iter().any(|text| text.contains(token)),
+                "{name}: {token} must be carried by a list node"
+            );
+        }
+        for i in 0..30 {
+            for prefix in ["PA", "QA"] {
+                let token = format!("{prefix}{i}");
+                if prefix == "QA" && name != "list_in_bare_float.typ" {
+                    continue;
+                }
+                assert_eq!(
+                    counts.get(&token).copied().unwrap_or(0),
+                    1,
+                    "{name}: {token} must appear exactly once"
+                );
+            }
+        }
+    }
+
+    // The list nested in the float's own list stays its child.
+    let cnd = cnd_for_example("list_in_bare_float.typ");
+    let parent = find_lists(&cnd.nodes)
+        .into_iter()
+        .flat_map(|list| list.items.iter())
+        .find(|item| item.text.contains("FLT1"))
+        .expect("FLT1 item");
+    assert!(
+        parent.children.iter().any(|child| child.text.contains("FLT2")),
+        "FLT2 must be FLT1's child, not a list of its own"
+    );
+}
+
+#[test]
+fn a_float_paragraph_beside_an_open_list_is_kept() {
+    let cnd = cnd_for_example("par_in_float_beside_list.typ");
+    let counts = word_counts(&cnd);
+    assert_eq!(counts.get("FPB1").copied().unwrap_or(0), 1, "FPB1 must appear once");
+    assert!(
+        paragraph_texts_in_order(&cnd.nodes)
+            .iter()
+            .any(|text| text.contains("FPB1")),
+        "FPB1 must be a paragraph"
+    );
+}
+
+#[test]
+fn a_float_written_in_a_list_item_is_kept_once() {
+    // The item carries the float's text; the float is written in the list,
+    // so the list open where its body is drawn is a real ancestor.
+    let cnd = cnd_for_example("float_in_list_item.typ");
+    let counts = word_counts(&cnd);
+    assert_eq!(counts.get("FIL1").copied().unwrap_or(0), 1, "FIL1 must appear once");
+}
+
+#[test]
+fn lists_in_footnotes_live_in_the_footnote_pool_only() {
+    for (name, tokens) in [
+        ("list_in_footnote_item.typ", &["FL1", "FL2"][..]),
+        ("list_in_footnote_par.typ", &["FL3"][..]),
+    ] {
+        let cnd = cnd_for_example(name);
+        let texts = all_list_item_texts(&cnd);
+        let counts = word_counts(&cnd);
+        for token in tokens {
+            assert!(
+                !texts.iter().any(|text| text.contains(token)),
+                "{name}: {token} must not be in a body list node: {texts:?}"
+            );
+            assert!(
+                cnd.footnotes.iter().any(|note| note.text.contains(token)),
+                "{name}: {token} must be in the footnote pool"
+            );
+            assert_eq!(counts.get(*token).copied(), Some(1), "{name}: {token} once");
+        }
+    }
+}
+
+#[test]
+fn inline_box_bodies_are_emitted_once_whatever_their_origin() {
+    // A box body is realized as a paragraph of its own inside the line of the
+    // paragraph that holds it. Whether its spans are detached (a string
+    // passed through a styling function) or come from another file, it is
+    // part of that paragraph — and a floated body is still content.
+    let cnd = cnd_for_example("box_identity.typ");
+    let counts = word_counts(&cnd);
+    let mut tokens: Vec<String> = Vec::new();
+    for letter in 'A'..='J' {
+        tokens.push(format!("Q{letter}1"));
+        tokens.push(format!("Q{letter}2"));
+    }
+    tokens.extend(["QK1", "QL1", "QM1"].map(String::from));
+    for token in ["RA1", "RA2", "RB1", "RB2", "RC1", "RD1", "RE1", "RE2", "RF1"] {
+        tokens.push(token.into());
+    }
+    for token in ["SA1", "SA2", "SA3", "SA4"] {
+        tokens.push(token.into());
+    }
+    let mut wrong = Vec::new();
+    for token in &tokens {
+        let count = counts.get(token).copied().unwrap_or(0);
+        if count != 1 {
+            wrong.push(format!("{token}={count}"));
+        }
+    }
+    assert!(wrong.is_empty(), "each token must appear exactly once: {wrong:?}");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    assert!(
+        paragraphs.iter().any(|p| p.contains("SA3 FLOATED BODY")),
+        "the floated body must be a paragraph: {paragraphs:?}"
+    );
+    assert!(
+        paragraphs
+            .iter()
+            .any(|p| p.starts_with("RE1 see") && p.contains("RE2")),
+        "the imported box holding a reference stays in its paragraph: {paragraphs:?}"
+    );
+    // Known limit: a box body written in another file, whose reference
+    // resolves to text ("Section 1") that the unrealized paragraph around it
+    // does not have, is neither inside that paragraph's source nor found in
+    // its text. It is kept as a paragraph of its own: a duplicate, never a
+    // loss.
+    assert!(
+        paragraphs
+            .iter()
+            .any(|p| p.starts_with("RF1 then") && p.contains("RF2")),
+        "the paragraph around a box written in another file keeps it: {paragraphs:?}"
+    );
+    assert!(
+        counts.get("RF2").copied().unwrap_or(0) >= 1,
+        "a box written in another file holding a reference is never lost"
+    );
+}
+
+#[test]
+fn floats_from_another_file_survive_matching_text() {
+    // A float whose spans are in another file is not tested by source
+    // containment; it must not be taken for a box body because the
+    // paragraph it lands in holds the same sentence, or a longer word.
+    let cnd = cnd_for_example("box_float_text.typ");
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    for float in [
+        ["Yes indeed it is so."; 6].join(" "),
+        // A float of two paragraphs: the break between them is no glue.
+        ["Kept one QA."; 3].join(" "),
+        ["Kept two QB."; 2].join(" "),
+        // A reference realizes to text the unrealized float does not have.
+        ["See Section 1 for QR details in full."; 5].join(" "),
+    ] {
+        // A reference's supplement is joined by a non-breaking space.
+        let count = paragraphs
+            .iter()
+            .filter(|p| p.split_whitespace().collect::<Vec<_>>().join(" ") == float)
+            .count();
+        assert_eq!(count, 1, "{float:?} must be one paragraph: {paragraphs:?}");
+    }
+    let counts = word_counts(&cnd);
+    assert_eq!(
+        counts.get("Draft").copied().unwrap_or(0),
+        1,
+        "the floated word must survive beside a longer word: {paragraphs:?}"
+    );
+}
+
+#[test]
+fn floats_defined_earlier_do_not_claim_the_paragraphs_in_between() {
+    // A float body built from an earlier `#let`, or a float helper defined in
+    // the preamble, spans in the source from the definition to the call. The
+    // paragraphs written in between are not that float's, and another float
+    // landing in one of them must survive.
+    let disclaimer = ["Yes indeed it is so."; 6].join(" ");
+    for (name, own) in [
+        ("float_scope_let.typ", "Wide note WZ."),
+        ("float_scope_helper.typ", "Aside: later note AZ"),
+    ] {
+        let cnd = cnd_for_example(name);
+        let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+        for float in [disclaimer.as_str(), own] {
+            let count = paragraphs.iter().filter(|p| p.trim() == float).count();
+            assert_eq!(
+                count, 1,
+                "{name}: {float:?} must be one paragraph: {paragraphs:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_float_quoting_another_file_does_not_claim_its_paragraph() {
+    // The second note quotes, word for word, a paragraph written in an
+    // included file. That paragraph has a source range of its own, outside
+    // the float's, so it is not the float's body: another float landing in it
+    // is kept, and so is the quoting float itself.
+    let long = std::fs::read_to_string(example_path("_float_holds_chapter.typ"))
+        .expect("chapter file");
+    let long = long.trim();
+    for (name, first) in [
+        ("float_holds_by_range.typ", ["Yes indeed it is so."; 6].join(" ")),
+        ("float_holds_by_range_quote.typ", ["Zed note here."; 6].join(" ")),
+    ] {
+        let first = first.as_str();
+        let cnd = cnd_for_example(name);
+        let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+        let count = |text: &str| paragraphs.iter().filter(|p| p.trim() == text).count();
+        assert_eq!(
+            count(first),
+            1,
+            "{name}: {first:?} must be one paragraph: {paragraphs:?}"
+        );
+        assert_eq!(
+            count(long),
+            2,
+            "{name}: the chapter and the note quoting it must both stay: {paragraphs:?}"
+        );
+    }
+}
+
+#[test]
+fn a_float_held_only_by_words_is_never_absorbed() {
+    // A preamble helper's float reaches, in the source, over the long
+    // paragraph, and its body quotes the note word for word (or the long
+    // paragraph in full). The note lands in the long paragraph, which is no
+    // float's body: the note must survive, whether it has a source range of
+    // its own (in an included chapter) or none (a string through `upper`),
+    // and even when the long paragraph is content the float also shows.
+    let lower = ["Yes indeed it is so."; 6].join(" ");
+    let upper = lower.to_uppercase();
+    let long = |note: &str| {
+        format!(
+            "Long paragraph that spans pages: one two three four five six seven \
+             eight nine ten. {note} eleven twelve thirteen fourteen fifteen \
+             sixteen seventeen eighteen nineteen twenty twentyone twentytwo \
+             twentythree twentyfour twentyfive twentysix twentyseven \
+             twentyeight twentynine thirty."
+        )
+    };
+    for (name, note, others) in [
+        ("float_held_by_text.typ", &lower, vec![(format!("Quoted: {lower}"), 1)]),
+        (
+            "float_held_by_text_detached.typ",
+            &upper,
+            vec![(format!("Quoted: {upper}"), 1), (long(&upper), 1)],
+        ),
+        ("float_held_by_text_whole.typ", &lower, vec![(long(&lower), 2)]),
+        ("float_held_by_text_prefix.typ", &lower, vec![(long(&lower), 1)]),
+        ("float_held_by_text_reused.typ", &lower, vec![(long(&lower), 2)]),
+    ] {
+        let cnd = cnd_for_example(name);
+        let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+        let count = |text: &str| paragraphs.iter().filter(|p| p.trim() == text).count();
+        assert_eq!(
+            count(note),
+            1,
+            "{name}: {note:?} must be one paragraph: {paragraphs:?}"
+        );
+        for (text, expected) in others {
+            assert_eq!(
+                count(&text),
+                expected,
+                "{name}: {text:?} must be {expected} paragraph(s): {paragraphs:?}"
+            );
+        }
+    }
+}
+
+/// Every node of the tree, depth first, with heading and figure children.
+fn all_nodes(nodes: &[CndNode]) -> Vec<&CndNode> {
+    fn walk<'a>(nodes: &'a [CndNode], out: &mut Vec<&'a CndNode>) {
+        for node in nodes {
+            out.push(node);
+            match node {
+                CndNode::Heading(h) => walk(&h.children, out),
+                CndNode::Figure(f) => walk(&f.children, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(nodes, &mut out);
+    out
+}
+
+#[test]
+fn handbuilt_toc_emits_each_boxed_number_once() {
+    // The number in a styled box is part of its grid cell's paragraph: it
+    // must come out once, not once more as a paragraph of its own. The title
+    // cells repeat headings, which stay nodes of their own.
+    let cnd = cnd_for_example("handbuilt_toc.typ");
+    let counts = word_counts(&cnd);
+    for token in ["TP1", "TP2"] {
+        assert_eq!(
+            counts.get(token).copied(),
+            Some(1),
+            "{token} must appear exactly once"
+        );
+    }
+    let headings = heading_texts(&cnd.nodes);
+    assert_eq!(headings, ["TA1 first part", "TB1 second part"]);
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    for body in ["TA2 body.", "TB2 body."] {
+        assert_eq!(
+            paragraphs.iter().filter(|p| p.as_str() == body).count(),
+            1,
+            "{body:?} must be one paragraph: {paragraphs:?}"
+        );
+    }
+}
+
+#[test]
+fn figure_bodies_are_not_duplicated() {
+    let cnd = cnd_for_example("figure_bodies.typ");
+    let nodes = all_nodes(&cnd.nodes);
+    let captions: Vec<&str> = nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Figure(f) => f.caption.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        captions,
+        [
+            "FA3 caption one",
+            "FB5 caption grid",
+            "FC3 caption context grid",
+            "FD3 caption block grid",
+            "FF3 caption table",
+        ]
+    );
+    let cells: Vec<&str> = nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Table(t) => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| t.cells.iter().map(|c| c.text.as_str()))
+        .collect();
+    for cell in ["FB1 key", "FB4 value", "FD1 key", "FD2 value", "FF1 key", "FF2 value"] {
+        assert_eq!(
+            cells.iter().filter(|c| **c == cell).count(),
+            1,
+            "{cell:?} must be one table cell: {cells:?}"
+        );
+    }
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    assert_eq!(paragraphs, ["FE1 bare grid key", "FE2 bare grid value"]);
+    // The list inside the framed figure body is kept once, as a list.
+    assert_eq!(all_list_item_texts(&cnd), ["FA2 list item in figure"]);
+    let counts = word_counts(&cnd);
+    for token in ["FA2", "FB1", "FB4", "FD1", "FE1", "FE2"] {
+        assert_eq!(
+            counts.get(token).copied(),
+            Some(1),
+            "{token} must appear exactly once"
+        );
+    }
+    // Known gap: a figure keeps only its caption when its body is not an image,
+    // a raw block, a table or a grid it can reach: the paragraph of the
+    // framed body (FA1) and the cells of a grid built under `context` (FC1,
+    // FC2) are lost, and the list (FA2) is emitted beside the figure rather
+    // than inside it.
+}
+
+#[test]
+fn terms_never_swallow_paragraphs_that_start_like_them() {
+    let cnd = cnd_for_example("terms_and_paragraphs.typ");
+    let nodes = all_nodes(&cnd.nodes);
+    let terms: Vec<(&str, &str)> = nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Terms(t) => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| t.items.iter().map(|i| (i.term.as_str(), i.description.as_str())))
+        .collect();
+    assert_eq!(terms, [("Status", "accepted"), ("Owner", "someone")]);
+    let paragraphs = paragraph_texts_in_order(&cnd.nodes);
+    assert_eq!(
+        paragraphs,
+        [
+            "Status of the rollout is still open, and this sentence stays.",
+            "Owner wanted. This sentence stays as well.",
+            "The owner field is set, and this sentence does not start with a term.",
+        ]
+    );
+}
+
+#[test]
+fn a_list_in_a_quote_is_carried_by_the_quote_only() {
+    let cnd = cnd_for_example("quote_with_list.typ");
+    assert!(find_lists(&cnd.nodes).is_empty(), "the quote carries its list");
+    let quote = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|n| match n {
+            CndNode::Quote(q) => Some(q),
+            _ => None,
+        })
+        .expect("a quote");
+    for token in ["QW1", "QW2", "QW3"] {
+        assert!(quote.text.contains(token), "{token} in the quote: {:?}", quote.text);
+    }
+    let counts = word_counts(&cnd);
+    for token in ["QW1", "QW2", "QW3", "QW4"] {
+        assert_eq!(
+            counts.get(token).copied(),
+            Some(1),
+            "{token} must appear exactly once"
+        );
+    }
+    assert_eq!(paragraph_texts_in_order(&cnd.nodes), ["QW4 after."]);
+}
+
+#[test]
+fn a_figure_carries_its_raw_block() {
+    let cnd = cnd_for_example("figure_raw.typ");
+    let figures: Vec<_> = cnd
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Figure(f) => Some(f),
+            _ => None,
+        })
+        .collect();
+    let carried: Vec<(Option<&str>, Vec<&str>)> = figures
+        .iter()
+        .map(|f| {
+            let code = f
+                .children
+                .iter()
+                .filter_map(|c| match c {
+                    CndNode::Code(code) => Some(code.text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            (f.caption.as_deref(), code)
+        })
+        .collect();
+    assert_eq!(
+        carried,
+        [
+            (Some("RA2 caption"), vec!["ra1: 1"]),
+            (Some("RB2 caption styled"), vec!["rb1: 1"]),
+            (Some("RC2 caption styled no context"), vec!["rc1: 1"]),
+        ]
+    );
+    // Known gap: each raw block is also emitted as a code node beside its
+    // figure, so its text appears twice.
+}
+
+#[test]
+fn a_figure_around_a_helper_drawing_keeps_its_caption_and_image() {
+    let cnd = cnd_for_example("figure_helper_drawing.typ");
+    let nodes = all_nodes(&cnd.nodes);
+    let captions: Vec<&str> = nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Figure(f) => f.caption.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(captions, ["HA2 caption"]);
+    let images: Vec<&str> = nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Image(i) => i.path.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images.len(), 1, "the image is emitted once: {images:?}");
+    assert!(images[0].contains("newsletter-cover.png"), "{images:?}");
+    // Known gap: the image escapes the figure and is emitted bare beside it,
+    // the figure's child is the decorative grid with empty cells, and the
+    // label text (HA1) is lost.
 }

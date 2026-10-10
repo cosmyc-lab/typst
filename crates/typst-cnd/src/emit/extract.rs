@@ -1,11 +1,15 @@
 use ecow::EcoString;
-use typst_library::foundations::{Content, Label, PlainText, Value};
-use typst_library::introspection::{Location, Tag, TagElem};
-use typst_library::model::{
-    CitationForm, CiteElem, Destination, FootnoteElem, LinkElem, LinkMarker, LinkTarget,
-    RefElem,
+use typst_library::foundations::{
+    Content, Label, NativeElement, PlainText, StyleChain, Value,
 };
-use typst_library::text::LinebreakElem;
+use typst_library::introspection::{Location, Tag, TagElem};
+use typst_library::math::EquationElem;
+use typst_library::model::{
+    ArtifactElem, CitationForm, CiteElem, Destination, EnumElem, FigureElem,
+    FootnoteElem, HeadingElem, LinkElem, LinkMarker, LinkTarget, ListElem, QuoteElem,
+    RefElem, TableElem, TermsElem,
+};
+use typst_library::text::{LinebreakElem, RawElem};
 
 /// Extract plain text from content without duplicating inline code.
 ///
@@ -16,6 +20,62 @@ use typst_library::text::LinebreakElem;
 /// `RawLine.body`).
 pub fn extract_text(content: &Content) -> EcoString {
     extract_with_markers(content).0
+}
+
+/// Whether the text realized inside `content` was all excluded — every word
+/// of it sits inside an element emitted as its own node or inside a PDF
+/// artifact — leaving nothing of its own.
+///
+/// Content that was empty to begin with is not "emptied": with no exclusion
+/// at all this is `false`, so a paragraph that never held text keeps
+/// whatever handling it had before exclusion existed.
+pub fn is_emptied_by_exclusion(content: &Content) -> bool {
+    let mut out = EcoString::new();
+    let mut ctx = MarkerCtx::default();
+    walk(content, &mut out, &mut ctx);
+    ctx.excluded_any && out.trim().is_empty()
+}
+
+/// Whether the text realized between this element's `Tag::Start` and
+/// `Tag::End` belongs somewhere other than the enclosing node's text: to a
+/// node the exporter emits on its own (heading, list, enum, terms, figure,
+/// table, block quote, raw block, block equation), or to no node at all (a
+/// PDF artifact, which Typst's accessibility model defines as decoration).
+///
+/// Realization can wrap such an element's tags inside a paragraph — a show
+/// rule that boxes a quote, or re-emits a heading's body in fresh markup —
+/// and the paragraph would then repeat that element's text. Matching the
+/// element itself, rather than comparing texts, leaves alone a paragraph that
+/// merely starts with the same words.
+///
+/// The element carried by a `Tag::Start` was materialized during
+/// realization: every settable field, `block` included, already holds the
+/// value its style chain gave it at that point (so `#set quote(block: true)`
+/// counts). Reading the field with an empty chain therefore reads that
+/// realized value, not a default.
+fn is_excluded_scope(inner: &Content) -> bool {
+    let elem = inner.elem();
+    if elem == ArtifactElem::ELEM
+        || elem == HeadingElem::ELEM
+        || elem == ListElem::ELEM
+        || elem == EnumElem::ELEM
+        || elem == TermsElem::ELEM
+        || elem == FigureElem::ELEM
+        || elem == TableElem::ELEM
+    {
+        return true;
+    }
+    let materialized = StyleChain::default();
+    if let Some(quote) = inner.to_packed::<QuoteElem>() {
+        return quote.block.get(materialized);
+    }
+    if let Some(raw) = inner.to_packed::<RawElem>() {
+        return raw.block.get(materialized);
+    }
+    if let Some(equation) = inner.to_packed::<EquationElem>() {
+        return equation.block.get(materialized);
+    }
+    false
 }
 
 /// A reference/citation/footnote marker located within a node's rendered
@@ -155,6 +215,15 @@ struct MarkerCtx {
     /// `LinkMarker` frames currently bracketing a pending ref's text.
     link_for_ref: Vec<LinkFrame>,
     done: Vec<ExtractedMarker>,
+    /// Open scopes (by the element's location) whose realized text is
+    /// excluded, see [`is_excluded_scope`].
+    excluded: Vec<Location>,
+    /// Whether any text scope was excluded during this walk.
+    excluded_any: bool,
+    /// An excluded scope just closed: the next text drops its leading
+    /// whitespace if `out` already ends with some (or is still empty), so
+    /// that `Before #pdf.artifact[x] after.` reads "Before after.".
+    collapse_space: bool,
 }
 
 struct OpenFrame {
@@ -179,8 +248,47 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
     // match the tag element itself and unpack it here.
     if let Some(tag) = content.to_packed::<TagElem>() {
         match &tag.tag {
-            Tag::Start(inner, _) => open_tag(inner, ctx),
-            Tag::End(..) => close_tag(ctx, tag.tag.location()),
+            Tag::Start(inner, _) => {
+                if is_excluded_scope(inner)
+                    && let Some(loc) = inner.location()
+                {
+                    ctx.excluded.push(loc);
+                    ctx.excluded_any = true;
+                }
+                open_tag(inner, ctx);
+            }
+            Tag::End(..) => {
+                let loc = tag.tag.location();
+                if let Some(index) = ctx.excluded.iter().rposition(|open| *open == loc) {
+                    ctx.excluded.remove(index);
+                    if ctx.excluded.is_empty() {
+                        ctx.collapse_space = true;
+                    }
+                }
+                close_tag(ctx, loc);
+            }
+        }
+        return;
+    }
+
+    // An artifact met unrealized (a list item's or a table cell's body) has
+    // no tags to scope it: drop it whole, it is decoration.
+    if content.elem() == ArtifactElem::ELEM {
+        ctx.excluded_any = true;
+        ctx.collapse_space = true;
+        return;
+    }
+
+    // Inside an excluded scope: emit no text, but keep walking so that the
+    // tags nested in it still balance.
+    if !ctx.excluded.is_empty() {
+        if content.with::<dyn PlainText>().is_some()
+            || content.to_packed::<LinebreakElem>().is_some()
+        {
+            return;
+        }
+        for (_, value) in content.fields() {
+            walk_value(value, out, ctx);
         }
         return;
     }
@@ -211,6 +319,16 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
     if let Some(textable) = content.with::<dyn PlainText>() {
         let before = out.len();
         textable.plain_text(out);
+        if ctx.collapse_space && out.len() > before {
+            if out[..before].chars().next_back().is_none_or(char::is_whitespace) {
+                let added = out[before..].trim_start().to_string();
+                out.truncate(before);
+                out.push_str(&added);
+            }
+            if out.len() > before {
+                ctx.collapse_space = false;
+            }
+        }
         ctx.pos += out[before..].chars().count() as i64;
         return;
     }
