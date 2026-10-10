@@ -218,6 +218,9 @@ struct MarkerCtx {
     /// Open scopes (by the element's location) whose realized text is
     /// excluded, see [`is_excluded_scope`].
     excluded: Vec<Location>,
+    /// Open PDF artifacts (by location). A reference, link, footnote or
+    /// citation marker inside one is decorative and records no marker.
+    artifacts: Vec<Location>,
     /// Whether any text scope was excluded during this walk.
     excluded_any: bool,
     /// An excluded scope just closed: the next text drops its leading
@@ -255,10 +258,18 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
                     ctx.excluded.push(loc);
                     ctx.excluded_any = true;
                 }
+                if inner.elem() == ArtifactElem::ELEM
+                    && let Some(loc) = inner.location()
+                {
+                    ctx.artifacts.push(loc);
+                }
                 open_tag(inner, ctx);
             }
             Tag::End(..) => {
                 let loc = tag.tag.location();
+                if let Some(index) = ctx.artifacts.iter().rposition(|open| *open == loc) {
+                    ctx.artifacts.remove(index);
+                }
                 if let Some(index) = ctx.excluded.iter().rposition(|open| *open == loc) {
                     ctx.excluded.remove(index);
                     if ctx.excluded.is_empty() {
@@ -340,6 +351,11 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
 
 fn open_tag(inner: &Content, ctx: &mut MarkerCtx) {
     let Some(marker_loc) = inner.location() else { return };
+    // Decorative content yields no edge (cnd-sdk spec §2): no marker for a
+    // reference, link, footnote or citation written inside an artifact.
+    if !ctx.artifacts.is_empty() {
+        return;
+    }
     let pos = ctx.pos;
 
     if let Some(reference) = inner.to_packed::<RefElem>() {
@@ -385,6 +401,34 @@ fn close_tag(ctx: &mut MarkerCtx, loc: Location) {
             start: frame.start,
             end: ctx.pos,
         });
+    }
+}
+
+/// Visit every element of `content`, depth-first, except what sits inside
+/// a PDF artifact: decorative content (cnd-sdk spec §2) contributes no
+/// reference or link. For content met unrealized — a list item's or a table
+/// cell's body, an absorbed paragraph, the document's own content — where an
+/// artifact still nests its body. (Realized content brackets an artifact
+/// with tags instead; [`extract_with_markers`] handles that.)
+pub fn traverse_kept(content: &Content, f: &mut impl FnMut(&Content)) {
+    if content.elem() == ArtifactElem::ELEM {
+        return;
+    }
+    f(content);
+    for (_, value) in content.fields() {
+        traverse_kept_value(value, f);
+    }
+}
+
+fn traverse_kept_value(value: Value, f: &mut impl FnMut(&Content)) {
+    match value {
+        Value::Content(c) => traverse_kept(&c, f),
+        Value::Array(arr) => {
+            for v in arr {
+                traverse_kept_value(v, f);
+            }
+        }
+        _ => {}
     }
 }
 

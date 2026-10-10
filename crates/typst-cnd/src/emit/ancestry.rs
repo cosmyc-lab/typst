@@ -66,8 +66,9 @@ impl Ancestry {
         let mut found = Vec::new();
         // Tags stay open across pages, as in `walk`.
         let mut open = Vec::new();
+        let mut artifacts = FxHashSet::default();
         for page in paged.pages() {
-            floats(&page.frame, engine, &mut open, &mut found);
+            floats(&page.frame, engine, &mut open, &mut artifacts, &mut found);
         }
         let floats = Floats::new(found);
         let mut stack: Vec<Open> = Vec::new();
@@ -87,6 +88,11 @@ impl Ancestry {
     /// Whether `location` sits inside page furniture marked as a PDF artifact.
     pub fn is_artifact(&self, location: Location) -> bool {
         self.in_artifact.contains(&location)
+    }
+
+    /// Every location inside a PDF artifact.
+    pub fn artifact_locations(&self) -> &FxHashSet<Location> {
+        &self.in_artifact
     }
 
     /// Whether `location` sits inside a container that is emitted as its own
@@ -198,6 +204,10 @@ struct Float {
     /// The elements open where the `place` is written: what it really sits
     /// in, unlike what is open where its body is drawn.
     ancestors: FxHashSet<Location>,
+    /// Whether the `place` is written inside a PDF artifact. Its body is
+    /// drawn away from the artifact's tags, so only this says that the body
+    /// is decorative too (cnd-sdk spec §2).
+    in_artifact: bool,
 }
 
 impl Float {
@@ -239,11 +249,12 @@ fn floats(
     frame: &Frame,
     engine: &Engine,
     open: &mut Vec<Location>,
+    artifacts: &mut FxHashSet<Location>,
     out: &mut Vec<Float>,
 ) {
     for (_, item) in frame.items() {
         match item {
-            FrameItem::Group(group) => floats(&group.frame, engine, open, out),
+            FrameItem::Group(group) => floats(&group.frame, engine, open, artifacts, out),
             FrameItem::Tag(Tag::Start(inner, _)) => {
                 if is_float(inner)
                     && let Some(place) = inner.to_packed::<PlaceElem>()
@@ -253,9 +264,13 @@ fn floats(
                         body: body_spans(&place.body),
                         text: paragraphs_text(&place.body),
                         ancestors: open.iter().copied().collect(),
+                        in_artifact: open.iter().any(|open| artifacts.contains(open)),
                     });
                 }
                 if let Some(location) = inner.location() {
+                    if inner.elem() == ArtifactElem::ELEM {
+                        artifacts.insert(location);
+                    }
                     open.push(location);
                 }
             }
@@ -585,7 +600,35 @@ fn walk(
                 {
                     ancestry.covered_by_par.insert(location, parent);
                 }
-                if stack.iter().any(|open| open.is_artifact) {
+                // A float written inside an artifact is drawn away from it:
+                // what such a float surely holds is decorative too. "Surely"
+                // as for list scoping: a paragraph by source (never by a
+                // match of words alone), any other element by its span in the
+                // body *and* its place in the float's own source range — so
+                // content reused from a `#let` stays kept wherever it shows.
+                let held_by_artifact_float = match &par {
+                    Some(par) => {
+                        !par.floats_by_source.is_empty()
+                            && par
+                                .floats_by_source
+                                .iter()
+                                .all(|index| floats.all[*index].in_artifact)
+                    }
+                    None => {
+                        !in_floats.is_empty()
+                            && in_floats
+                                .iter()
+                                .all(|index| floats.all[*index].in_artifact)
+                            && source_range(engine, inner.span()).is_some_and(|range| {
+                                in_floats.iter().any(|index| {
+                                    floats.all[*index]
+                                        .range
+                                        .is_some_and(|outer| contains(outer, range))
+                                })
+                            })
+                    }
+                };
+                if held_by_artifact_float || stack.iter().any(|open| open.is_artifact) {
                     ancestry.in_artifact.insert(location);
                 }
                 if stack
@@ -609,7 +652,8 @@ fn walk(
                     location,
                     floats: in_floats,
                     par,
-                    is_artifact: inner.elem() == ArtifactElem::ELEM,
+                    is_artifact: inner.elem() == ArtifactElem::ELEM
+                        || held_by_artifact_float,
                     is_container: is_emitted_container(inner.elem()),
                     list_scope: list_scope(inner),
                     glyphs_in_artifact: 0,

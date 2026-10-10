@@ -2386,15 +2386,32 @@ fn decorative_content_is_never_emitted() {
     let notes: Vec<&str> = cnd.footnotes.iter().map(|f| f.text.as_str()).collect();
     assert_eq!(notes, ["Kept note."], "only the kept footnote is pooled");
     assert_eq!(
-        cnd.footnotes[0].label, "2",
+        cnd.footnotes[0].label, "3",
         "a kept footnote keeps the ordinal the page shows"
     );
     let mut edges = Vec::new();
     collect_footnote_labels(&cnd.nodes, &mut edges);
     assert_eq!(
         edges,
-        ["2"],
+        ["3"],
         "one footnote edge, from the kept marker; none from decorative markers"
+    );
+
+    // `refs` labels and `links` hrefs are part of the JSON checked above, so
+    // a decorative `@kept-fig` or `#link(..)` would surface as an edge to
+    // "kept-fig" here: the only node pointing at the kept figure is none.
+    assert_eq!(
+        incoming_count(&cnd.nodes, "kept-fig"),
+        0,
+        "a reference or link written in decorative content adds no edge"
+    );
+    assert!(
+        paragraphs.iter().any(|p| p == "Kept reused words."),
+        "content reused in a decorative float stays where it is kept: {paragraphs:?}"
+    );
+    assert!(
+        paragraphs.iter().any(|p| p == "Kept after the decorative block."),
+        "the paragraph after a decorative block is kept: {paragraphs:?}"
     );
 
     let cites = cites_of_paragraph(&cnd.nodes, "Kept cites")

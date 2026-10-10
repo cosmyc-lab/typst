@@ -94,6 +94,7 @@ impl Output for CndDocument {
             &info,
             &ancestry,
         )?;
+        ctx.artifact_locations = ancestry.artifact_locations().clone();
         refs::rebuild_label_index(&mut ctx, introspector.as_ref());
         convert::apply_metadata(&mut ctx);
 
