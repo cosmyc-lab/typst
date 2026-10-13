@@ -3313,6 +3313,7 @@ dependencies = [
  "dirs",
  "ecow",
  "fs_extra",
+ "hayro-syntax",
  "memchr",
  "open",
  "parking_lot",

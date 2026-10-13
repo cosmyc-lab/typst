@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use ecow::eco_format;
@@ -84,6 +84,12 @@ pub struct CompileConfig {
     pub deps_format: DepsFormat,
     /// The PPI (pixels per inch) to use for PNG export.
     pub ppi: Option<f64>,
+    /// Where to write the PDF of a CND compile, if anywhere.
+    pub cnd_pdf: Option<PathBuf>,
+    /// Where to write the first page of a CND compile as PNG, if anywhere.
+    pub cnd_preview: Option<PathBuf>,
+    /// The PPI of that PNG.
+    pub cnd_preview_ppi: f64,
     /// The export cache for images, used for caching output files in `typst
     /// watch` sessions with images.
     pub export_cache: ExportCache,
@@ -146,6 +152,15 @@ impl CompileConfig {
                 },
             ))
         });
+
+        if (args.cnd_pdf.is_some() || args.cnd_preview.is_some())
+            && output_format != OutputFormat::Cnd
+        {
+            bail!("--cnd-pdf and --cnd-preview need --format cnd");
+        }
+        if !(args.cnd_preview_ppi.is_finite() && args.cnd_preview_ppi > 0.0) {
+            bail!("--cnd-preview-ppi must be a positive number");
+        }
 
         let pages = args.pages.as_ref().map(|export_ranges| {
             PageRanges::new(
@@ -272,6 +287,9 @@ impl CompileConfig {
                 })
                 .transpose()?,
             ppi: args.ppi,
+            cnd_pdf: args.cnd_pdf.clone(),
+            cnd_preview: args.cnd_preview.clone(),
+            cnd_preview_ppi: args.cnd_preview_ppi,
             diagnostic_format: args.process.diagnostic_format,
             open: args.open.clone(),
             export_cache: ExportCache::new(),
@@ -367,9 +385,13 @@ fn compile_and_export(
         OutputFormat::Bundle => typst::compile::<Bundle>(world)
             .and_then(|bundle| export_bundle(bundle, config)),
         OutputFormat::Cnd => {
-            let Warned { output, warnings } =
+            let Warned { output, mut warnings } =
                 typst::compile::<typst_cnd::CndDocument>(&*world);
-            let result = output.and_then(|document| export_cnd(&document, world, config));
+            let result = output.and_then(|document| {
+                export_cnd(&document, world, config)?;
+                warnings.extend(export_cnd_renders(&document, config));
+                Ok(())
+            });
             Warned {
                 output: result.map(|()| vec![config.output.clone()]),
                 warnings,
@@ -415,6 +437,84 @@ fn export_cnd(
         .write(json.as_bytes())
         .map_err(|err| eco_format!("failed to write CND file ({err})"))
         .at(Span::detached())
+}
+
+/// Writes the optional renders of a CND compile (`--cnd-pdf`,
+/// `--cnd-preview`) from the pages the CND was read from. Each failure comes
+/// back as a warning named after its flag and never fails the compile: the
+/// CND is already written. A document without pages writes neither.
+fn export_cnd_renders(
+    document: &typst_cnd::CndDocument,
+    config: &CompileConfig,
+) -> Vec<SourceDiagnostic> {
+    let mut warnings = Vec::new();
+    let paged = document.paged();
+    let Some(first) = paged.pages().first() else { return warnings };
+
+    if let Some(path) = &config.cnd_pdf {
+        let Warned { output, warnings: pdf_warnings } =
+            typst_pdf::pdf(paged, &cnd_pdf_options(config));
+        warnings.extend(pdf_warnings.iter().map(|w| cnd_warning("cnd-pdf", &w.message)));
+        match output {
+            Ok(buffer) => {
+                if let Err(err) = std::fs::write(path, &buffer) {
+                    warnings.push(cnd_warning(
+                        "cnd-pdf",
+                        &eco_format!("failed to write PDF file ({err})"),
+                    ));
+                }
+            }
+            Err(errors) => {
+                warnings
+                    .extend(errors.iter().map(|e| cnd_warning("cnd-pdf", &e.message)));
+            }
+        }
+    }
+
+    if let Some(path) = &config.cnd_preview {
+        // The CND world registers no PNG format, so the document holds no
+        // PNG options to read; `--cnd-preview-ppi` sets the only one there is.
+        let options = cnd_preview_options(config).resolve(&PngFormatOptions::default());
+        let written = typst_render::render(first, &options)
+            .encode_png()
+            .map_err(|err| eco_format!("failed to encode PNG file ({err})"))
+            .and_then(|buf| {
+                std::fs::write(path, buf)
+                    .map_err(|err| eco_format!("failed to write PNG file ({err})"))
+            });
+        if let Err(message) = written {
+            warnings.push(cnd_warning("cnd-preview", &message));
+        }
+    }
+
+    warnings
+}
+
+/// A render warning, prefixed with its flag so a caller can tell it from
+/// the document's own diagnostics.
+fn cnd_warning(flag: &str, message: &str) -> SourceDiagnostic {
+    SourceDiagnostic::warning(Span::detached(), eco_format!("{flag}: {message}"))
+}
+
+/// `--format pdf`'s options (creation date from `--creation-timestamp`)
+/// for the whole document: the page range, standard and tagging flags of
+/// `--format pdf` are left out, so the document's own settings apply.
+fn cnd_pdf_options(config: &CompileConfig) -> PdfOptions {
+    let mut options = pdf_options(config);
+    options.format.pages = None;
+    options.format.standard = None;
+    options.format.tagged = None;
+    options
+}
+
+/// `--format png`'s options at `--cnd-preview-ppi`.
+fn cnd_preview_options(config: &CompileConfig) -> RenderOptions {
+    RenderOptions {
+        render_bleed: false,
+        format: PngFormatOptions {
+            pixel_per_pt: Some(Scalar::new(config.cnd_preview_ppi / 72.0)),
+        },
+    }
 }
 
 /// Export to a paged target format.

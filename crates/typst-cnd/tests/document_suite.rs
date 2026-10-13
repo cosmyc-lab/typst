@@ -2504,3 +2504,11 @@ fn decorative_multipage_keeps_flow_and_kept_floats() {
     }
     assert!(!json.contains("Ornament"), "decorative content leaked: {json}");
 }
+
+#[test]
+fn the_paged_layout_is_kept_for_export() {
+    // The CND is read from a paged layout; the document keeps it, so a PDF
+    // or a page image can be exported without laying it out again.
+    assert!(!compile_example("minimal.typ").paged().pages().is_empty());
+    assert!(compile_example("complex_multipage.typ").paged().pages().len() > 1);
+}

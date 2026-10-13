@@ -422,6 +422,22 @@ pub struct CompileArgs {
     #[arg(long = "ppi")]
     pub ppi: Option<f64>,
 
+    /// Also writes the whole document as PDF to this path, exported from
+    /// the same layout as the CND (no second layout). Only with
+    /// `--format cnd`. A failure is a warning: the CND is still written.
+    #[arg(long = "cnd-pdf", value_name = "PATH", value_hint = ValueHint::FilePath)]
+    pub cnd_pdf: Option<PathBuf>,
+
+    /// Also writes the document's first page as PNG to this path, exported
+    /// from the same layout as the CND. Only with `--format cnd`. A failure
+    /// is a warning: the CND is still written.
+    #[arg(long = "cnd-preview", value_name = "PATH", value_hint = ValueHint::FilePath)]
+    pub cnd_preview: Option<PathBuf>,
+
+    /// The PPI (pixels per inch) of `--cnd-preview`.
+    #[arg(long = "cnd-preview-ppi", value_name = "PPI", default_value_t = 72.0)]
+    pub cnd_preview_ppi: f64,
+
     /// File path to which a Makefile with the current compilation's
     /// dependencies will be written.
     #[clap(long = "make-deps", value_name = "PATH", hide = true)]
