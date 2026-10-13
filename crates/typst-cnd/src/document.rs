@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ecow::eco_vec;
-use typst_layout::{PagedIntrospector, layout_document};
+use typst_layout::{PagedDocument, PagedIntrospector, layout_document};
 use typst_library::diag::{SourceResult, error};
 use typst_library::engine::Engine;
 use typst_library::format::DocumentFormatOptions;
@@ -30,6 +30,9 @@ pub struct CndDocument {
     /// of these formats, but `Document` requires them and they are carried
     /// through unchanged from the paged layout this document is built on.
     options: DocumentFormatOptions,
+    /// The paged layout the document was read from, kept so the same pages
+    /// can be exported (a PDF, a page image) without a second layout.
+    paged: PagedDocument,
 }
 
 impl CndDocument {
@@ -53,6 +56,11 @@ impl CndDocument {
 
     pub fn introspector(&self) -> &Arc<PagedIntrospector> {
         &self.introspector
+    }
+
+    /// The paged layout this document was read from.
+    pub fn paged(&self) -> &PagedDocument {
+        &self.paged
     }
 }
 
@@ -134,6 +142,7 @@ impl Output for CndDocument {
             footnotes,
             introspector,
             options,
+            paged,
         })
     }
 

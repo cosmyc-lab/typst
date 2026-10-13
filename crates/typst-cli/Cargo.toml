@@ -76,6 +76,7 @@ features = [
 typst-dev-assets = { workspace = true }
 memchr = { workspace = true }
 tempfile = { workspace = true }
+hayro-syntax = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true }
