@@ -1497,6 +1497,7 @@ fn example_files_exist() {
         "admonition_across_pages.typ",
         "admonition_floats.typ",
         "admonition_boxed.typ",
+        "boxed_blocks.typ",
         "admonition_stray_marker.typ",
         "admonition_containers.typ",
         "admonition_columns.typ",
@@ -4292,6 +4293,30 @@ fn a_boxed_block_quote_is_text_of_its_paragraph() {
         .expect("the sentence holding the box");
     assert_eq!(paragraph, "A sentence holds QD1 boxed block quote inline.");
     assert_eq!(block_quotes(&cnd.nodes).len(), 3);
+}
+
+#[test]
+fn boxed_terms_math_and_raw_are_text_of_their_paragraph() {
+    // A term list, a block equation or a block raw in an inline `box` is
+    // laid out in the line of the paragraph that holds it, which renders
+    // its text: it is no node. The same blocks in the flow are nodes.
+    let cnd = cnd_for_example("boxed_blocks.typ");
+    let section = find_heading(&cnd.nodes, "Boxed blocks");
+    assert_eq!(
+        node_types(&section.children),
+        ["paragraph", "paragraph", "paragraph", "terms", "math", "code"]
+    );
+    let paragraphs = paragraph_values(&section.children);
+    assert!(paragraphs[0].contains("BT1 term"), "{paragraphs:?}");
+    assert!(paragraphs[1].contains("x + y"), "{paragraphs:?}");
+    assert!(paragraphs[2].contains("BR1 boxed raw"), "{paragraphs:?}");
+    for text in ["BT1", "BT2", "x + y", "BR1", "Flow term"] {
+        assert_eq!(occurrences(&cnd, text), 1, "{text:?} is kept once");
+    }
+    // The flow's equation and listing are the only math and code nodes.
+    let types: Vec<&str> = all_nodes(&cnd.nodes).into_iter().map(node_type).collect();
+    assert_eq!(types.iter().filter(|kind| **kind == "math").count(), 1);
+    assert_eq!(types.iter().filter(|kind| **kind == "code").count(), 1);
 }
 
 #[test]

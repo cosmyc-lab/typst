@@ -540,6 +540,17 @@ fn is_node_kind(inner: &Content) -> bool {
 }
 
 /// Whether `inner` owns cell slots: a table or a grid.
+/// Whether `inner` is a block raw or a block equation: a node of its own,
+/// with no slot.
+fn is_block_leaf(inner: &Content) -> bool {
+    if let Some(raw) = inner.to_packed::<RawElem>() {
+        return raw.block.get(StyleChain::default());
+    }
+    inner
+        .to_packed::<EquationElem>()
+        .is_some_and(|equation| equation.block.get(StyleChain::default()))
+}
+
 fn owns_cells(inner: &Content) -> bool {
     let elem = inner.elem();
     elem == TableElem::ELEM || elem == GridElem::ELEM
@@ -1391,15 +1402,19 @@ fn walk(
                         ancestry.covered_titles.insert(admonition);
                     }
                 }
-                // A list, a table, a grid or a block quote in an inline
-                // `box` is laid out inside the line of the paragraph that
-                // holds it, which renders its text: the same test as for a
-                // box's paragraph. A block quote whose own show rule boxes
-                // it (`show quote: it => box(it.body)`) is not: the
-                // paragraph holds the quote's tags, and its text leaves the
-                // quote out (see `extract::is_excluded_scope`).
+                // A list, a table, a grid, a block quote, a block raw or a
+                // block equation in an inline `box` is laid out inside the
+                // line of the paragraph that holds it, which renders its
+                // text: the same test as for a box's paragraph. A block
+                // quote whose own show rule boxes it (`show quote: it =>
+                // box(it.body)`) is not: the paragraph holds the quote's
+                // tags, and its text leaves the quote out (see
+                // `extract::is_excluded_scope`).
                 let is_quote = matches!(opens, Some(SlotKey::QuoteBody(_)));
-                if (owns_items(inner) || owns_cells(inner) || is_quote)
+                if (owns_items(inner)
+                    || owns_cells(inner)
+                    || is_quote
+                    || is_block_leaf(inner))
                     && stack.iter().any(|open| open.par.is_some())
                     && let Some(parent) =
                         covering_par(stack, &open_par(engine, floats, inner))

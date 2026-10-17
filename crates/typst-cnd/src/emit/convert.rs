@@ -594,6 +594,9 @@ pub fn convert_from_introspector(
 
     for elem in introspector.query(&TermsElem::ELEM.select()) {
         let Some(loc) = elem.location() else { continue };
+        if !admits_block(ancestry, loc) {
+            continue;
+        }
         items.push((loc, elem));
     }
 
@@ -616,6 +619,10 @@ pub fn convert_from_introspector(
             continue;
         }
         let Some(loc) = elem.location() else { continue };
+        // One in an inline `box` is text of the box's paragraph.
+        if !admits_block(ancestry, loc) {
+            continue;
+        }
         items.push((loc, elem));
     }
 
@@ -625,6 +632,10 @@ pub fn convert_from_introspector(
             continue;
         }
         let Some(loc) = elem.location() else { continue };
+        // One in an inline `box` is text of the box's paragraph.
+        if !admits_block(ancestry, loc) {
+            continue;
+        }
         items.push((loc, elem));
     }
 
