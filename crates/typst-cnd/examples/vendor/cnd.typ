@@ -1,0 +1,50 @@
+// CND authoring helpers — the official pure-Typst package for tagging
+// documents with CND metadata. Works on any stock Typst toolchain: the only
+// contract is the "cnd.metadata" state key, which CND emitters read
+// (see spec/cnd-spec.md and ADR 0023).
+//
+// Usage: `#import "/cnd.typ"` — a whole-file import binds this file as a
+// module named `cnd` (by file stem), and module members are callable
+// directly: `#cnd.table(..)`, `#cnd.metadata.update(..)`. Do NOT export
+// these as a dict (e.g. `#let cnd = (table: ..., metadata: ...)`): in
+// stock Typst, a function stored in a dictionary field cannot be called
+// directly as `#cnd.table(..)` — the compiler requires the awkward
+// `#(cnd.table)(..)` — which breaks call-syntax parity with the
+// compiler-injected module this package replaces.
+
+// The CND metadata state. Import the whole file (see header) rather than
+// destructuring individual names — `#import "/cnd.typ": table` would shadow
+// Typst's own built-in `table`.
+#let metadata = state("cnd.metadata", (:))
+
+// Wraps already-built content (typically a `table(..)` call) and brackets it
+// with the table's kind in the cnd.metadata state: "data" (a dataset of
+// records) or "content" (cells to read). Any other string passes through:
+// the kind is an open vocabulary. The author writes `kind:`; the state
+// carries it under the dedicated key `table-kind`, which an emitter reads
+// and the CND writes as `table.kind` (spec §6.3). A dedicated key never
+// collides with the author's own metadata, such as a document-level `kind`,
+// so the hint is set before the table and removed after it, with nothing
+// to read back or restore. Pass the content in — don't let this function
+// build it: the source snippet emitters record for a table comes from the
+// table's own span, which must stay at the document's call site (ADR 0023).
+#let table(body, kind: none) = {
+  if kind == none {
+    return body
+  }
+  metadata.update(it => it + ("table-kind": kind))
+  body
+  metadata.update(it => {
+    let d = it
+    let _ = d.remove("table-kind", default: none)
+    d
+  })
+}
+
+// Marks content as purely decorative — an ornament, a logo, an icon, a
+// background — so CND emitters never emit it: no node, no text, no
+// footnote (spec §2, "Decorative content"; docs/proposals/0011). It is
+// Typst's own `pdf.artifact`, so the PDF's accessibility tree skips it too.
+// Never wrap content that carries meaning: a chart or a diagram goes in a
+// `figure` with a caption that says what it shows.
+#let decorative(body) = pdf.artifact(body)

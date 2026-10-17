@@ -1,6 +1,5 @@
 //! Typst's CND exporter.
 
-mod cnd;
 mod document;
 mod emit;
 mod location;

@@ -27,8 +27,9 @@ pub struct CndWorld {
 }
 
 /// Builds the standard library a CND compilation needs: `inputs` as
-/// `sys.inputs`, `features` plus [`Feature::CndSemantics`], the `pdf`
-/// format's bindings, and the deprecated `cnd` global.
+/// `sys.inputs`, `features` plus [`Feature::CndSemantics`], and the `pdf`
+/// format's bindings. It defines no global of its own: a document tags its
+/// content through the authoring package (`cnd.typ`) it imports.
 pub fn cnd_library(inputs: Dict, features: impl IntoIterator<Item = Feature>) -> Library {
     // `Feature::CndSemantics` makes every fully-inline fragment body (a
     // `block[…]`, a grid cell, a `place`, a `box`) realize into a real,
@@ -43,13 +44,10 @@ pub fn cnd_library(inputs: Dict, features: impl IntoIterator<Item = Feature>) ->
     // omitting it would reject documents the CND exporter used to accept.
     // The other formats were never reachable from this world, so they stay
     // unregistered — CND is this world's only output.
-    let mut library = Library::builder([typst_pdf::FORMAT])
+    Library::builder([typst_pdf::FORMAT])
         .with_inputs(inputs)
         .with_features(features)
-        .build();
-    // DEPRECATED — see crate::cnd's module doc. Removal tracked for the next release.
-    library.global.scope_mut().define("cnd", crate::cnd::module());
-    library
+        .build()
 }
 
 impl CndWorld {
