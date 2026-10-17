@@ -106,6 +106,27 @@ jobs:
       - run: cargo doc --workspace --no-deps --document-private-items
       - run: git diff --exit-code
 
+  cnd-sdk-gate:
+    name: Validate CND output against the pinned cnd-sdk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - name: Read the pinned cnd-sdk revision
+        id: sdk-ref
+        run: echo "ref=$(cat crates/typst-cnd/CND_SDK_REF)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          repository: cosmyc-lab/cnd-sdk
+          ref: ${{ steps.sdk-ref.outputs.ref }}
+          path: cnd-sdk
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - run: uv sync --project cnd-sdk --frozen
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - run: cargo test -p typst-cnd --test sdk_gate -- --nocapture
+        env:
+          CND_SDK_DIR: ${{ github.workspace }}/cnd-sdk
+
   docs:
     name: Check documentation (website and PDF)
     runs-on: ubuntu-latest
