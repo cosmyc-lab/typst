@@ -4828,6 +4828,20 @@ fn ref_never_lands_on_an_unlabelled_target() {
         }
     }
 
+    // The last paragraph of a section holds no copy of the references
+    // written elsewhere in it (here, in a term above it).
+    let cnd = cnd_for_example("marks.typ");
+    let last = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Paragraph(p) if p.text.value == "Une phrase en français." => {
+                Some(p)
+            }
+            _ => None,
+        })
+        .expect("the French paragraph");
+    assert!(last.text.refs.is_empty(), "{:?}", last.text.refs);
+
     // The figure placed in a drawing is no node: a reference to it has no
     // edge, and its label goes to no other node.
     let cnd = cnd_for_example("ref_exact_targets.typ");
