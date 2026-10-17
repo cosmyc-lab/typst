@@ -192,6 +192,9 @@ pub struct Ancestry {
     /// The figures whose body has such an element inside a `place` that
     /// does not float, written in the body: a positioned drawing.
     figures_with_placed_nodes: FxHashSet<Location>,
+    /// The figures whose body holds decorative content (an artifact): such
+    /// a body is never kept as `raw`, which would carry its words.
+    figures_with_artifacts: FxHashSet<Location>,
     /// While walking: the grids laid out in a figure's body that have no
     /// anchor yet, with that figure and whether they sit in a `place`.
     grids_in_figures: FxHashMap<Location, (Location, bool)>,
@@ -334,8 +337,8 @@ impl Ancestry {
     }
 
     /// Note that an element that may become a node is laid out in the body
-    /// of the figure at `figure`, inside a `place` that does not float when
-    /// `placed`.
+    /// of the figure at `figure`, inside a `place` that does not float,
+    /// written in the body, when `placed`.
     fn note_figure_node(&mut self, figure: Location, placed: bool) {
         self.figures_with_nodes.insert(figure);
         if placed {
@@ -345,13 +348,17 @@ impl Ancestry {
 
     /// Whether the figure at `figure` is a drawing (cnd-sdk spec §6.7): its
     /// body lays out no element that may become a node (a `rect`, a line, a
-    /// canvas of shapes), or one of those elements sits inside a `place`
-    /// that does not float, written in the body — a diagram, or a helper
-    /// that positions labels. Its content is then its source, not the
-    /// scattered pieces lifted out of it.
+    /// canvas of shapes; an empty paragraph does not count), or an element
+    /// laid out in it sits inside a `place` that does not float, written in
+    /// the body — a diagram, or a helper that positions labels. Its content
+    /// is then its source, not the scattered pieces lifted out of it.
+    ///
+    /// A body holding decorative content and no node is not a drawing: its
+    /// source would carry the decoration's words.
     pub fn is_drawing(&self, figure: Location) -> bool {
-        !self.figures_with_nodes.contains(&figure)
-            || self.figures_with_placed_nodes.contains(&figure)
+        self.figures_with_placed_nodes.contains(&figure)
+            || (!self.figures_with_nodes.contains(&figure)
+                && !self.figures_with_artifacts.contains(&figure))
     }
 }
 
@@ -493,14 +500,25 @@ fn is_placed(inner: &Content) -> bool {
         .is_some_and(|place| !place.float.get(StyleChain::default()))
 }
 
-/// Whether a `place` that does not float is open inside the figure at
-/// `figure`, deeper on `stack` than the figure itself. A `place` written
-/// around the figure does not count.
+/// Whether a `place` that does not float, written in the body of the
+/// figure at `figure`, is open deeper on `stack` than the figure itself. A
+/// `place` written around the figure — by a show rule
+/// (`show figure: it => place(center, it)`), say — is laid out inside it
+/// too, but is not written in its body, so it does not count. When the
+/// body's source range is unknown, any such `place` counts.
 fn is_placed_in(stack: &[Open], figure: Location) -> bool {
-    stack
-        .iter()
-        .rposition(|open| open.location == figure)
-        .is_some_and(|index| stack[index + 1..].iter().any(|open| open.is_placed))
+    let Some(index) = stack.iter().rposition(|open| open.location == figure) else {
+        return false;
+    };
+    let body = stack[index].body_range;
+    stack[index + 1..].iter().any(|open| {
+        open.is_placed
+            && match (body, open.range) {
+                (Some(body), Some(place)) => contains(body, place),
+                (Some(_), None) => false,
+                (None, _) => true,
+            }
+    })
 }
 
 /// What identifies a float's body once it is drawn away from its tags.
@@ -803,6 +821,13 @@ struct Open {
     is_grid: bool,
     /// Whether it is a `place` that does not float (see [`is_placed`]).
     is_placed: bool,
+    /// For such a `place`, where it is written.
+    range: Option<SourceRange>,
+    /// For a figure, where its body is written (see [`is_placed_in`]).
+    body_range: Option<SourceRange>,
+    /// For a paragraph laid out in a figure's body, that figure: whether
+    /// the paragraph routes a node is settled once its glyphs are counted.
+    figure_par: Option<Location>,
     /// For a cell, the table or grid it is a cell of, and its position.
     cell_owner: Option<Location>,
     cell_position: Option<(usize, usize)>,
@@ -1114,22 +1139,38 @@ fn walk(
                 {
                     ancestry.absorbed.insert(location);
                 }
+                let mut figure_par = None;
                 match innermost_slot(stack, floats, &in_floats, location) {
                     Some(Found::Slot(slot)) => {
                         ancestry.slots.insert(location, slot);
-                        if let SlotKey::FigureBody(figure) = slot
-                            && !ancestry.absorbed.contains(&location)
-                            && !ancestry.in_artifact.contains(&location)
-                            && !ancestry.covered_by_par.contains_key(&location)
-                        {
-                            let placed = is_placed_in(stack, figure);
-                            if flags.introspectable && is_node_kind(inner) {
-                                ancestry.note_figure_node(figure, placed);
-                            } else if inner.elem() == GridElem::ELEM {
-                                // Settled when the grid finds its anchor.
-                                ancestry
-                                    .grids_in_figures
-                                    .insert(location, (figure, placed));
+                        if let SlotKey::FigureBody(figure) = slot {
+                            if ancestry.in_artifact.contains(&location) {
+                                ancestry.figures_with_artifacts.insert(figure);
+                            } else if !ancestry.absorbed.contains(&location) {
+                                let placed = is_placed_in(stack, figure);
+                                let node = flags.introspectable && is_node_kind(inner);
+                                let covered =
+                                    ancestry.covered_by_par.contains_key(&location);
+                                // A label placed in a box is part of the
+                                // box's paragraph, yet still a positioned
+                                // piece of a drawing.
+                                if node && placed {
+                                    ancestry.figures_with_placed_nodes.insert(figure);
+                                }
+                                if covered {
+                                    // Its text is the covering paragraph's.
+                                } else if is_par {
+                                    // Settled when it ends: an empty one
+                                    // routes nothing.
+                                    figure_par = Some(figure);
+                                } else if node {
+                                    ancestry.note_figure_node(figure, placed);
+                                } else if inner.elem() == GridElem::ELEM {
+                                    // Settled when the grid finds its anchor.
+                                    ancestry
+                                        .grids_in_figures
+                                        .insert(location, (figure, placed));
+                                }
                             }
                         }
                     }
@@ -1222,6 +1263,13 @@ fn walk(
                     is_body_cell,
                     is_grid: inner.elem() == GridElem::ELEM,
                     is_placed: is_placed(inner),
+                    range: is_placed(inner)
+                        .then(|| source_range(engine, inner.span()))
+                        .flatten(),
+                    body_range: inner
+                        .to_packed::<FigureElem>()
+                        .and_then(|figure| source_range(engine, figure.body.span())),
+                    figure_par,
                     cell_owner,
                     cell_position: cell_position(inner),
                     had_child: false,
@@ -1253,6 +1301,13 @@ fn walk(
                                 cells.clear();
                             }
                             cells.push((slot, open.location));
+                        }
+                        if let Some(figure) = open.figure_par {
+                            if open.glyphs_outside_artifact > 0 {
+                                ancestry.figures_with_nodes.insert(figure);
+                            } else if open.glyphs_in_artifact > 0 {
+                                ancestry.figures_with_artifacts.insert(figure);
+                            }
                         }
                         if open.is_text_node
                             && open.glyphs_outside_artifact == 0

@@ -546,9 +546,13 @@ pub fn convert_from_introspector(
         }
         // A paragraph made only of text that belongs to another node (a
         // heading body re-emitted by a show rule, a boxed block quote) or to
-        // no node (a PDF artifact) has nothing of its own left. One that was
-        // empty to begin with is not affected.
+        // no node (a PDF artifact) has nothing of its own left.
         if extract::is_emptied_by_exclusion(&par.body) {
+            continue;
+        }
+        // A paragraph with no text at all — a `box` holding a shape, say —
+        // says nothing.
+        if extract::extract_text(&par.body).trim().is_empty() {
             continue;
         }
         items.push((loc, elem));
@@ -572,7 +576,7 @@ pub fn convert_from_introspector(
     for (location, content) in items {
         let site = Site {
             anchor: anchors.get(&location).copied(),
-            drawing: ancestry.is_drawing(location),
+            drawing: content.is::<FigureElem>() && ancestry.is_drawing(location),
         };
         if let Some(node) = dispatch(
             engine,

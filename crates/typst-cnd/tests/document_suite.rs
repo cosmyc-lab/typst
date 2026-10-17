@@ -1385,6 +1385,7 @@ fn example_files_exist() {
         "containers_grids.typ",
         "tables_across_pages.typ",
         "figure_kinds.typ",
+        "figure_drawings.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -2748,6 +2749,65 @@ fn a_floating_figure_keeps_its_body() {
     for token in ["KE1", "KE2", "KE3"] {
         assert_eq!(counts.get(token).copied(), Some(1), "{token} once");
     }
+}
+
+/// The paragraph texts anywhere in the tree, in reading order.
+fn every_paragraph_text(nodes: &[CndNode]) -> Vec<&str> {
+    all_nodes(nodes)
+        .into_iter()
+        .filter_map(|n| match n {
+            CndNode::Paragraph(p) => Some(p.text.value.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_boxed_canvas_with_placed_labels_is_raw() {
+    // The labels placed in a box are part of the box's paragraph, yet they
+    // are positioned pieces of a drawing: they are not lifted out as text.
+    let cnd = cnd_for_example("figure_drawings.typ");
+    let canvas = figure_with_caption(&cnd, "DA3 boxed canvas");
+    assert!(canvas.children.is_empty(), "{:?}", node_types(&canvas.children));
+    let raw = canvas.raw.as_ref().expect("raw");
+    for part in ["place(line(", "DA1 node start", "DA2 node end"] {
+        assert!(raw.value.contains(part), "{part:?} in {:?}", raw.value);
+    }
+    let paragraphs = every_paragraph_text(&cnd.nodes);
+    assert!(
+        paragraphs.iter().all(|p| !p.contains("DA1") && !p.contains("DA2")),
+        "{paragraphs:?}"
+    );
+}
+
+#[test]
+fn a_boxed_shape_is_a_drawing_and_empty_paragraphs_are_no_nodes() {
+    let cnd = cnd_for_example("figure_drawings.typ");
+    let shape = figure_with_caption(&cnd, "DB1 boxed shape");
+    assert!(shape.children.is_empty(), "{:?}", node_types(&shape.children));
+    assert_eq!(
+        shape.raw.as_ref().map(|raw| raw.value.as_str()),
+        Some("box(rect(width: 1cm, height: 1cm))")
+    );
+    // A boxed shape alone in the flow realizes a paragraph with no text: it
+    // is no node, and the paragraphs around it are kept.
+    let paragraphs = every_paragraph_text(&cnd.nodes);
+    assert!(paragraphs.iter().all(|p| !p.trim().is_empty()), "{paragraphs:?}");
+    assert_eq!(
+        paragraph_texts_in_order(&cnd.nodes),
+        ["DC1 before the shape.", "DC2 after the shape."]
+    );
+}
+
+#[test]
+fn a_figure_placed_by_a_show_rule_is_no_drawing() {
+    // `show figure: it => place(center, it)` lays the figure out in a
+    // `place` that is not written in its body: it keeps its children.
+    let cnd = cnd_for_example("figure_drawings.typ");
+    let framed = figure_with_caption(&cnd, "DD2 framed");
+    assert_eq!(framed.kind.as_deref(), Some("framed"));
+    assert_eq!(paragraph_values(&framed.children), ["DD1 placed by a rule."]);
+    assert!(framed.raw.is_none());
 }
 
 /// Content wrapped in `pdf.artifact` is decorative and never reaches the CND
