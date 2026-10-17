@@ -37,7 +37,14 @@
 //!   row counts: a repeated copy of a header or footer cell, or the first
 //!   copy of a footer cell, drawn between two pages of the row, is never
 //!   taken for it even when it holds nothing;
-//! - a quote, a figure, a footnote entry: the element's own tag.
+//! - a block quote, a figure, a footnote entry: the element's own tag. An
+//!   inline quote opens no slot: it is text of the paragraph around it. A
+//!   footnote entry is printed at the bottom of the page; its number is a
+//!   `Label` marker inside its first paragraph, which that paragraph's text
+//!   leaves out (see `extract`). The rest of a note too long for its page
+//!   is printed on the next one with no entry tags around it: what is
+//!   written in the note's body and laid out there takes the entry's slot
+//!   (see [`Ancestry::note_spill`]).
 //!
 //! [`Feature::CndSemantics`]: typst_library::Feature::CndSemantics
 
@@ -48,7 +55,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use typst_library::WorldExt;
 use typst_library::engine::Engine;
 use typst_library::foundations::{
-    Content, Element, NativeElement, SequenceElem, Smart, StyleChain,
+    Content, NativeElement, SequenceElem, Smart, StyleChain,
 };
 use typst_library::introspection::{Introspector, Location, Tag};
 use typst_library::layout::{Frame, FrameItem, GridCell, GridElem, GroupItem, PlaceElem};
@@ -134,8 +141,15 @@ impl SlotKey {
             }
         } else if elem == TableCell::ELEM || elem == GridCell::ELEM {
             Some(Self::Cell(location))
-        } else if elem == QuoteElem::ELEM {
-            Some(Self::QuoteBody(location))
+        } else if let Some(quote) = inner.to_packed::<QuoteElem>() {
+            // Only a block quote is a node. An inline one is text of its
+            // paragraph: what is laid out in it stays in the slot around it.
+            // The element is materialized, so `block` holds its realized
+            // value (see `extract::is_excluded_scope`).
+            quote
+                .block
+                .get(StyleChain::default())
+                .then_some(Self::QuoteBody(location))
         } else if elem == FigureElem::ELEM {
             Some(Self::FigureBody(location))
         } else if elem == FootnoteEntry::ELEM {
@@ -158,12 +172,6 @@ pub struct Ancestry {
     /// footers, page decorations), which Typst's accessibility model already
     /// marks as "not document content".
     in_artifact: FxHashSet<Location>,
-    /// Elements that sit inside a container the emit pipeline turns into a
-    /// node of its own — a table, a quote, a code block, an equation. Such a
-    /// node renders its own children, so a paragraph found inside one is that
-    /// container's content seen a second time. Only a container that the
-    /// element is written in counts (see [`Open::encloses`]).
-    in_container: FxHashSet<Location>,
     /// Each element's innermost slot, see [`Ancestry::slot_of`].
     slots: FxHashMap<Location, SlotKey>,
     /// Each list's, enum's or term list's item slots, in order.
@@ -198,6 +206,9 @@ pub struct Ancestry {
     /// While walking: the grids laid out in a figure's body that have no
     /// anchor yet, with that figure and whether they sit in a `place`.
     grids_in_figures: FxHashMap<Location, (Location, bool)>,
+    /// Each printed footnote entry, with where its note's body is written
+    /// (see [`Ancestry::note_spill`]).
+    note_bodies: Vec<(SourceRange, Location)>,
 }
 
 impl Ancestry {
@@ -212,6 +223,15 @@ impl Ancestry {
         }
         let floats = Floats::new(found);
         let places = FloatPlaces::of(paged);
+        for elem in paged.introspector().query(&FootnoteEntry::ELEM.select()) {
+            let Some(entry) = elem.to_packed::<FootnoteEntry>() else { continue };
+            let Some(location) = elem.location() else { continue };
+            if let Some(body) = entry.note.body_content()
+                && let Some(range) = content_range(engine, body)
+            {
+                ancestry.note_bodies.push((range, location));
+            }
+        }
         let mut stack: Vec<Open> = Vec::new();
         for page in paged.pages() {
             walk(
@@ -272,16 +292,6 @@ impl Ancestry {
         &self.in_artifact
     }
 
-    /// Whether `location` sits inside a container that is emitted as its own
-    /// node and renders the text itself — a quote, a figure's caption, a
-    /// footnote entry, the lines of a code block, an equation's numbering. A
-    /// list's, a term list's, a table's or a figure body's content is not:
-    /// it is routed into their slots (see [`Ancestry::slot_of`]), which
-    /// `convert` asks first.
-    pub fn is_in_emitted_container(&self, location: Location) -> bool {
-        self.in_container.contains(&location)
-    }
-
     /// The innermost slot enclosing the element at `location`: the body of
     /// the container whose node holds it.
     ///
@@ -336,6 +346,38 @@ impl Ancestry {
         self.absorbed.contains(&location) || self.is_artifact(location)
     }
 
+    /// The footnote entry the element `inner`, laid out at `location`, is
+    /// the continuation of, if any.
+    ///
+    /// A note too long for its page is broken: the rest of it is printed at
+    /// the bottom of the next page, with no entry tags around it. What is
+    /// laid out there would otherwise land in the flow — or in whatever
+    /// list or table is still open across the page break. An element that
+    /// may become a node, written in a note's body, laid out with no entry
+    /// open around it and not inside another such continuation, is that
+    /// note's: it takes the entry's slot.
+    fn note_spill(
+        &self,
+        engine: &Engine,
+        stack: &[Open],
+        inner: &Content,
+    ) -> Option<Location> {
+        if self.note_bodies.is_empty()
+            || stack.iter().any(|open| {
+                open.spilled.is_some()
+                    || matches!(open.slot, Some(SlotKey::FootnoteBody(_)))
+            })
+        {
+            return None;
+        }
+        let own = source_range(engine, inner.span())?;
+        self.note_bodies
+            .iter()
+            .filter(|(body, _)| contains(*body, own))
+            .min_by_key(|(body, _)| body.end - body.start)
+            .map(|(_, entry)| *entry)
+    }
+
     /// Note that an element that may become a node is laid out in the body
     /// of the figure at `figure`, inside a `place` that does not float,
     /// written in the body, when `placed`.
@@ -360,39 +402,6 @@ impl Ancestry {
             || (!self.figures_with_nodes.contains(&figure)
                 && !self.figures_with_artifacts.contains(&figure))
     }
-}
-
-/// Whether a paragraph laid out inside `elem` is a second copy of text the
-/// document already carries elsewhere. Layout-only containers — a bare
-/// `grid`, a `block`, a `place` — are deliberately absent: they produce no
-/// node, so their paragraphs are the only carrier of that text. So are
-/// lists and term lists: their items' paragraphs are routed into their
-/// slots. A table's cells and a figure's body are routed too (a routed slot
-/// is asked first), so a table only counts here for what is laid out in it
-/// outside any cell, and a figure for its caption.
-///
-/// Two kinds qualify. Most are emitted as a node that renders its own
-/// content, so a paragraph inside is that content seen twice. The outline is
-/// the exception: it is emitted as nothing at all, and every entry repeats a
-/// heading that is already a node of its own — navigation furniture.
-fn is_emitted_container(elem: Element) -> bool {
-    elem == HeadingElem::ELEM
-        || elem == QuoteElem::ELEM
-        || elem == RawElem::ELEM
-        || elem == EquationElem::ELEM
-        || elem == FigureElem::ELEM
-        || elem == TableElem::ELEM
-        // A footnote's rendered entry at the bottom of the page: its text is
-        // carried by the `footnotes` pool, which every marker refers to.
-        || elem == FootnoteEntry::ELEM
-        // Likewise a rendered bibliography entry, whose text the
-        // `bibliography` pool carries. With the default title the entries are
-        // swallowed by the generated heading's source range; with
-        // `title: none` — a hand-written "= References" — nothing catches
-        // them and each entry leaks as two paragraphs.
-        || elem == BibliographyElem::ELEM
-        // Table of contents.
-        || elem == OutlineElem::ELEM
 }
 
 /// Whether a paragraph laid out inside `inner` is absorbed (see
@@ -802,7 +811,6 @@ struct Open {
     /// `None` for non-paragraphs.
     par: Option<OpenPar>,
     is_artifact: bool,
-    is_container: bool,
     /// The slot this element opens, if any.
     slot: Option<SlotKey>,
     /// Whether a paragraph inside it is absorbed (see [`absorbs`]).
@@ -828,6 +836,9 @@ struct Open {
     /// For a paragraph laid out in a figure's body, that figure: whether
     /// the paragraph routes a node is settled once its glyphs are counted.
     figure_par: Option<Location>,
+    /// For an element laid out in the rest of a broken footnote, that
+    /// footnote's entry (see [`Ancestry::note_spill`]).
+    spilled: Option<Location>,
     /// For a cell, the table or grid it is a cell of, and its position.
     cell_owner: Option<Location>,
     cell_position: Option<(usize, usize)>,
@@ -1114,24 +1125,24 @@ fn walk(
                 {
                     ancestry.covered_by_par.insert(location, parent);
                 }
-                // A list, a table or a grid in an inline `box` is laid out
-                // inside the line of the paragraph that holds it, which
-                // renders its text: the same test as for a box's paragraph.
-                if (owns_items(inner) || owns_cells(inner))
+                // A list, a table, a grid or a block quote in an inline
+                // `box` is laid out inside the line of the paragraph that
+                // holds it, which renders its text: the same test as for a
+                // box's paragraph. A block quote whose own show rule boxes
+                // it (`show quote: it => box(it.body)`) is not: the
+                // paragraph holds the quote's tags, and its text leaves the
+                // quote out (see `extract::is_excluded_scope`).
+                let is_quote = matches!(opens, Some(SlotKey::QuoteBody(_)));
+                if (owns_items(inner) || owns_cells(inner) || is_quote)
                     && stack.iter().any(|open| open.par.is_some())
                     && let Some(parent) =
                         covering_par(stack, &open_par(engine, floats, inner))
+                    && !(is_quote && holds_tag_of(stack, parent, location))
                 {
                     ancestry.covered_by_par.insert(location, parent);
                 }
                 if scope.in_artifact(stack) {
                     ancestry.in_artifact.insert(location);
-                }
-                if stack
-                    .iter()
-                    .any(|open| open.is_container && open.encloses(floats, &in_floats))
-                {
-                    ancestry.in_container.insert(location);
                 }
                 if stack
                     .iter()
@@ -1187,6 +1198,16 @@ fn walk(
                         }
                     }
                     None => {}
+                }
+                let spilled = if (flags.introspectable && is_node_kind(inner))
+                    || inner.elem() == GridElem::ELEM
+                {
+                    ancestry.note_spill(engine, stack, inner)
+                } else {
+                    None
+                };
+                if let Some(entry) = spilled {
+                    ancestry.slots.insert(location, SlotKey::FootnoteBody(entry));
                 }
 
                 let slot = opens;
@@ -1254,7 +1275,6 @@ fn walk(
                     floats: in_floats,
                     par,
                     is_artifact: inner.elem() == ArtifactElem::ELEM,
-                    is_container: is_emitted_container(inner.elem()),
                     slot,
                     absorbs: absorbs(inner),
                     owns_items: owns_items(inner),
@@ -1270,6 +1290,7 @@ fn walk(
                         .to_packed::<FigureElem>()
                         .and_then(|figure| source_range(engine, figure.body.span())),
                     figure_par,
+                    spilled,
                     cell_owner,
                     cell_position: cell_position(inner),
                     had_child: false,
@@ -1331,6 +1352,29 @@ fn walk(
             _ => {}
         }
     }
+}
+
+/// Whether the open paragraph `par` holds the tags of the element at
+/// `location` in its own content, realized: then its text leaves that
+/// element out when it is an excluded scope.
+fn holds_tag_of(stack: &[Open], par: Location, location: Location) -> bool {
+    let Some(content) = stack
+        .iter()
+        .rev()
+        .find(|open| open.location == par)
+        .and_then(|open| open.par.as_ref())
+        .map(|par| &par.content)
+    else {
+        return false;
+    };
+    content
+        .traverse(&mut |element: Content| match element
+            .to_packed::<typst_library::introspection::TagElem>(
+        ) {
+            Some(tag) if tag.tag.location() == location => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        })
+        .is_break()
 }
 
 /// The innermost slot enclosing an element held by `held_by` (see

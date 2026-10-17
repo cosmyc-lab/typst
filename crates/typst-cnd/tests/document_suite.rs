@@ -507,6 +507,24 @@ fn newsletter_dashing_dept_news_template() {
         4,
         "award section has exactly four prose paragraphs, got {sixtus_paragraphs:?}"
     );
+    // The template boxes the quote's body and attribution in a grid: the
+    // quote still holds its body once, and its attribution is its own.
+    let quotes: Vec<&typst_cnd::QuoteNode> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter_map(|n| match n {
+            CndNode::Quote(q) => Some(q),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(quotes.len(), 1);
+    assert_eq!(value(&quotes[0].attribution), Some("Prof. Herzog"));
+    assert_eq!(node_types(&quotes[0].children), ["paragraph"]);
+    assert_eq!(
+        first_paragraph(&quotes[0].children).trim(),
+        "Our Lab has synthesized the most elements of them all."
+    );
+    assert_eq!(occurrences(&cnd, "Our Lab has synthesized"), 1);
+    assert_eq!(occurrences(&cnd, "Herzog"), 1);
     // The quote's attribution and the figure's caption belong to the
     // QuoteNode and FigureNode respectively; they must not also surface as
     // paragraphs of the section.
@@ -524,7 +542,13 @@ fn rich_document_node_types() {
     let mut stats = NodeStats::default();
     walk_nodes(&cnd.nodes, &mut stats);
 
-    assert!(stats.quotes >= 1, "expected at least one quote node");
+    // The only quote is inline: text of its paragraph, not a node (cnd-sdk
+    // spec §6.4). An inline quote does not show its attribution.
+    assert_eq!(stats.quotes, 0, "an inline quote is not a node");
+    assert!(paragraph_texts_in_order(&cnd.nodes).contains(
+        &"\u{201c}Programs must be written for people to read.\u{201d}".into()
+    ));
+    assert!(!cnd_to_json(&cnd).expect("serialize").contains("Ada Lovelace"));
     assert!(outer_lists(&cnd.nodes).len() >= 2, "expected bullet and numbered lists");
     assert!(stats.code >= 1, "expected a code block node");
     assert!(stats.math >= 1, "expected a block math node");
@@ -556,9 +580,11 @@ fn rich_document_no_duplicate_container_paragraphs() {
         paragraphs,
         vec![
             "A paragraph before structured blocks.".to_string(),
+            // An inline quote is text of its own paragraph.
+            "\u{201c}Programs must be written for people to read.\u{201d}".to_string(),
             "See Equation\u{a0}1, Figure\u{a0}1, and Figure\u{a0}2.".to_string(),
         ],
-        "quote/list/code/math content must not also appear as paragraph nodes"
+        "list/code/math content must not also appear as paragraph nodes"
     );
 }
 
@@ -573,7 +599,8 @@ fn complex_semantic_all_node_types_and_xrefs() {
     assert!(cnd.doc.keywords.iter().any(|k| k.contains("quote")));
 
     assert!(stats.headings >= 8);
-    assert_eq!(stats.quotes, 2);
+    // The block quote only: the inline one is text of its paragraph.
+    assert_eq!(stats.quotes, 1);
     // Lists written in the flow; a nested list is a node inside its item.
     assert!(outer_lists(&cnd.nodes).len() >= 2);
     assert_eq!(stats.code, 2);
@@ -584,12 +611,12 @@ fn complex_semantic_all_node_types_and_xrefs() {
     // Three figure wrappers: the two captioned tables/grids (tab-signals,
     // fig-grid-zones) plus the one true non-table figure (fig-diagram).
     assert_eq!(stats.figures, 3);
-    // The flow paragraphs; list items, cells and quotes hold their own.
-    assert_eq!(paragraph_texts_in_order(&cnd.nodes).len(), 8);
+    // The flow paragraphs, the inline quote's included; list items, cells
+    // and the block quote hold their own.
+    assert_eq!(paragraph_texts_in_order(&cnd.nodes).len(), 9);
 
     for label in [
         "ch-corpus",
-        "quote-knuth",
         "eq-golden",
         "eq-sum",
         "tab-signals",
@@ -601,12 +628,30 @@ fn complex_semantic_all_node_types_and_xrefs() {
         assert!(label_exists(&cnd.nodes, label), "missing label {label}");
     }
 
-    let knuth = find_by_label(&cnd.nodes, "quote-knuth").expect("knuth quote");
-    let CndNode::Quote(knuth) = knuth else {
-        panic!("expected quote node");
-    };
-    assert_eq!(value(&knuth.attribution), Some("Donald Knuth"));
-    assert!(first_paragraph(&knuth.children).contains("Programs are meant to be read"));
+    // An inline quote is not a node (cnd-sdk spec §6.4): its words stay in
+    // their paragraph, quotation marks included, and its label names no
+    // node, since none carries it exactly. Typst does not show an inline
+    // quote's attribution, so neither does the CND.
+    assert!(!label_exists(&cnd.nodes, "quote-knuth"), "an inline quote's label");
+    assert_eq!(incoming_count(&cnd.nodes, "quote-knuth"), 0);
+    let knuth: Vec<String> = paragraph_texts_in_order(&cnd.nodes)
+        .into_iter()
+        .filter(|p| p.contains("Programs are meant to be read"))
+        .collect();
+    assert_eq!(
+        knuth,
+        [
+            "\u{201c}Programs are meant to be read by humans and only incidentally for machines to execute.\u{201d}"
+        ]
+    );
+    assert!(!cnd_to_json(&cnd).expect("serialize").contains("Donald Knuth"));
+    let hopper = block_quotes(&cnd.nodes);
+    assert_eq!(hopper.len(), 1);
+    assert_eq!(value(&hopper[0].attribution), Some("Grace Hopper"));
+    assert_eq!(
+        paragraph_values(&hopper[0].children),
+        ["The most dangerous phrase in the language is: we've always done it this way."]
+    );
 
     let grid_fig = find_by_label(&cnd.nodes, "fig-grid-zones").expect("grid");
     let CndNode::Figure(grid_fig) = grid_fig else {
@@ -722,8 +767,18 @@ fn complex_semantic_no_duplicate_container_paragraphs() {
     let cnd = cnd_for_example("complex_semantic.typ");
     let paragraphs = paragraph_texts_in_order(&cnd.nodes);
 
+    // The inline quote is a paragraph of the flow, once; the block quote
+    // holds its own paragraph.
+    assert_eq!(
+        paragraphs
+            .iter()
+            .filter(|p| p.contains("Programs are meant to be read"))
+            .count(),
+        1
+    );
     for leaked in [
-        "Programs are meant to be read",
+        "The most dangerous phrase",
+        "Grace Hopper",
         "Root item Alpha",
         "Nested Beta-1",
         "Numbered one with tag",
@@ -745,7 +800,8 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
 
     assert_eq!(cnd.doc.title, "Hardcore mixed layout + semantics");
     assert!(stats.pages.len() >= 2, "expected multipage layout: {:?}", stats.pages);
-    assert_eq!(stats.quotes, 1);
+    // Its only quote is inline: text of its paragraph (cnd-sdk spec §6.4).
+    assert_eq!(stats.quotes, 0);
     assert_eq!(stats.code, 1);
     assert_eq!(stats.math, 1);
     assert_eq!(stats.lists, 1);
@@ -765,30 +821,23 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
     let CndNode::Heading(cols) = cols else {
         panic!("expected heading");
     };
-    let quote = cols
+    // The inline quote is a paragraph of the column, once, with the
+    // column's state; Typst does not show an inline quote's attribution.
+    let quoted: Vec<&typst_cnd::ParagraphNode> = cols
         .children
         .iter()
-        .find_map(|n| match n {
-            CndNode::Quote(q)
-                if first_paragraph(&q.children).contains("Quote trapped") =>
-            {
-                Some(q)
-            }
+        .filter_map(|n| match n {
+            CndNode::Paragraph(p) if p.text.value.contains("Quote trapped") => Some(p),
             _ => None,
         })
-        .expect("quote in column block");
+        .collect();
+    assert_eq!(quoted.len(), 1, "the quote's words are in one paragraph");
     assert_eq!(
-        quote.base.state_metadata.get("track").and_then(|v| v.as_str()),
+        quoted[0].base.state_metadata.get("track").and_then(|v| v.as_str()),
         Some("left")
     );
-    assert_eq!(value(&quote.attribution), Some("Source L"));
-    assert!(
-        cols.children.iter().all(|n| match n {
-            CndNode::Paragraph(p) => !p.text.value.contains("Quote trapped"),
-            _ => true,
-        }),
-        "quote body must not duplicate as paragraph"
-    );
+    assert_eq!(occurrences(&cnd, "Quote trapped"), 1);
+    assert!(!cnd_to_json(&cnd).expect("serialize").contains("Source L"));
 
     let grid_fig = find_by_label(&cnd.nodes, "fig-hc-grid").expect("grid");
     let CndNode::Figure(grid_fig) = grid_fig else {
@@ -1060,6 +1109,18 @@ fn footnotes_pool_and_edges() {
     // referenced twice (its declaration plus a `#footnote(<label>)` marker).
     let labels: Vec<&str> = cnd.footnotes.iter().map(|f| f.label.as_str()).collect();
     assert_eq!(labels, vec!["1", "2", "3"]);
+    // Each note holds its paragraph, without the number its entry starts
+    // with.
+    let contents: Vec<Vec<&str>> =
+        cnd.footnotes.iter().map(|f| paragraph_values(&f.children)).collect();
+    assert_eq!(
+        contents,
+        [
+            ["First noted in the 2023 audit of the ingestion path."],
+            ["See the follow-up report for details."],
+            ["The canonical definition lives in the glossary."],
+        ]
+    );
     assert!(
         cnd.footnotes.iter().any(|f| footnote_text(f).contains("2023 audit")),
         "footnote body text is captured in the pool"
@@ -1386,6 +1447,8 @@ fn example_files_exist() {
         "tables_across_pages.typ",
         "figure_kinds.typ",
         "figure_drawings.typ",
+        "containers_quotes_notes.typ",
+        "footnote_across_pages.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1468,6 +1531,12 @@ fn paragraph_identity_dedupe_and_inline_artifacts() {
         7,
         "exactly the seven authored paragraphs, got: {paragraphs:?}"
     );
+    // The quote a show rule boxes into the paragraph is left out of the
+    // paragraph's text, so it is a node of its own, holding its words once.
+    let quotes = block_quotes(&cnd.nodes);
+    assert_eq!(quotes.len(), 1);
+    assert_eq!(paragraph_values(&quotes[0].children), ["Quoted aside"]);
+    assert_eq!(occurrences(&cnd, "Quoted aside"), 1);
 }
 
 /// Text carried by a layout-only container — a `block`, a grid cell, a
@@ -1864,10 +1933,9 @@ fn nested_list_items_are_children_of_their_parent() {
     let cnd = cnd_for_example("nested_lists.typ");
     let lists = find_lists(&cnd.nodes);
 
-    // One outer list node per list written at the top level, plus the one
-    // inside the figure (whose text the figure does not carry). Nested lists
-    // are list nodes inside their parent item; the list inside the quote is
-    // not a list of its own.
+    // One outer list node per list written at the top level, plus the ones
+    // inside the figure and the quote, which are their blocks. Nested lists
+    // are list nodes inside their parent item.
     let nested: std::collections::HashSet<uuid::Uuid> = lists
         .iter()
         .flat_map(|list| list.items.iter())
@@ -1888,6 +1956,7 @@ fn nested_list_items_are_children_of_their_parent() {
             "NC1 bullet with enum children",
             "ND1 bullet with explicit numbers",
             "NE1 explicit list inside",
+            "NF2 quote list item",
             "NG2 list item in figure",
         ]
     );
@@ -1962,7 +2031,7 @@ fn nested_list_items_are_children_of_their_parent() {
         assert_eq!(json.matches(token).count(), 1, "{token} must appear exactly once");
     }
 
-    // The quote carries its own list.
+    // The quote holds its paragraph and its list.
     let quote = cnd
         .nodes
         .iter()
@@ -1971,8 +2040,12 @@ fn nested_list_items_are_children_of_their_parent() {
             _ => None,
         })
         .expect("a quote");
-    let quote_text = first_paragraph(&quote.children);
-    assert!(quote_text.contains("NF2") && quote_text.contains("NF3"), "{quote_text:?}");
+    assert_eq!(node_types(&quote.children), ["paragraph", "list"]);
+    let f = list_starting_with(&lists, "NF2");
+    assert_eq!(
+        item_summary(&f.items),
+        [("NF2 quote list item", None), ("NF3 quote list item", None)]
+    );
 }
 
 /// How many times each word occurs in the serialized CND.
@@ -2134,6 +2207,17 @@ fn lists_in_footnotes_live_in_the_footnote_pool_only() {
         ("list_in_footnote_par.typ", &["FL3"][..]),
     ] {
         let cnd = cnd_for_example(name);
+        // The note's paragraph and list are its children, and each list
+        // item holds its own paragraph.
+        assert_eq!(cnd.footnotes.len(), 1, "{name}");
+        let note = &cnd.footnotes[0];
+        assert_eq!(node_types(&note.children), ["paragraph", "list"], "{name}");
+        let CndNode::List(list) = &note.children[1] else { unreachable!() };
+        let items: Vec<&str> = list.items.iter().map(item_text).collect();
+        assert_eq!(items.len(), tokens.len(), "{name}: {items:?}");
+        for (item, token) in items.iter().zip(tokens) {
+            assert!(item.starts_with(token), "{name}: {item:?}");
+        }
         let texts = all_list_item_texts(&cnd);
         let counts = word_counts(&cnd);
         for token in tokens {
@@ -2490,18 +2574,17 @@ fn terms_never_swallow_paragraphs_that_start_like_them() {
 #[test]
 fn a_list_in_a_quote_is_carried_by_the_quote_only() {
     let cnd = cnd_for_example("quote_with_list.typ");
-    assert!(find_lists(&cnd.nodes).is_empty(), "the quote carries its list");
-    let quote = all_nodes(&cnd.nodes)
-        .into_iter()
-        .find_map(|n| match n {
-            CndNode::Quote(q) => Some(q),
-            _ => None,
-        })
-        .expect("a quote");
-    let quote_text = first_paragraph(&quote.children);
-    for token in ["QW1", "QW2", "QW3"] {
-        assert!(quote_text.contains(token), "{token} in the quote: {quote_text:?}");
-    }
+    // The quote holds its paragraph and its list; the list is nowhere else.
+    assert_eq!(node_types(&cnd.nodes), ["quote", "paragraph"]);
+    let CndNode::Quote(quote) = &cnd.nodes[0] else { unreachable!() };
+    assert_eq!(node_types(&quote.children), ["paragraph", "list"]);
+    assert_eq!(paragraph_values(&quote.children), ["QW1 quote paragraph."]);
+    let CndNode::List(list) = &quote.children[1] else { unreachable!() };
+    assert_eq!(
+        list.items.iter().map(item_text).collect::<Vec<_>>(),
+        ["QW2 quote list item", "QW3 quote list item"]
+    );
+    assert_eq!(find_lists(&cnd.nodes).len(), 1, "the quote's list only");
     let counts = word_counts(&cnd);
     for token in ["QW1", "QW2", "QW3", "QW4"] {
         assert_eq!(
@@ -3493,8 +3576,39 @@ fn a_list_in_a_cell_is_kept_once_whatever_holds_the_table() {
         ["Itemized cell entry one.", "Itemized cell entry two."]
     );
 
-    // A table in a quote or in a footnote is that container's text until
-    // their bodies are routed: no table leaks into the body beside them.
+    // A table in a block quote is a block of that quote, and one in a
+    // footnote a block of the note: in each, the cell holds the list.
+    let in_cell_list = |children: &[CndNode]| -> Vec<String> {
+        assert_eq!(node_types(children), ["table"]);
+        let cells = cells_of(&children[0]);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(node_types(&cells[0].children), ["list"]);
+        let CndNode::List(list) = &cells[0].children[0] else { unreachable!() };
+        list.items.iter().map(|item| item_text(item).to_string()).collect()
+    };
+    let quote = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Quote(quote) => Some(quote),
+            _ => None,
+        })
+        .expect("the block quote");
+    assert_eq!(
+        in_cell_list(&quote.children),
+        ["Quoted cell item one.", "Quoted cell item two."]
+    );
+    let note = cnd
+        .footnotes
+        .iter()
+        .find(|note| footnote_text(note).contains("Noted"))
+        .expect("the footnote holding a table");
+    assert_eq!(
+        in_cell_list(&note.children),
+        ["Noted cell item one.", "Noted cell item two."]
+    );
+
+    // No table of the body holds the note's list: the 2×2 table, the
+    // Related table, the quote's table and the item's table.
     let tables: Vec<&CndNode> = all_nodes(&cnd.nodes)
         .into_iter()
         .filter(|node| matches!(node, CndNode::Table(_)))
@@ -3503,17 +3617,12 @@ fn a_list_in_a_cell_is_kept_once_whatever_holds_the_table() {
         for cell in cells_of(table) {
             for node in all_nodes(&cell.children) {
                 for text in node.texts() {
-                    assert!(
-                        !text.value.contains("Quoted") && !text.value.contains("Noted"),
-                        "a quote's or a footnote's table leaked: {:?}",
-                        text.value
-                    );
+                    assert!(!text.value.contains("Noted"), "{:?}", text.value);
                 }
             }
         }
     }
-    // The 2×2 table, the Related table and the item's table.
-    assert_eq!(tables.len(), 3);
+    assert_eq!(tables.len(), 4);
 }
 
 #[test]
@@ -3531,12 +3640,13 @@ fn an_inline_list_in_a_box_is_kept_once() {
         .expect("the sentence holding the box");
     assert!(sentence.contains("Boxed list entry."), "{sentence:?}");
     // The boxed list is the sentence's text, not a list of its own: the only
-    // lists are the item holding a table and the list in its cell, and no
-    // item is left empty.
+    // lists are the one in the quote's cell, the item holding a table and
+    // the list in its cell (the note's list is in the pool), and no item is
+    // left empty.
     let lists = find_lists(&cnd.nodes);
     assert_eq!(
         lists.iter().map(|list| item_text(&list.items[0])).collect::<Vec<_>>(),
-        ["Item holding a table:", "Itemized cell entry one."]
+        ["Quoted cell item one.", "Item holding a table:", "Itemized cell entry one."]
     );
     for list in lists {
         for item in &list.items {
@@ -3745,4 +3855,316 @@ fn a_broken_row_in_a_grid_stays_in_its_cell() {
         .map(|node| node.base().location.page)
         .collect();
     assert!(pages.last() > pages.first(), "the grid breaks: {pages:?}");
+}
+
+/// The block quotes of the body, in reading order.
+fn block_quotes(nodes: &[CndNode]) -> Vec<&typst_cnd::QuoteNode> {
+    all_nodes(nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Quote(quote) => Some(quote),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The pool entry whose content mentions `needle`.
+fn footnote_with<'a>(cnd: &'a typst_cnd::Cnd, needle: &str) -> &'a typst_cnd::Footnote {
+    cnd.footnotes
+        .iter()
+        .find(|note| footnote_text(note).contains(needle))
+        .unwrap_or_else(|| panic!("no footnote holds {needle:?}"))
+}
+
+#[test]
+fn block_quote_children_are_blocks() {
+    let cnd = cnd_for_example("containers_quotes_notes.typ");
+    let quotes = block_quotes(&cnd.nodes);
+    assert_eq!(quotes.len(), 3, "only the block quotes are nodes");
+    let quote = quotes[0];
+    assert_eq!(node_types(&quote.children), ["paragraph", "paragraph", "list"]);
+    assert_eq!(value(&quote.attribution), Some("Ada"));
+    for node in all_nodes(&quote.children) {
+        for text in node.texts() {
+            assert!(!text.value.contains("Ada"), "the attribution leaked: {text:?}");
+        }
+    }
+    assert_eq!(
+        paragraph_values(&quote.children),
+        [
+            "QA1 first quote paragraph.",
+            "QA2 second quote paragraph cites [1] and carries a note.1",
+        ]
+    );
+    let CndNode::List(list) = &quote.children[2] else { unreachable!() };
+    assert_eq!(
+        list.items.iter().map(item_text).collect::<Vec<_>>(),
+        ["QA3 quote list item", "QA4 quote list item"]
+    );
+    assert_cnd_contract(&cnd);
+}
+
+#[test]
+fn edge_inside_a_block_quote_sits_on_its_paragraph() {
+    let cnd = cnd_for_example("containers_quotes_notes.typ");
+    let quote = block_quotes(&cnd.nodes)[0];
+    let CndNode::Paragraph(second) = &quote.children[1] else {
+        panic!("the second child is a paragraph");
+    };
+    let text = &second.text;
+    assert_eq!(
+        text.cites.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
+        ["knuth"]
+    );
+    let cite_span = text.cites[0].text_span.as_ref().expect("the cite has a span");
+    assert_eq!(codepoint_slice(&text.value, cite_span), "[1]");
+    assert_eq!(text.footnotes.len(), 1);
+    let note_span = text.footnotes[0].text_span.as_ref().expect("the note has a span");
+    assert_eq!(codepoint_slice(&text.value, note_span), "1");
+    assert_eq!(footnote_with(&cnd, "QN1").label, text.footnotes[0].label);
+
+    let attribution = quote.attribution.as_ref().expect("an attribution");
+    assert!(
+        attribution.refs.is_empty()
+            && attribution.cites.is_empty()
+            && attribution.footnotes.is_empty()
+            && attribution.links.is_empty(),
+        "the attribution carries no edge: {attribution:?}"
+    );
+    // The cite sits on that paragraph only among the quote's texts.
+    let carriers = all_texts(std::slice::from_ref(&cnd.nodes[0]))
+        .into_iter()
+        .filter(|text| text.cites.iter().any(|c| c.label == "knuth"))
+        .count();
+    assert_eq!(carriers, 1);
+    assert_pool_refs_resolve(&cnd);
+}
+
+#[test]
+fn decorative_footnote_entry_is_not_emitted() {
+    let cnd = cnd_for_example("containers_quotes_notes.typ");
+    for node in all_nodes_full(&cnd) {
+        for text in node.texts() {
+            assert!(!text.value.contains("DN1"), "decorative note emitted: {text:?}");
+        }
+    }
+    let json = cnd_to_json(&cnd).expect("serialize");
+    assert!(!json.contains("DN1"), "decorative note reached the CND");
+    // The kept note keeps the number the page shows, and its edge.
+    let kept = footnote_with(&cnd, "NK1");
+    assert_eq!(kept.label, "4");
+    let carrier = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Paragraph(p) if p.text.value.starts_with("Decorative") => Some(p),
+            _ => None,
+        })
+        .expect("the paragraph beside the decorative note");
+    assert_eq!(
+        carrier
+            .text
+            .footnotes
+            .iter()
+            .map(|f| f.label.as_str())
+            .collect::<Vec<_>>(),
+        ["4"]
+    );
+    assert_pool_refs_resolve(&cnd);
+}
+
+#[test]
+fn inline_quote_is_not_a_node() {
+    let cnd = cnd_for_example("containers_quotes_notes.typ");
+    for quote in block_quotes(&cnd.nodes) {
+        for node in all_nodes(&quote.children) {
+            for text in node.texts() {
+                assert!(!text.value.contains("short"), "an inline quote is a node");
+            }
+        }
+    }
+    let paragraph = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Paragraph(p) if p.text.value.contains("short") => Some(p),
+            _ => None,
+        })
+        .expect("the paragraph holding the inline quote");
+    assert_eq!(
+        paragraph.text.value,
+        "The paragraph holds an inline \u{201c}short\u{201d} quotation."
+    );
+    assert_eq!(occurrences(&cnd, "short"), 1);
+}
+
+#[test]
+fn footnote_children_are_nodes() {
+    let cnd = cnd_for_example("containers_quotes_notes.typ");
+    let note = footnote_with(&cnd, "NA1");
+    assert_eq!(node_types(&note.children), ["paragraph", "paragraph", "list"]);
+    let values = paragraph_values(&note.children);
+    assert!(!values[0].starts_with(&note.label), "the number leaked: {values:?}");
+    assert_eq!(values[0], "NA1 first note paragraph.");
+    let CndNode::List(list) = &note.children[2] else { unreachable!() };
+    assert_eq!(
+        list.items.iter().map(item_text).collect::<Vec<_>>(),
+        ["NA3 note item", "NA4 note item"]
+    );
+    // Every note starts with its own text, never with its number.
+    for note in &cnd.footnotes {
+        let first = first_paragraph(&note.children);
+        assert!(
+            !first.starts_with(char::is_numeric),
+            "note {} starts with its number: {first:?}",
+            note.label
+        );
+    }
+    // No word of a note is in the body.
+    for token in ["NA1", "NA2", "NA3", "NA4", "QN1", "NK1", "NP1"] {
+        assert_eq!(occurrences(&cnd, token), 1, "{token} is kept once");
+        assert!(
+            all_nodes(&cnd.nodes)
+                .into_iter()
+                .flat_map(|node| node.texts())
+                .all(|text| !text.value.contains(token)),
+            "{token} leaked into the body"
+        );
+    }
+    assert_cnd_contract(&cnd);
+}
+
+#[test]
+fn footnote_content_carries_print_page() {
+    let cnd = cnd_for_example("containers_quotes_notes.typ");
+    let note = footnote_with(&cnd, "NP1");
+    assert!(!note.children.is_empty());
+    for node in all_nodes(&note.children) {
+        assert_eq!(node.base().location.page, 2, "{node:?}");
+    }
+    for node in all_nodes(&footnote_with(&cnd, "NA1").children) {
+        assert_eq!(node.base().location.page, 1, "{node:?}");
+    }
+}
+
+#[test]
+fn ref_inside_footnote_resolves() {
+    let cnd = cnd_for_example("containers_quotes_notes.typ");
+    let note = footnote_with(&cnd, "NA2");
+    let paragraph = note
+        .children
+        .iter()
+        .find_map(|node| match node {
+            CndNode::Paragraph(p) if p.text.value.starts_with("NA2") => Some(p),
+            _ => None,
+        })
+        .expect("the second note paragraph");
+    let refs: Vec<&str> = paragraph.text.refs.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(refs, ["eq-1"]);
+    let span = paragraph.text.refs[0].text_span.as_ref().expect("a span");
+    assert_eq!(codepoint_slice(&paragraph.text.value, span), "Equation\u{a0}1");
+    assert_pool_refs_resolve(&cnd);
+}
+
+#[test]
+fn edges_in_an_attribution_sit_on_the_attribution() {
+    let cnd = cnd_for_example("containers_quotes_notes.typ");
+    let quotes = block_quotes(&cnd.nodes);
+
+    // A citation written in the attribution is an edge of the attribution;
+    // the attribution's value is not the paragraph it is laid out in, so
+    // the edge has no span. The body keeps its own reference.
+    let grace = quotes[1];
+    let attribution = grace.attribution.as_ref().expect("an attribution");
+    assert!(attribution.value.starts_with("Grace, after"), "{attribution:?}");
+    assert_eq!(
+        attribution
+            .cites
+            .iter()
+            .map(|c| (c.label.as_str(), c.text_span.is_none()))
+            .collect::<Vec<_>>(),
+        [("knuth", true)]
+    );
+    assert!(attribution.refs.is_empty());
+    assert_eq!(node_types(&grace.children), ["paragraph"]);
+    let CndNode::Paragraph(body) = &grace.children[0] else { unreachable!() };
+    assert_eq!(body.text.value, "QB1 body referring to Equation\u{a0}1.");
+    assert!(body.text.cites.is_empty(), "the attribution's cite is on the body");
+    assert_eq!(
+        body.text.refs.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(),
+        ["eq-1"]
+    );
+    assert!(body.text.refs[0].text_span.is_some());
+
+    // A label attribution is a citation of that label.
+    let cited = quotes[2];
+    let attribution = cited.attribution.as_ref().expect("an attribution");
+    assert_eq!(
+        attribution.cites.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
+        ["knuth"]
+    );
+    assert!(attribution.cites[0].text_span.is_none());
+    assert_eq!(paragraph_values(&cited.children), ["QC1 body."]);
+    for node in all_nodes(&cited.children) {
+        for text in node.texts() {
+            assert!(text.cites.is_empty(), "the attribution's cite is on the body");
+        }
+    }
+    assert_pool_refs_resolve(&cnd);
+}
+
+#[test]
+fn a_boxed_block_quote_is_text_of_its_paragraph() {
+    // A block quote in an inline `box` is laid out in the line of the
+    // paragraph that holds it, which renders its text: it is no node.
+    let cnd = cnd_for_example("containers_quotes_notes.typ");
+    assert_eq!(occurrences(&cnd, "QD1 boxed block quote"), 1);
+    let paragraph = paragraph_texts_in_order(&cnd.nodes)
+        .into_iter()
+        .find(|p| p.contains("QD1"))
+        .expect("the sentence holding the box");
+    assert_eq!(paragraph, "A sentence holds QD1 boxed block quote inline.");
+    assert_eq!(block_quotes(&cnd.nodes).len(), 3);
+}
+
+#[test]
+fn a_broken_footnote_keeps_its_rest() {
+    // The rest of a note too long for its page is printed on the next page
+    // with no entry around it, while a list of the flow is open across the
+    // same break. It is the note's content, never the body's, and it
+    // carries the page it is printed on.
+    let cnd = cnd_for_example("footnote_across_pages.typ");
+    assert_eq!(cnd.footnotes.len(), 1);
+    let note = &cnd.footnotes[0];
+    assert_eq!(
+        node_types(&note.children),
+        ["paragraph", "paragraph", "paragraph", "paragraph", "list", "paragraph"]
+    );
+    let CndNode::List(list) = &note.children[4] else { unreachable!() };
+    assert_eq!(
+        list.items.iter().map(item_text).collect::<Vec<_>>(),
+        ["SN5 note item one", "SN6 note item two"]
+    );
+    let pages: Vec<i32> =
+        note.children.iter().map(|node| node.base().location.page).collect();
+    assert_eq!(pages.first(), Some(&1));
+    assert_eq!(pages.last(), Some(&2), "the rest is printed on page 2: {pages:?}");
+    for token in ["SN1", "SN2", "SN3", "SN4", "SN5", "SN6", "SN7"] {
+        assert_eq!(occurrences(&cnd, token), 1, "{token} once");
+    }
+    for text in all_texts(&cnd.nodes) {
+        assert!(!text.value.contains("SN"), "the note leaked into the body: {text:?}");
+    }
+    // The flow list keeps its nine items, each its own paragraph.
+    let flow = list_starting_with(&find_lists(&cnd.nodes), "LA1");
+    assert_eq!(flow.items.len(), 9);
+    for item in &flow.items {
+        assert_eq!(node_types(&item.children), ["paragraph"]);
+    }
+    assert_eq!(
+        paragraph_texts_in_order(&cnd.nodes),
+        [
+            "BA1 body line one.",
+            "BA2 body line two carries a long note.1",
+            "BA3 after the list."
+        ]
+    );
 }

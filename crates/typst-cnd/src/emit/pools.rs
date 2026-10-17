@@ -10,37 +10,39 @@
 //! Text spans (ADR 0013): `FootnoteRef`/`CiteRef` carry the marker's
 //! `[start, end)` codepoint offsets in the node's rendered text, computed
 //! during extraction (see `extract::extract_with_markers`). Spans are
-//! populated for flat-text nodes (paragraph/heading/quote); on other node
+//! populated for flat-text nodes (paragraph/heading); on other node
 //! types, and for a suppressed `form: "none"` citation, `text_span` is
 //! `None` (the schema allows null spans).
 
 use typst_library::engine::Engine;
 use typst_library::foundations::{NativeElement, StyleChain};
 use typst_library::introspection::{Counter, Introspector};
-use typst_library::model::{BibliographyElem, FootnoteElem, RenderedEntry, Works};
+use typst_library::model::{
+    BibliographyElem, FootnoteElem, FootnoteEntry, RenderedEntry, Works,
+};
 use uuid::Uuid;
 
 use crate::emit::ancestry::Ancestry;
 use crate::emit::convert::{ConvertContext, Synthetic};
 use crate::emit::extract::extract_text;
-use crate::emit::refs::find_node_mut;
 use crate::model::{BibEntry, CiteRef, Footnote, FootnoteRef, RichText, TextSlot};
 
-/// Build the footnote pool into `ctx.footnotes` and the marker-location →
-/// pool-id map into `ctx.footnote_loc_to_id`, then attach a `FootnoteRef`
-/// to every text that carries a footnote marker.
+/// Build the footnote pool into `ctx.footnotes`, the declaration-marker →
+/// pool-id map into `ctx.footnote_loc_to_id`, and the printed-entry →
+/// pool-id map into `ctx.footnote_entry_to_pool`.
 ///
-/// Only declaration footnotes become pool entries; a `#footnote(<label>)`
-/// re-reference reuses the original's pool id, so several markers point at
-/// one entry. Pool order is the introspector's document order; each entry's
-/// `label` is the rendered footnote ordinal, and its `children` are one
-/// paragraph holding the flat body, on the page of the declaration marker.
+/// Only declaration footnotes become pool entries. Pool order is the
+/// introspector's document order; each entry's `label` is the rendered
+/// footnote ordinal. Its `children` are the blocks laid out in its printed
+/// entry, which `convert::assemble` routes there, on the page where the
+/// entry is printed. Until then, and for good if no entry was printed for
+/// it, it holds one paragraph built from the note's body, on the page of
+/// its marker: text is never lost.
 ///
 /// A footnote declared inside a PDF artifact is decorative (cnd-sdk spec §2):
-/// it gets no pool entry, so neither its own marker nor a kept re-reference
-/// to it resolves to an edge. A re-reference written inside an artifact
-/// resolves to nothing either, even to a kept footnote.
-pub fn resolve_footnotes(
+/// it gets no pool entry, so its printed entry has no owner and its content
+/// is dropped.
+pub fn build_footnote_pool(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     styles: StyleChain,
@@ -48,15 +50,8 @@ pub fn resolve_footnotes(
     ctx: &mut ConvertContext,
 ) -> typst_library::diag::SourceResult<()> {
     let counter = Counter::of(FootnoteElem::ELEM);
-    let footnotes: Vec<_> = introspector
-        .query(&FootnoteElem::ELEM.select())
-        .into_iter()
-        .filter_map(|elem| elem.to_packed::<FootnoteElem>().cloned())
-        .collect();
-
-    // Pass 1 — declarations become pool entries, keyed by their own
-    // (declaration) location.
-    for footnote in &footnotes {
+    for elem in introspector.query(&FootnoteElem::ELEM.select()) {
+        let Some(footnote) = elem.to_packed::<FootnoteElem>() else { continue };
         if footnote.is_ref() {
             continue;
         }
@@ -67,26 +62,63 @@ pub fn resolve_footnotes(
             continue;
         }
         let id = *ctx.footnote_loc_to_id.entry(own_loc).or_insert_with(Uuid::new_v4);
-        if !ctx.footnotes.iter().any(|f| f.id == id) {
-            let text = footnote.body_content().map(extract_text).unwrap_or_default();
-            let numbering = footnote.numbering.get_ref(styles);
-            let label = counter
-                .display_at(engine, own_loc, styles, numbering, footnote.span())
-                .ok()
-                .map(|num| extract_text(&num).into())
-                .unwrap_or_default();
-            // The content node is not a node of the body: its record only
-            // gives it the page of the declaration marker.
-            let mut synthetic = Synthetic::new(Some(own_loc));
-            let children = vec![synthetic.paragraph(RichText::plain(text))];
-            ctx.records.extend(synthetic.records);
-            ctx.footnotes.push(Footnote { id, label, children });
+        if ctx.footnotes.iter().any(|f| f.id == id) {
+            continue;
         }
+        let text = footnote.body_content().map(extract_text).unwrap_or_default();
+        let numbering = footnote.numbering.get_ref(styles);
+        let label = counter
+            .display_at(engine, own_loc, styles, numbering, footnote.span())
+            .ok()
+            .map(|num| extract_text(&num).into())
+            .unwrap_or_default();
+        // An empty paragraph is never a node.
+        let mut synthetic = Synthetic::new(Some(own_loc));
+        let children = if text.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![synthetic.paragraph(RichText::plain(text))]
+        };
+        ctx.records.extend(synthetic.records);
+        ctx.footnotes.push(Footnote { id, label, children });
     }
 
-    // Pass 2 — every marker (declaration or re-reference) maps its own
-    // location to a pool id. A node records the marker location it holds
-    // (a tag), so both marker kinds resolve to the same entry.
+    // Each printed entry names the footnote it prints.
+    for elem in introspector.query(&FootnoteEntry::ELEM.select()) {
+        let Some(entry) = elem.to_packed::<FootnoteEntry>() else { continue };
+        let Some(entry_loc) = elem.location() else { continue };
+        let Some(note_loc) = entry.note.location() else { continue };
+        if let Some(id) = ctx.footnote_loc_to_id.get(&note_loc).copied() {
+            ctx.footnote_entry_to_pool.insert(entry_loc, id);
+        }
+    }
+    Ok(())
+}
+
+/// Map every footnote marker to its pool entry, then attach a `FootnoteRef`
+/// to every text that carries one (the pool exists already, see
+/// [`build_footnote_pool`]).
+///
+/// A `#footnote(<label>)` re-reference reuses the original's pool id, so
+/// several markers point at one entry. A footnote declared inside a PDF
+/// artifact has no pool entry, so neither its own marker nor a kept
+/// re-reference to it resolves to an edge. A re-reference written inside an
+/// artifact resolves to nothing either, even to a kept footnote.
+pub fn resolve_footnotes(
+    engine: &mut Engine,
+    introspector: &dyn Introspector,
+    ancestry: &Ancestry,
+    ctx: &mut ConvertContext,
+) -> typst_library::diag::SourceResult<()> {
+    let footnotes: Vec<_> = introspector
+        .query(&FootnoteElem::ELEM.select())
+        .into_iter()
+        .filter_map(|elem| elem.to_packed::<FootnoteElem>().cloned())
+        .collect();
+
+    // Every marker (declaration or re-reference) maps its own location to a
+    // pool id. A node records the marker location it holds (a tag), so both
+    // marker kinds resolve to the same entry.
     for footnote in &footnotes {
         let Some(own_loc) = footnote.location() else {
             continue;
@@ -243,9 +275,7 @@ pub fn resolve_cite_edges(ctx: &mut ConvertContext, ancestry: &Ancestry) {
     }
 
     for (node_id, slot, cite) in edges {
-        if let Some(text) =
-            find_node_mut(&mut ctx.roots, node_id).and_then(|node| node.text_mut(slot))
-        {
+        if let Some(text) = ctx.node_mut(node_id).and_then(|node| node.text_mut(slot)) {
             let cites = &mut text.cites;
             // Keep meaningful variants (same work, different supplement/form/
             // position) but drop exact duplicates.
@@ -281,9 +311,7 @@ fn resolve_footnote_edges(ctx: &mut ConvertContext) {
         // unwrapping keeps an unresolvable edge from ever being emitted.
         let Some(label) = labels.get(&pool_id).cloned() else { continue };
         let reference = FootnoteRef { label, text_span: span.map(|(s, e)| vec![s, e]) };
-        if let Some(text) =
-            find_node_mut(&mut ctx.roots, node_id).and_then(|node| node.text_mut(slot))
-        {
+        if let Some(text) = ctx.node_mut(node_id).and_then(|node| node.text_mut(slot)) {
             let footnotes = &mut text.footnotes;
             if !footnotes.contains(&reference) {
                 footnotes.push(reference);

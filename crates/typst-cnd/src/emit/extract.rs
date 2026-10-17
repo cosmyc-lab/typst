@@ -84,6 +84,17 @@ fn is_excluded_scope(inner: &Content) -> bool {
     false
 }
 
+/// Whether `inner` is the number a printed footnote entry starts with: a
+/// `Label` marker that no footnote marker's tags hold. The marker in the
+/// text renders its number inside a `Label` marker too, but inside the
+/// footnote's own tags, and that number is the edge's span.
+fn is_entry_number(inner: &Content, ctx: &MarkerCtx) -> bool {
+    ctx.footnotes.is_empty()
+        && inner
+            .to_packed::<PdfMarkerTag>()
+            .is_some_and(|marker| marker.kind == PdfMarkerTagKind::Label)
+}
+
 /// A reference/citation/footnote marker located within a node's rendered
 /// text: its kind (carrying the resolution payload) and the `[start, end)`
 /// Unicode code-point offsets of its rendered marker in that text.
@@ -227,6 +238,11 @@ struct MarkerCtx {
     /// Open PDF artifacts (by location). A reference, link, footnote or
     /// citation marker inside one is decorative and records no marker.
     artifacts: Vec<Location>,
+    /// Open footnote markers (by location), whatever they sit in. A
+    /// footnote's number is a `Label` marker inside its own marker's tags;
+    /// a `Label` marker with no footnote open is the number a printed
+    /// footnote entry starts with, which is not part of the note's text.
+    footnotes: Vec<Location>,
     /// Whether any text scope was excluded during this walk.
     excluded_any: bool,
     /// An excluded scope just closed: the next text drops its leading
@@ -258,7 +274,7 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
     if let Some(tag) = content.to_packed::<TagElem>() {
         match &tag.tag {
             Tag::Start(inner, _) => {
-                if is_excluded_scope(inner)
+                if (is_excluded_scope(inner) || is_entry_number(inner, ctx))
                     && let Some(loc) = inner.location()
                 {
                     ctx.excluded.push(loc);
@@ -269,12 +285,20 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
                 {
                     ctx.artifacts.push(loc);
                 }
+                if inner.elem() == FootnoteElem::ELEM
+                    && let Some(loc) = inner.location()
+                {
+                    ctx.footnotes.push(loc);
+                }
                 open_tag(inner, ctx);
             }
             Tag::End(..) => {
                 let loc = tag.tag.location();
                 if let Some(index) = ctx.artifacts.iter().rposition(|open| *open == loc) {
                     ctx.artifacts.remove(index);
+                }
+                if let Some(index) = ctx.footnotes.iter().rposition(|open| *open == loc) {
+                    ctx.footnotes.remove(index);
                 }
                 if let Some(index) = ctx.excluded.iter().rposition(|open| *open == loc) {
                     ctx.excluded.remove(index);

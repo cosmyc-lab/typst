@@ -9,8 +9,9 @@ use typst_library::introspection::{Introspector, Location, Tag, TagElem};
 use typst_library::layout::GridElem;
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    CiteElem, EnumElem, FigureCaption, FigureElem, FootnoteElem, HeadingElem, LinkElem,
-    ListElem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
+    Attribution, CiteElem, EnumElem, FigureCaption, FigureElem, FootnoteElem,
+    HeadingElem, LinkElem, ListElem, ParElem, QuoteElem, RefElem, Supplement, TableElem,
+    TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_library::visualize::ImageElem;
@@ -31,7 +32,7 @@ use crate::model::{
 /// A citation marker occurring in a node's content, captured for
 /// resolution into a `CiteRef` once the bibliography pool exists. `span`
 /// is the marker's `[start, end)` codepoint offsets in the node's rendered
-/// text — `Some` only for flat-text nodes (paragraph/heading/quote), where
+/// text — `Some` only for flat-text nodes (paragraph/heading), where
 /// the text is a single string; `None` elsewhere (ADR 0013).
 #[derive(Debug, Clone)]
 pub struct CiteMarker {
@@ -163,12 +164,10 @@ pub struct Records {
     pub synthetic: Vec<(Uuid, NodeRecord)>,
 }
 
-/// Builds the synthetic nodes that fill a container's slots: each gets its
-/// own id and a record with the container's location.
-///
-/// Interim shape for the containers whose slots are not routed yet (quotes,
-/// footnotes; see [`ROUTED`]): the container's span-less edges move to its
-/// first paragraph descendant, see [`Synthetic::attach_to_first_paragraph`].
+/// Builds the paragraphs a container falls back to when nothing is routed
+/// into its body (a footnote with no printed entry, a quote whose body a
+/// show rule boxes): each gets its own id and a record with the location
+/// it is given, so it gets that page.
 #[derive(Debug)]
 pub struct Synthetic {
     location: Option<Location>,
@@ -191,29 +190,15 @@ impl Synthetic {
         CndNode::Paragraph(ParagraphNode::new(id, text, placeholder_location()))
     }
 
-    /// Give `text` to the first paragraph among `nodes`, in reading order.
-    /// Returns it back when there is none.
-    pub fn attach_to_first_paragraph(
-        &mut self,
-        nodes: &[CndNode],
-        text: TextRecord,
-    ) -> Option<TextRecord> {
-        let mut first = None;
-        crate::model::walk(nodes, &mut |node| {
-            if first.is_none() && matches!(node, CndNode::Paragraph(_)) {
-                first = Some(node.id());
-            }
-        });
-        let Some(first) = first else { return Some(text) };
-        let mut text = text;
-        text.slot = TextSlot::Text;
-        match self.records.iter_mut().find(|(id, _)| *id == first) {
-            Some((_, record)) => {
-                record.add_text(text);
-                None
-            }
-            None => Some(text),
+    /// A paragraph holding `text`, whose edges are `edges`.
+    pub fn paragraph_with(&mut self, text: RichText, edges: TextRecord) -> CndNode {
+        let node = self.paragraph(text);
+        if let Some((_, record)) = self.records.last_mut() {
+            let mut edges = edges;
+            edges.slot = TextSlot::Text;
+            record.add_text(edges);
         }
+        node
     }
 }
 
@@ -230,6 +215,9 @@ pub struct ConvertContext {
     /// re-reference) to its pool-entry id. A node's `footnote_locs` are
     /// resolved through this map; both marker kinds land on the same entry.
     pub footnote_loc_to_id: rustc_hash::FxHashMap<Location, Uuid>,
+    /// Map from a printed footnote entry's location to its pool-entry id:
+    /// the content laid out in that entry is the entry's `children`.
+    pub footnote_entry_to_pool: rustc_hash::FxHashMap<Location, Uuid>,
     /// Bibliography pool (proposal 0004), populated by
     /// `pools::resolve_citations`.
     pub bibliography: Vec<crate::model::BibEntry>,
@@ -263,6 +251,24 @@ impl ConvertContext {
         records
     }
 
+    /// The node with `id`, in the body or in a footnote's content.
+    pub fn node_mut(&mut self, id: Uuid) -> Option<&mut CndNode> {
+        if let Some(node) = crate::emit::refs::find_node_mut(&mut self.roots, id) {
+            return Some(node);
+        }
+        self.footnotes
+            .iter_mut()
+            .find_map(|note| crate::emit::refs::find_node_mut(&mut note.children, id))
+    }
+
+    /// Visit every node: the body, then each footnote's content.
+    pub fn walk_all(&self, f: &mut impl FnMut(&CndNode)) {
+        crate::model::walk(&self.roots, f);
+        for note in &self.footnotes {
+            crate::model::walk(&note.children, f);
+        }
+    }
+
     pub fn register_records(&mut self, records: Records) {
         for (id, record) in records.own {
             self.register(id, record);
@@ -287,11 +293,15 @@ impl ConvertContext {
 }
 
 /// The slot kinds whose content is routed into its container's node by
-/// [`assemble`]. The content of any other slot keeps its interim handling:
-/// it is skipped when its container carries the text, kept in the flow
-/// otherwise (see [`admits_block`]).
-const ROUTED: &[SlotKind] =
-    &[SlotKind::Item, SlotKind::TermDescription, SlotKind::Cell, SlotKind::FigureBody];
+/// [`assemble`]: every container's body is.
+const ROUTED: &[SlotKind] = &[
+    SlotKind::Item,
+    SlotKind::TermDescription,
+    SlotKind::Cell,
+    SlotKind::QuoteBody,
+    SlotKind::FigureBody,
+    SlotKind::FootnoteBody,
+];
 
 /// Active heading container while assembling a list of nodes.
 struct HeadingFrame {
@@ -334,11 +344,10 @@ fn range_contains(outer: SourceRange, inner: SourceRange) -> bool {
 }
 
 /// The source ranges whose paragraphs are not nodes: those of the
-/// containers that carry their text themselves, and those of the headings.
+/// figures, which carry their caption themselves, and those of the headings.
 struct SkipRanges {
-    /// Quotes and figures. A list's, a term list's, a cell's or a figure
-    /// body's paragraphs are routed into their slots instead, so for a
-    /// figure this only catches what is written in it outside its body.
+    /// Figures. A figure body's paragraphs are routed into its slot, so
+    /// this only catches what is written in a figure outside its body.
     containers: Vec<SourceRange>,
     /// A heading show rule that re-emits `it.body` inside fresh markup
     /// (`it => [ … #text(…, it.body) … ]`) realizes an extra `ParElem` whose
@@ -367,9 +376,103 @@ fn build_skip_ranges(engine: &Engine, introspector: &dyn Introspector) -> SkipRa
         ranges
     };
     SkipRanges {
-        containers: ranges(&[QuoteElem::ELEM.select(), FigureElem::ELEM.select()]),
+        containers: ranges(&[FigureElem::ELEM.select()]),
         headings: ranges(&[HeadingElem::ELEM.select()]),
     }
+}
+
+/// Where a block quote's body and attribution are written, to tell the
+/// paragraph its attribution is laid out in from those of its body.
+struct QuoteSource {
+    /// The body's reach in the source (see [`content_range`]).
+    body: Option<SourceRange>,
+    /// What the attribution's paragraph is spanned with: the attribution
+    /// content's reach, or for a label (realized as a citation spanned at
+    /// the quote) the quote's own span.
+    attribution: Option<AttributionSource>,
+}
+
+#[derive(Clone, Copy)]
+enum AttributionSource {
+    /// Something in the paragraph is written inside this range.
+    Within(SourceRange),
+    /// Something in the paragraph is spanned exactly here.
+    At(SourceRange),
+}
+
+/// Each block quote's [`QuoteSource`], by its location.
+fn quote_sources(
+    engine: &Engine,
+    introspector: &dyn Introspector,
+) -> rustc_hash::FxHashMap<Location, QuoteSource> {
+    let mut out = rustc_hash::FxHashMap::default();
+    for elem in introspector.query(&QuoteElem::ELEM.select()) {
+        let Some(quote) = elem.to_packed::<QuoteElem>() else { continue };
+        let Some(location) = elem.location() else { continue };
+        let materialized = StyleChain::default();
+        let attribution = match quote.attribution.get_ref(materialized) {
+            Some(Attribution::Content(content)) => {
+                content_range(engine, content).map(AttributionSource::Within)
+            }
+            Some(Attribution::Label(_)) => {
+                source_range(engine, elem.span()).map(AttributionSource::At)
+            }
+            None => None,
+        };
+        out.insert(
+            location,
+            QuoteSource {
+                body: content_range(engine, &quote.body),
+                attribution,
+            },
+        );
+    }
+    out
+}
+
+/// How far `content` reaches in the source: the hull of the spans it holds
+/// in the file of its first spanned element.
+fn content_range(engine: &Engine, content: &Content) -> Option<SourceRange> {
+    let mut range: Option<SourceRange> = None;
+    let _ = content.traverse(&mut |element: Content| {
+        if let Some(found) = source_range(engine, element.span()) {
+            range = match range {
+                None => Some(found),
+                Some(cur) if cur.file == found.file => Some(SourceRange {
+                    file: cur.file,
+                    start: cur.start.min(found.start),
+                    end: cur.end.max(found.end),
+                }),
+                other => other,
+            };
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    range
+}
+
+/// Whether the paragraph `par`, laid out in the body of the block quote
+/// `quote`, is the one its attribution is laid out in: nothing in it is
+/// written in the quote's body, and something is written in the
+/// attribution. Decided by source ranges, never by comparing texts.
+fn is_attribution(engine: &Engine, quote: &QuoteSource, par: &Content) -> bool {
+    let Some(attribution) = quote.attribution else { return false };
+    let mut in_body = false;
+    let mut in_attribution = false;
+    let _ = par.traverse(&mut |element: Content| {
+        if let Some(range) = source_range(engine, element.span()) {
+            if quote.body.is_some_and(|body| range_contains(body, range)) {
+                in_body = true;
+                return ControlFlow::Break(());
+            }
+            in_attribution |= match attribution {
+                AttributionSource::Within(outer) => range_contains(outer, range),
+                AttributionSource::At(at) => at == range,
+            };
+        }
+        ControlFlow::Continue(())
+    });
+    !in_body && in_attribution
 }
 
 fn should_skip_paragraph<'a>(
@@ -382,17 +485,12 @@ fn should_skip_paragraph<'a>(
     })
 }
 
-/// Whether a list, a term list, a table or a grid laid out at `location`
-/// becomes a node: not when a node already carries its text — an inline
-/// `box`'s paragraph, a heading, an artifact (which carries none), a quote
-/// or a footnote entry, whose bodies are not routed yet — and so is never
-/// its owner.
+/// Whether a list, a table, a grid or a block quote laid out at `location`
+/// becomes a node: not when a node already carries its text — an inline `box`'s
+/// paragraph, a heading — or when it is decorative (an artifact), and so
+/// is never its owner.
 fn admits_block(ancestry: &Ancestry, location: Location) -> bool {
-    ancestry.covering_par(location).is_none()
-        && !ancestry.is_absorbed(location)
-        && !ancestry.slot_of(location).is_some_and(|slot| {
-            matches!(slot, SlotKey::QuoteBody(_) | SlotKey::FootnoteBody(_))
-        })
+    ancestry.covering_par(location).is_none() && !ancestry.is_absorbed(location)
 }
 
 /// Whether the element at `location` is in a slot that [`assemble`] routes.
@@ -412,6 +510,7 @@ pub fn convert_from_introspector(
     ctx: &mut ConvertContext,
 ) -> typst_library::diag::SourceResult<()> {
     let skip_ranges = build_skip_ranges(engine, introspector);
+    let quote_sources = quote_sources(engine, introspector);
     let doc_selector = doc_selector();
     let mut items: Vec<(Location, Content)> = Vec::new();
 
@@ -445,8 +544,9 @@ pub fn convert_from_introspector(
 
     // An image is a node of its own: bare in the flow ("a bare image
     // outside any figure is an ImageNode with no wrapper"), or routed into
-    // the figure, cell or item it is laid out in. One inside a quote or a
-    // heading belongs to its text, one inside a caption to its figure.
+    // the figure, cell, item, quote or footnote it is laid out in. One
+    // inside a heading belongs to its text, one inside a caption to its
+    // figure.
     for elem in introspector.query(&ImageElem::ELEM.select()) {
         let Some(loc) = elem.location() else { continue };
         if ancestry.is_absorbed(loc) {
@@ -466,15 +566,23 @@ pub fn convert_from_introspector(
         items.push((loc, elem));
     }
 
+    // Only a block quote is a node (cnd-sdk spec §6.4). An inline quote is
+    // text of its paragraph, quotation marks included. The element is
+    // materialized, so `block` holds its realized value.
     for elem in introspector.query(&QuoteElem::ELEM.select()) {
+        let Some(quote) = elem.to_packed::<QuoteElem>() else { continue };
+        if !quote.block.get(StyleChain::default()) {
+            continue;
+        }
         let Some(loc) = elem.location() else { continue };
+        if !admits_block(ancestry, loc) {
+            continue;
+        }
         items.push((loc, elem));
     }
 
-    // A list laid out inside a quote or a footnote entry is that quote's or
-    // the footnote pool's text (until their slots are routed too). One in a
-    // list item, a term's description or a cell is routed into it by
-    // `assemble`.
+    // A list in a list item, a term's description, a cell, a quote, a
+    // figure or a footnote entry is routed into it by `assemble`.
     for selector in [ListElem::ELEM.select(), EnumElem::ELEM.select()] {
         for elem in introspector.query(&selector) {
             let Some(loc) = elem.location() else { continue };
@@ -511,6 +619,10 @@ pub fn convert_from_introspector(
     // Paragraphs skipped as part of an enclosing one, kept so that enclosing
     // paragraph can absorb their edges.
     let mut absorbed: Vec<(Location, Content)> = Vec::new();
+    // The paragraphs block quotes' attributions are laid out in, by quote:
+    // the attribution is a text of the quote's own, and these paragraphs
+    // carry its edges.
+    let mut attributions: Vec<(Location, Content)> = Vec::new();
 
     for elem in introspector.query(&ParElem::ELEM.select()) {
         let Some(par) = elem.to_packed::<ParElem>() else { continue };
@@ -528,21 +640,22 @@ pub fn convert_from_introspector(
             continue;
         }
         if is_routed(ancestry, loc) {
-            // A paragraph of a list item, a term's description, a cell or a
-            // figure's body is a node of that slot, whatever container is
-            // around it.
+            // A paragraph of a list item, a term's description, a cell, a
+            // quote, a figure's body or a footnote entry is a node of that
+            // slot, whatever container is around it.
             if should_skip_paragraph(engine, &elem, skip_ranges.headings.iter()) {
                 continue;
             }
-        } else {
-            // A paragraph inside a table, a quote or a footnote entry, or a
-            // figure's caption: that container renders this text itself.
-            if ancestry.is_in_emitted_container(loc) {
+            // A block quote's attribution is a text of the quote's own.
+            if let Some(SlotKey::QuoteBody(quote)) = ancestry.slot_of(loc)
+                && let Some(source) = quote_sources.get(&quote)
+                && is_attribution(engine, source, &elem)
+            {
+                attributions.push((quote, elem.clone()));
                 continue;
             }
-            if should_skip_paragraph(engine, &elem, skip_ranges.all()) {
-                continue;
-            }
+        } else if should_skip_paragraph(engine, &elem, skip_ranges.all()) {
+            continue;
         }
         // A paragraph made only of text that belongs to another node (a
         // heading body re-emitted by a show rule, a boxed block quote) or to
@@ -590,17 +703,65 @@ pub fn convert_from_introspector(
             nodes.push((location, node));
         }
     }
-    ctx.roots = assemble(nodes, ancestry, ROUTED);
+    // The footnote pool exists before its content is routed into it.
+    crate::emit::pools::build_footnote_pool(engine, introspector, styles, ancestry, ctx)?;
+    ctx.roots = assemble(
+        nodes,
+        ancestry,
+        ROUTED,
+        &mut ctx.footnotes,
+        &ctx.footnote_entry_to_pool,
+    );
     forget_dropped_nodes(ctx);
     absorb_covered_paragraphs(ctx, &absorbed);
+    attach_attributions(ctx, &attributions);
     Ok(())
+}
+
+/// Give each block quote's attribution the edges of the paragraph it is
+/// laid out in: that paragraph is the only one realized with its citation
+/// or footnote tags. The value differs from the paragraph's (the em dash
+/// before it), so the edges carry no span. A label attribution is realized
+/// as a citation of that label, which this carries.
+fn attach_attributions(ctx: &mut ConvertContext, attributions: &[(Location, Content)]) {
+    for (quote, par) in attributions {
+        let Some(id) = ctx.location_to_id.get(quote).copied() else { continue };
+        let Some(record) = ctx.records.get_mut(&id) else { continue };
+        let mut text = realized_edges(par);
+        text.slot = TextSlot::Attribution;
+        record.add_text(text);
+    }
+}
+
+/// The edges of realized content, all without a span: its footnote and
+/// citation tags, and the references and links its text walk finds.
+fn realized_edges(content: &Content) -> TextRecord {
+    let mut text = TextRecord::new(TextSlot::Text);
+    text.footnote_locs = collect_footnote_locs(content)
+        .into_iter()
+        .map(|loc| (loc, None))
+        .collect();
+    text.cite_markers = collect_cite_markers(content);
+    let (_, markers) = extract::extract_with_markers(content);
+    for marker in markers {
+        match marker.kind {
+            MarkerKind::Ref(label) if !text.ref_targets.contains(&label) => {
+                text.ref_targets.push(label);
+            }
+            MarkerKind::Link(dest) if !text.link_targets.contains(&dest) => {
+                text.link_targets.push(dest);
+            }
+            _ => {}
+        }
+    }
+    text
 }
 
 /// Forget the records of the nodes `assemble` dropped, so that no label,
 /// location or edge resolves to a node the document does not hold.
 fn forget_dropped_nodes(ctx: &mut ConvertContext) {
     let mut kept = rustc_hash::FxHashSet::default();
-    crate::model::walk(&ctx.roots, &mut |node| {
+    ctx.walk_all(&mut |node| {
         kept.insert(node.id());
     });
     ctx.records.retain(|id, _| kept.contains(id));
@@ -618,12 +779,18 @@ fn forget_dropped_nodes(ctx: &mut ConvertContext) {
 /// gathers the nodes after it in that item only, and its `heading_path`
 /// continues the section it sits in.
 ///
-/// A node whose slot's owner yields no node — an artifact's list, a list a
-/// quote carries — is dropped with its slot, never re-parented.
+/// The content of each printed footnote entry in `entry_to_pool` becomes the
+/// `children` of its pool entry in `footnotes`. A footnote with no routed
+/// content keeps the children it has.
+///
+/// A node whose slot's owner yields no node — an artifact's list, the entry
+/// of a decorative footnote — is dropped with its slot, never re-parented.
 fn assemble(
     items: Vec<(Location, CndNode)>,
     ancestry: &Ancestry,
     routed: &[SlotKind],
+    footnotes: &mut [crate::model::Footnote],
+    entry_to_pool: &rustc_hash::FxHashMap<Location, Uuid>,
 ) -> Vec<CndNode> {
     let mut flow = Vec::new();
     let mut slots: rustc_hash::FxHashMap<SlotKey, Vec<(Location, CndNode)>> =
@@ -636,9 +803,19 @@ fn assemble(
             _ => flow.push((location, node)),
         }
     }
+    let mut assembler = Assembler { ancestry, slots };
+    let roots = assembler.nodes(flow, &[]);
+    let pool_to_entry: rustc_hash::FxHashMap<Uuid, Location> =
+        entry_to_pool.iter().map(|(entry, pool)| (*pool, *entry)).collect();
+    for note in footnotes {
+        let Some(entry) = pool_to_entry.get(&note.id) else { continue };
+        if let Some(items) = assembler.slots.remove(&SlotKey::FootnoteBody(*entry)) {
+            note.children = assembler.nodes(items, &[]);
+        }
+    }
     // Whatever is left in `slots` afterwards belongs to an owner that was
     // never placed: it is dropped.
-    Assembler { ancestry, slots }.nodes(flow, &[])
+    roots
 }
 
 struct Assembler<'a> {
@@ -720,6 +897,11 @@ impl Assembler<'_> {
             CndNode::Figure(figure) if !self.ancestry.is_drawing(location) => {
                 vec![(&mut figure.children, SlotKey::FigureBody(location))]
             }
+            // With nothing routed, a quote keeps its fallback paragraph (see
+            // `quote::convert`).
+            CndNode::Quote(quote) => {
+                vec![(&mut quote.children, SlotKey::QuoteBody(location))]
+            }
             _ => return,
         };
         for (children, key) in slots {
@@ -772,19 +954,25 @@ impl Assembler<'_> {
 fn absorb_covered_paragraphs(ctx: &mut ConvertContext, absorbed: &[(Location, Content)]) {
     for (parent, nested) in absorbed {
         let Some(id) = ctx.location_to_id.get(parent).copied() else { continue };
-        let footnotes = collect_footnote_locs(nested);
-        let cites = collect_cite_markers(nested);
-        let refs = collect_ref_targets(nested);
-        let links = collect_link_targets(nested);
+        let text = unrealized_edges(nested);
         let Some(record) = ctx.records.get_mut(&id) else { continue };
-
-        let mut text = TextRecord::new(TextSlot::Text);
-        text.footnote_locs = footnotes.into_iter().map(|loc| (loc, None)).collect();
-        text.cite_markers = cites;
-        text.ref_targets = refs;
-        text.link_targets = links;
         record.add_text(text);
     }
+}
+
+/// The edges `content` shows without a text walk, all without a span: its
+/// footnote and citation tags, and its bare references and links (content
+/// met unrealized holds those as elements, not tags).
+pub fn unrealized_edges(content: &Content) -> TextRecord {
+    let mut text = TextRecord::new(TextSlot::Text);
+    text.footnote_locs = collect_footnote_locs(content)
+        .into_iter()
+        .map(|loc| (loc, None))
+        .collect();
+    text.cite_markers = collect_cite_markers(content);
+    text.ref_targets = collect_ref_targets(content);
+    text.link_targets = collect_link_targets(content);
+    text
 }
 
 /// What the frames say about an element that its content does not.
@@ -939,7 +1127,7 @@ pub fn metadata_at(
 
 /// Build a node's record and the edges of its content. `markers` carries
 /// the text-span markers from the flat-text walk of the node's body
-/// (paragraph/heading/quote); it is empty for non-flat nodes, whose marker
+/// (paragraph/heading); it is empty for non-flat nodes, whose marker
 /// *locations* are still captured (so their footnote/cite edges resolve)
 /// but whose `text_span`s stay `None` (ADR 0013).
 ///
@@ -1060,7 +1248,7 @@ fn collect_footnote_locs(content: &Content) -> Vec<Location> {
 
 pub fn apply_metadata(ctx: &mut ConvertContext) {
     let records = &ctx.records;
-    crate::model::walk_mut(&mut ctx.roots, &mut |node| {
+    let mut apply = |node: &mut CndNode| {
         let Some(record) = records.get(&node.id()) else { return };
         if let Some(label) = &record.label {
             set_label(node, label.resolve().as_str());
@@ -1068,7 +1256,11 @@ pub fn apply_metadata(ctx: &mut ConvertContext) {
         if !record.state_metadata.is_empty() {
             set_metadata(node, record.state_metadata.clone());
         }
-    });
+    };
+    crate::model::walk_mut(&mut ctx.roots, &mut apply);
+    for note in &mut ctx.footnotes {
+        crate::model::walk_mut(&mut note.children, &mut apply);
+    }
 }
 
 fn set_label(node: &mut CndNode, label: &str) {

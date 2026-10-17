@@ -205,9 +205,7 @@ pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) 
     }
 
     for (source_id, slot, href, span) in links {
-        if let Some(text) =
-            find_node_mut(&mut ctx.roots, source_id).and_then(|node| node.text_mut(slot))
-        {
+        if let Some(text) = ctx.node_mut(source_id).and_then(|node| node.text_mut(slot)) {
             text.links
                 .push(LinkRef { href, text_span: normalize_link_span(span) });
         }
@@ -448,7 +446,7 @@ fn last_paragraph_under_heading(nodes: &[CndNode], heading_id: Uuid) -> Option<U
 
 fn node_label(ctx: &ConvertContext, id: Uuid) -> Option<String> {
     let mut label = None;
-    crate::model::walk(&ctx.roots, &mut |node| {
+    ctx.walk_all(&mut |node| {
         if node.id() == id {
             label = node.base().label.clone();
         }
@@ -463,9 +461,7 @@ fn set_ref(
     label: String,
     span: Option<(i64, i64)>,
 ) {
-    if let Some(text) =
-        find_node_mut(&mut ctx.roots, source).and_then(|node| node.text_mut(slot))
-    {
+    if let Some(text) = ctx.node_mut(source).and_then(|node| node.text_mut(slot)) {
         let refs = &mut text.refs;
         // Dedup by target label (one edge per target per node); the first
         // occurrence — the primary, span-carrying path — wins. Labels are
