@@ -32,7 +32,11 @@
 //!   no owner and is dropped. A row laid out across several pages (a cell
 //!   too tall for one) is drawn differently: each cell's tags open and close
 //!   with nothing between them, and the cell's content follows them, laid
-//!   out in the table itself. That content belongs to the last such cell;
+//!   out in the table itself, on every page the row spans. That content
+//!   belongs to the row's cell whose column it is drawn in. Only a body
+//!   row counts: a repeated copy of a header or footer cell, or the first
+//!   copy of a footer cell, drawn between two pages of the row, is never
+//!   taken for it even when it holds nothing;
 //! - a quote, a figure, a footnote entry: the element's own tag.
 //!
 //! [`Feature::CndSemantics`]: typst_library::Feature::CndSemantics
@@ -44,7 +48,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use typst_library::WorldExt;
 use typst_library::engine::Engine;
 use typst_library::foundations::{
-    Content, Element, NativeElement, SequenceElem, StyleChain,
+    Content, Element, NativeElement, SequenceElem, Smart, StyleChain,
 };
 use typst_library::introspection::{Introspector, Location, Tag};
 use typst_library::layout::{Frame, FrameItem, GridCell, GridElem, GroupItem, PlaceElem};
@@ -52,7 +56,7 @@ use typst_library::math::EquationElem;
 use typst_library::model::{
     ArtifactElem, BibliographyElem, EnumElem, FigureElem, FootnoteEntry, HeadingElem,
     ListElem, OutlineElem, ParElem, ParbreakElem, PdfMarkerTag, PdfMarkerTagKind,
-    QuoteElem, TableCell, TableElem, TermsElem,
+    QuoteElem, TableCell, TableCellKind, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_library::visualize::ImageElem;
@@ -388,6 +392,31 @@ fn owns_cells(inner: &Content) -> bool {
     elem == TableElem::ELEM || elem == GridElem::ELEM
 }
 
+/// The first non-gutter row of a table's or grid's footer, read from the
+/// grid the element resolved.
+fn footer_start(inner: &Content) -> Option<usize> {
+    let grid = if let Some(table) = inner.to_packed::<TableElem>() {
+        table.grid.as_ref()?
+    } else if let Some(grid) = inner.to_packed::<GridElem>() {
+        grid.grid.as_ref()?
+    } else {
+        return None;
+    };
+    let footer = grid.footer.as_ref()?;
+    // With gutters, rows and gutter rows alternate.
+    Some(if grid.has_gutter { footer.start.div_ceil(2) } else { footer.start })
+}
+
+/// Whether a table cell says it is a footer cell.
+fn is_footer_cell(inner: &Content) -> bool {
+    inner.to_packed::<TableCell>().is_some_and(|cell| {
+        matches!(
+            cell.kind.get(StyleChain::default()),
+            Smart::Custom(TableCellKind::Footer)
+        )
+    })
+}
+
 /// The resolved `(x, y)` position of a table or grid cell. The tag holds the
 /// materialized cell, whose position the grid resolved.
 fn cell_position(inner: &Content) -> Option<(usize, usize)> {
@@ -699,6 +728,12 @@ struct Open {
     owns_items: bool,
     /// Whether it owns cell slots (see [`owns_cells`]).
     owns_cells: bool,
+    /// For a table or grid, the first row of its footer (see
+    /// [`footer_start`]).
+    footer_start: Option<usize>,
+    /// For a cell, whether it may hold the content of a row laid out across
+    /// pages: a body cell, the first copy at its position.
+    is_body_cell: bool,
     /// Whether it is a grid, which needs an anchor (see [`Ancestry::grids`]).
     is_grid: bool,
     /// For a cell, the table or grid it is a cell of, and its position.
@@ -1065,6 +1100,23 @@ fn walk(
                     }
                 }
 
+                // A cell may hold a broken row's content only if it is the
+                // cell at its position (not a repeated copy) and not in a
+                // footer, whose first copy is drawn below the row's first
+                // page.
+                let is_body_cell = match (slot, cell_owner, cell_position(inner)) {
+                    (Some(slot), Some(owner), Some((x, y))) => {
+                        let footer = stack
+                            .iter()
+                            .rev()
+                            .find(|open| open.location == owner)
+                            .and_then(|open| open.footer_start)
+                            .is_some_and(|start| y >= start)
+                            || is_footer_cell(inner);
+                        !footer && ancestry.cell_slot(owner, x, y) == Some(slot)
+                    }
+                    _ => false,
+                };
                 if let Some(parent) = stack.last_mut() {
                     parent.had_child = true;
                 }
@@ -1078,6 +1130,8 @@ fn walk(
                     absorbs: absorbs(inner),
                     owns_items: owns_items(inner),
                     owns_cells: owns_cells(inner),
+                    footer_start: footer_start(inner),
+                    is_body_cell,
                     is_grid: inner.elem() == GridElem::ELEM,
                     cell_owner,
                     cell_position: cell_position(inner),
@@ -1095,9 +1149,13 @@ fn walk(
                     stack.iter().rposition(|open| open.location == *location)
                 {
                     for open in stack.drain(index..) {
+                        // A cell holding only untagged content (a `rect`, a
+                        // line) counts as holding nothing here: what follows
+                        // in its table is still a broken row's content.
                         if let (Some(slot), Some(owner), Some((_, row))) =
                             (open.slot, open.cell_owner, open.cell_position)
                             && !open.had_child
+                            && open.is_body_cell
                         {
                             let (last_row, cells) =
                                 ancestry.fragment_cells.entry(owner).or_default();

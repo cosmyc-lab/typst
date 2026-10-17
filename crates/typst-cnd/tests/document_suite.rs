@@ -3368,3 +3368,84 @@ fn table_cells_carry_spans_and_a_multi_row_header() {
         ]
     );
 }
+
+/// The paragraph values of each cell of the only table or layout under the
+/// heading `section`.
+fn cell_paragraphs(cnd: &typst_cnd::Cnd, section: &str) -> Vec<Vec<String>> {
+    let heading = find_heading(&cnd.nodes, section);
+    let grid = heading
+        .children
+        .iter()
+        .find(|node| matches!(node, CndNode::Table(_) | CndNode::Layout(_)))
+        .unwrap_or_else(|| panic!("no table under {section:?}"));
+    cells_of(grid)
+        .iter()
+        .map(|cell| {
+            paragraph_values(&cell.children)
+                .into_iter()
+                .map(String::from)
+                .collect()
+        })
+        .collect()
+}
+
+fn numbered(prefix: &str, count: usize) -> Vec<String> {
+    (1..=count).map(|i| format!("{prefix} {i}.")).collect()
+}
+
+#[test]
+fn a_broken_row_survives_empty_header_and_footer_cells() {
+    let cnd = cnd_for_example("tables_across_pages.typ");
+    assert_eq!(
+        cell_paragraphs(&cnd, "Empty header cell"),
+        [
+            vec![],
+            vec!["Header right".to_string()],
+            numbered("Empty header left", 11),
+            numbered("Empty header right", 13),
+        ]
+    );
+    assert_eq!(
+        cell_paragraphs(&cnd, "Empty footer cell"),
+        [
+            numbered("Empty footer left", 11),
+            numbered("Empty footer right", 13),
+            vec!["Footer total".to_string()],
+            vec![],
+        ]
+    );
+    // Every paragraph of the two rows is kept, once.
+    for (prefix, count) in [
+        ("Empty header left", 11),
+        ("Empty header right", 13),
+        ("Empty footer left", 11),
+        ("Empty footer right", 13),
+    ] {
+        for text in numbered(prefix, count) {
+            assert_eq!(occurrences(&cnd, &text), 1, "{text:?} is kept once");
+        }
+    }
+}
+
+#[test]
+fn a_broken_row_in_a_grid_stays_in_its_cell() {
+    let cnd = cnd_for_example("tables_across_pages.typ");
+    assert_eq!(
+        cell_paragraphs(&cnd, "Broken grid"),
+        [vec!["Short grid cell.".to_string()], numbered("Grid paragraph", 13)]
+    );
+    for text in numbered("Grid paragraph", 13) {
+        assert_eq!(occurrences(&cnd, &text), 1, "{text:?} is kept once");
+    }
+    // The grid breaks across pages, and the paragraph after it is the
+    // section's, not the grid's.
+    let section = find_heading(&cnd.nodes, "Broken grid");
+    assert_eq!(node_types(&section.children), ["layout", "paragraph"]);
+    let cells = cells_of(&section.children[0]);
+    let pages: Vec<i32> = cells[1]
+        .children
+        .iter()
+        .map(|node| node.base().location.page)
+        .collect();
+    assert!(pages.last() > pages.first(), "the grid breaks: {pages:?}");
+}

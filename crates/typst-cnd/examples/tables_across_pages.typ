@@ -38,3 +38,59 @@
   table.cell(rowspan: 2)[Tall span], [Row one middle], [Row one end],
   table.cell(colspan: 2)[Wide span],
 )
+
+// A broken row beside header and footer cells that hold nothing: those
+// cells, drawn between the row's pages, never take its content.
+= Empty header cell
+
+#table(
+  columns: 2,
+  table.header([], [Header right]),
+  [
+    #for i in range(1, 12) [
+      Empty header left #i.
+
+    ]
+  ],
+  [
+    #for i in range(1, 14) [
+      Empty header right #i.
+
+    ]
+  ],
+)
+
+= Empty footer cell
+
+#table(
+  columns: 2,
+  [
+    #for i in range(1, 12) [
+      Empty footer left #i.
+
+    ]
+  ],
+  [
+    #for i in range(1, 14) [
+      Empty footer right #i.
+
+    ]
+  ],
+  table.footer([Footer total], []),
+)
+
+= Broken grid
+
+#grid(
+  columns: 2,
+  gutter: 6pt,
+  [Short grid cell.],
+  [
+    #for i in range(1, 14) [
+      Grid paragraph #i.
+
+    ]
+  ],
+)
+
+After the broken grid.
