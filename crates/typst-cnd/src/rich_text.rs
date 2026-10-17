@@ -167,7 +167,7 @@ fn reaches_into(start: i64, end: i64, atom: &Mark) -> bool {
 
 /// Put `marks` in canonical form (spec 4.1) for a text of `len` code points:
 /// drop empty and out-of-bounds marks, merge same-kind marks that overlap or
-/// touch (two `math` marks concatenate their `raw`), enforce the atomic rule
+/// touch (two `math` marks join their `raw` with a space), enforce the atomic rule
 /// for `code` and `math` (a non-atomic mark reaching partway into one is
 /// dropped, a span doing so becomes `None`), then sort by `(start, end, kind)`.
 pub fn canonical_marks(
@@ -188,6 +188,12 @@ pub fn canonical_marks(
             Some(last) if last.kind == m.kind && m.start <= last.end => {
                 last.end = last.end.max(m.end);
                 if let (Some(a), Some(b)) = (last.raw.as_mut(), m.raw) {
+                    // `$a$$b$` is two identifiers, not the one `ab` names.
+                    let apart = a.value.ends_with(char::is_whitespace)
+                        || b.value.starts_with(char::is_whitespace);
+                    if !apart && !a.value.is_empty() && !b.value.is_empty() {
+                        a.value.push(' ');
+                    }
                     a.value.push_str(&b.value);
                 }
             }
@@ -327,9 +333,12 @@ mod tests {
     }
 
     #[test]
-    fn touching_math_marks_concatenate_raw() {
+    fn touching_math_marks_join_raw_with_a_space() {
         let out = canonical_marks(6, vec![math(0, 3, "a"), math(3, 6, "b")], &mut []);
-        assert_eq!(out, vec![math(0, 6, "ab")]);
+        assert_eq!(out, vec![math(0, 6, "a b")]);
+        // No second space where one already separates them.
+        let out = canonical_marks(6, vec![math(0, 3, "a "), math(3, 6, "b")], &mut []);
+        assert_eq!(out, vec![math(0, 6, "a b")]);
     }
 
     #[test]
