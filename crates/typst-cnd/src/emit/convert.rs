@@ -7,6 +7,7 @@ use typst_library::foundations::{
     Content, Label, NativeElement, Packed, Selector, StyleChain,
 };
 use typst_library::introspection::{Introspector, Location, Tag, TagElem};
+use typst_library::layout::GridElem;
 use typst_library::math::EquationElem;
 use typst_library::model::{
     CiteElem, EnumElem, FigureCaption, FigureElem, FootnoteElem, HeadingElem, LinkElem,
@@ -23,7 +24,9 @@ use crate::emit::{
     code, extract, figure, heading, list, math, paragraph, quote, reading_order, table,
 };
 use crate::location::placeholder_location;
-use crate::model::{CndNode, HeadingNode, Numbering, ParagraphNode, RichText, TextSlot};
+use crate::model::{
+    Cell, CndNode, HeadingNode, Numbering, ParagraphNode, RichText, TextSlot,
+};
 
 /// A citation marker occurring in a node's content, captured for
 /// resolution into a `CiteRef` once the bibliography pool exists. `span`
@@ -184,10 +187,10 @@ impl Records {
 /// Builds the synthetic nodes that fill a container's slots: each gets its
 /// own id and a record with the container's location.
 ///
-/// Interim shape for the containers whose slots are not routed yet (cells,
-/// quotes, figures, footnotes; see [`ROUTED`]): the container's span-less
-/// edges move to its first paragraph descendant, see
-/// [`Synthetic::attach_to_first_paragraph`].
+/// Interim shape for the containers whose slots are not routed yet (quotes,
+/// figures with the tables and grids inside them, footnotes; see
+/// [`ROUTED`]): the container's span-less edges move to its first paragraph
+/// descendant, see [`Synthetic::attach_to_first_paragraph`].
 #[derive(Debug)]
 pub struct Synthetic {
     location: Option<Location>,
@@ -323,8 +326,8 @@ impl ConvertContext {
 /// The slot kinds whose content is routed into its container's node by
 /// [`assemble`]. The content of any other slot keeps its interim handling:
 /// it is skipped when its container carries the text, kept in the flow
-/// otherwise.
-const ROUTED: &[SlotKind] = &[SlotKind::Item, SlotKind::TermDescription];
+/// otherwise (see [`admits_block`]).
+const ROUTED: &[SlotKind] = &[SlotKind::Item, SlotKind::TermDescription, SlotKind::Cell];
 
 /// Active heading container while assembling a list of nodes.
 struct HeadingFrame {
@@ -414,6 +417,19 @@ fn should_skip_paragraph<'a>(
     })
 }
 
+/// Whether a list, a term list, a table or a grid laid out at `location`
+/// becomes a node: not when a node already carries its text — an inline
+/// `box`'s paragraph, a heading, an artifact (which carries none), a quote
+/// or a footnote entry, whose bodies are not routed yet — and so is never
+/// its owner.
+fn admits_block(ancestry: &Ancestry, location: Location) -> bool {
+    ancestry.covering_par(location).is_none()
+        && !ancestry.is_absorbed(location)
+        && !ancestry.slot_of(location).is_some_and(|slot| {
+            matches!(slot, SlotKey::QuoteBody(_) | SlotKey::FootnoteBody(_))
+        })
+}
+
 /// Whether the element at `location` is in a slot that [`assemble`] routes.
 fn is_routed(ancestry: &Ancestry, location: Location) -> bool {
     ancestry
@@ -439,31 +455,41 @@ pub fn convert_from_introspector(
         items.push((loc, elem));
     }
 
+    // A table in a figure is the figure's child (`table::from_figure`).
     for elem in introspector.query(&TableElem::ELEM.select()) {
         let Some(loc) = elem.location() else { continue };
-        if table::is_table_in_figure(introspector, &elem) {
+        if table::is_table_in_figure(introspector, &elem) || !admits_block(ancestry, loc)
+        {
             continue;
         }
         items.push((loc, elem));
     }
 
+    // Every grid is a `layout`, those of templates and show rules included,
+    // except one in a figure, which is the figure's child
+    // (`table::from_figure_grid`). The introspector does not know a grid:
+    // its anchor stands in for it (see `Ancestry::grids`).
+    let mut anchors: rustc_hash::FxHashMap<Location, Location> =
+        rustc_hash::FxHashMap::default();
+    for (loc, elem, anchor) in ancestry.grids() {
+        let Some(anchor) = anchor else { continue };
+        if !admits_block(ancestry, loc)
+            || matches!(ancestry.slot_of(loc), Some(SlotKey::FigureBody(_)))
+        {
+            continue;
+        }
+        anchors.insert(loc, anchor);
+        items.push((loc, elem.clone()));
+    }
+
     // Bare images only: the CND model's "bare image outside any figure is
     // an ImageNode with no wrapper". An image inside a figure is emitted as
-    // that figure's child (figure::from_figure); one inside a table cell or
-    // any other skipped container belongs to its container's text.
-    let image_skip_ranges: Vec<SourceRange> = {
-        let mut ranges: Vec<SourceRange> = skip_ranges.all().copied().collect();
-        for elem in introspector.query(&TableElem::ELEM.select()) {
-            if let Some(range) = source_range(engine, elem.span()) {
-                ranges.push(range);
-            }
-        }
-        ranges
-    };
+    // that figure's child (figure::from_figure); one inside a quote belongs
+    // to its text. One in a cell is routed into it.
     for elem in introspector.query(&ImageElem::ELEM.select()) {
         let Some(loc) = elem.location() else { continue };
         if let Some(range) = source_range(engine, elem.span())
-            && image_skip_ranges.iter().any(|outer| range_contains(*outer, range))
+            && skip_ranges.all().any(|outer| range_contains(*outer, range))
         {
             continue;
         }
@@ -482,13 +508,12 @@ pub fn convert_from_introspector(
 
     // A list laid out inside a quote or a footnote entry is that quote's or
     // the footnote pool's text (until their slots are routed too). One in a
-    // list item or a term's description is routed into it by `assemble`.
+    // list item, a term's description or a cell is routed into it by
+    // `assemble`.
     for selector in [ListElem::ELEM.select(), EnumElem::ELEM.select()] {
         for elem in introspector.query(&selector) {
             let Some(loc) = elem.location() else { continue };
-            if ancestry.slot_of(loc).is_some_and(|slot| {
-                matches!(slot, SlotKey::QuoteBody(_) | SlotKey::FootnoteBody(_))
-            }) {
+            if !admits_block(ancestry, loc) {
                 continue;
             }
             items.push((loc, elem));
@@ -538,8 +563,8 @@ pub fn convert_from_introspector(
             continue;
         }
         if is_routed(ancestry, loc) {
-            // A paragraph of a list item or a term's description is a node
-            // of that slot, whatever container is around the list.
+            // A paragraph of a list item, a term's description or a cell is
+            // a node of that slot, whatever container is around it.
             if should_skip_paragraph(engine, &elem, skip_ranges.headings.iter()) {
                 continue;
             }
@@ -570,13 +595,25 @@ pub fn convert_from_introspector(
     // per page.
     items.retain(|(loc, _)| !ancestry.is_artifact(*loc));
 
-    reading_order::sort_by_reading_order(&mut items, introspector, &doc_selector);
+    reading_order::sort_by_reading_order(
+        &mut items,
+        introspector,
+        &doc_selector,
+        &anchors,
+    );
 
     let mut nodes = Vec::with_capacity(items.len());
     for (location, content) in items {
-        if let Some(node) =
-            dispatch(engine, introspector, &content, styles, doc_lang.as_deref(), ctx)?
-        {
+        let anchor = anchors.get(&location).copied();
+        if let Some(node) = dispatch(
+            engine,
+            introspector,
+            &content,
+            anchor,
+            styles,
+            doc_lang.as_deref(),
+            ctx,
+        )? {
             nodes.push((location, node));
         }
     }
@@ -683,21 +720,61 @@ impl Assembler<'_> {
     /// Fill the slots of `node`, laid out at `location` in the section
     /// `path`, with the nodes routed into them.
     fn fill(&mut self, location: Location, node: &mut CndNode, path: &[String]) {
-        let keys = self.ancestry.item_slots(location);
-        let slots: Vec<&mut Vec<CndNode>> = match node {
+        let slots: Vec<(&mut Vec<CndNode>, SlotKey)> = match node {
             CndNode::List(list) => {
-                list.items.iter_mut().map(|item| &mut item.children).collect()
+                let keys = self.ancestry.item_slots(location);
+                debug_assert_eq!(list.items.len(), keys.len(), "one body per item");
+                list.items
+                    .iter_mut()
+                    .zip(keys)
+                    .map(|(item, key)| (&mut item.children, *key))
+                    .collect()
             }
             CndNode::Terms(terms) => {
-                terms.items.iter_mut().map(|item| &mut item.children).collect()
+                let keys = self.ancestry.item_slots(location);
+                debug_assert_eq!(terms.items.len(), keys.len(), "one body per item");
+                terms
+                    .items
+                    .iter_mut()
+                    .zip(keys)
+                    .map(|(item, key)| (&mut item.children, *key))
+                    .collect()
             }
+            CndNode::Table(table) => self.cell_slots(location, &mut table.cells),
+            CndNode::Layout(layout) => self.cell_slots(location, &mut layout.cells),
             _ => return,
         };
-        for (children, key) in slots.into_iter().zip(keys) {
-            if let Some(items) = self.slots.remove(key) {
+        for (children, key) in slots {
+            if let Some(items) = self.slots.remove(&key) {
                 *children = self.nodes(items, path);
             }
         }
+    }
+
+    /// Pair each cell of the table or grid at `location` with its slot, by
+    /// its position.
+    fn cell_slots<'c>(
+        &self,
+        location: Location,
+        cells: &'c mut [Cell],
+    ) -> Vec<(&'c mut Vec<CndNode>, SlotKey)> {
+        let slots: Vec<_> = cells
+            .iter_mut()
+            .filter_map(|cell| {
+                let key = self.ancestry.cell_slot(
+                    location,
+                    cell.col as usize,
+                    cell.row as usize,
+                )?;
+                Some((&mut cell.children, key))
+            })
+            .collect();
+        debug_assert_eq!(
+            slots.len(),
+            self.ancestry.cell_slot_count(location),
+            "every laid-out cell is a cell of its table"
+        );
+        slots
     }
 }
 
@@ -732,11 +809,13 @@ fn absorb_covered_paragraphs(ctx: &mut ConvertContext, absorbed: &[(Location, Co
     }
 }
 
-/// Convert one element into its node, registering the records.
+/// Convert one element into its node, registering the records. `anchor`
+/// stands in for a grid's location (see `Ancestry::grids`).
 fn dispatch(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     content: &Content,
+    anchor: Option<Location>,
     styles: StyleChain,
     doc_lang: Option<&str>,
     ctx: &mut ConvertContext,
@@ -813,9 +892,20 @@ fn dispatch(
             CndNode::Figure(node)
         }
     } else if let Some(table_elem) = content.to_packed::<TableElem>() {
-        let (node, records) = table::convert(engine, introspector, table_elem, styles)?;
-        ctx.register_records(records);
+        let (node, record) = table::convert(engine, introspector, table_elem, styles)?;
+        ctx.register(node.base.id, record);
         CndNode::Table(node)
+    } else if let Some(grid) = content.to_packed::<GridElem>() {
+        let Some(anchor) = anchor else { return Ok(None) };
+        let (node, record) =
+            table::from_grid(engine, introspector, grid, anchor, styles)?;
+        // The anchor is another element's location: it gives the layout a
+        // page and state, never its own entry in `location_to_id`.
+        ctx.register_records(Records {
+            own: Vec::new(),
+            synthetic: vec![(node.base.id, record)],
+        });
+        CndNode::Layout(node)
     } else {
         return Ok(None);
     };

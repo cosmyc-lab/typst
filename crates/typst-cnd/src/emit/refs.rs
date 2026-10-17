@@ -331,13 +331,16 @@ fn walk_paragraph_ids(nodes: &[CndNode], out: &mut Vec<Uuid>) {
     }
 }
 
+/// Every heading of the tree, in reading order, whatever slot it sits in:
+/// the fallback above pairs this list by index with every `HeadingElem` of
+/// the source content, and a heading written in a list item or a cell is
+/// one of them. Skipping it would shift every index after it.
 fn walk_heading_ids(nodes: &[CndNode], out: &mut Vec<Uuid>) {
-    for node in nodes {
+    crate::model::walk(nodes, &mut |node| {
         if let CndNode::Heading(n) = node {
             out.push(n.base.id);
-            walk_heading_ids(&n.children, out);
         }
-    }
+    });
 }
 
 /// The id of the node carrying `label`.

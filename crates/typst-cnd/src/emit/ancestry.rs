@@ -25,7 +25,11 @@
 //!   paragraph is the item's.
 //! - a term's description: `PdfMarkerTag` of kind `TermsItemBody`, which also
 //!   holds the term (`TermsItemLabel`) and the separator (an artifact);
-//! - a table or grid cell: the `TableCell` / `GridCell` tag;
+//! - a table or grid cell: the `TableCell` / `GridCell` tag, which carries
+//!   the cell's resolved `x` and `y`. A header or footer that repeats on
+//!   each page is tagged again, with new locations: only the first copy of
+//!   each position is the cell's slot, so the repeated copies' content has
+//!   no owner and is dropped;
 //! - a quote, a figure, a footnote entry: the element's own tag.
 //!
 //! [`Feature::CndSemantics`]: typst_library::Feature::CndSemantics
@@ -40,7 +44,7 @@ use typst_library::foundations::{
     Content, Element, NativeElement, SequenceElem, StyleChain,
 };
 use typst_library::introspection::{Introspector, Location, Tag};
-use typst_library::layout::{Frame, FrameItem, GridCell, GroupItem, PlaceElem};
+use typst_library::layout::{Frame, FrameItem, GridCell, GridElem, GroupItem, PlaceElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
     ArtifactElem, BibliographyElem, EnumElem, FigureElem, FootnoteEntry, HeadingElem,
@@ -48,6 +52,7 @@ use typst_library::model::{
     QuoteElem, TableCell, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
+use typst_library::visualize::ImageElem;
 use typst_syntax::{FileId, Span};
 
 use crate::emit::extract;
@@ -143,9 +148,17 @@ pub struct Ancestry {
     slots: FxHashMap<Location, SlotKey>,
     /// Each list's, enum's or term list's item slots, in order.
     item_slots: FxHashMap<Location, Vec<SlotKey>>,
+    /// Each table's or grid's cell slots, by the cell's `(x, y)` position.
+    cell_slots: FxHashMap<Location, FxHashMap<(usize, usize), SlotKey>>,
     /// Elements laid out inside something that already carries their text,
     /// see [`Ancestry::is_absorbed`].
     absorbed: FxHashSet<Location>,
+    /// Every grid, in layout order (see [`Ancestry::grids`]).
+    grids: Vec<(Location, Content)>,
+    /// The locations in `grids`.
+    grid_locations: FxHashSet<Location>,
+    /// Each grid's anchor (see [`Ancestry::grids`]).
+    grid_anchors: FxHashMap<Location, Location>,
 }
 
 impl Ancestry {
@@ -193,10 +206,10 @@ impl Ancestry {
     }
 
     /// Whether `location` sits inside a container that is emitted as its own
-    /// node and renders the text itself — a table cell, a quote, a figure,
-    /// a footnote entry, the lines of a code block, an equation's numbering.
-    /// A list's or a term list's content is not: it is routed into their
-    /// slots (see [`Ancestry::slot_of`]).
+    /// node and renders the text itself — a quote, a figure, a footnote
+    /// entry, the lines of a code block, an equation's numbering. A list's,
+    /// a term list's or a table's content is not: it is routed into their
+    /// slots (see [`Ancestry::slot_of`]), which `convert` asks first.
     pub fn is_in_emitted_container(&self, location: Location) -> bool {
         self.in_container.contains(&location)
     }
@@ -219,6 +232,32 @@ impl Ancestry {
         self.item_slots.get(&location).map_or(&[], Vec::as_slice)
     }
 
+    /// The slot of the cell at column `x`, row `y` of the table or grid at
+    /// `owner`: the first laid-out copy of that cell.
+    pub fn cell_slot(&self, owner: Location, x: usize, y: usize) -> Option<SlotKey> {
+        self.cell_slots.get(&owner)?.get(&(x, y)).copied()
+    }
+
+    /// How many distinct cells of the table or grid at `owner` were laid
+    /// out.
+    pub fn cell_slot_count(&self, owner: Location) -> usize {
+        self.cell_slots.get(&owner).map_or(0, FxHashMap::len)
+    }
+
+    /// Every grid of the document, in layout order, with its anchor: the
+    /// first element laid out inside it that the introspector knows and
+    /// that may become a node (see [`is_node_kind`]).
+    ///
+    /// A grid is not `Locatable`, so unless it is labelled the introspector
+    /// does not know it: it gives the grid no page, no state and no place
+    /// in reading order. Its anchor stands in for it there. A grid whose
+    /// anchor is `None` holds nothing that becomes a node.
+    pub fn grids(&self) -> impl Iterator<Item = (Location, &Content, Option<Location>)> {
+        self.grids.iter().map(|(location, grid)| {
+            (*location, grid, self.grid_anchors.get(location).copied())
+        })
+    }
+
     /// Whether the element at `location` is laid out inside something that
     /// carries its text already, or that carries none: a list item's marker
     /// (`ListItemLabel`), a term (`TermsItemLabel`), a footnote's number (a
@@ -235,7 +274,8 @@ impl Ancestry {
 /// `grid`, a `block`, a `place` — are deliberately absent: they produce no
 /// node, so their paragraphs are the only carrier of that text. So are
 /// lists and term lists: their items' paragraphs are routed into their
-/// slots.
+/// slots. A table's cells are routed too (a routed slot is asked first), so
+/// a table only counts here for what is laid out in it outside any cell.
 ///
 /// Two kinds qualify. Most are emitted as a node that renders its own
 /// content, so a paragraph inside is that content seen twice. The outline is
@@ -285,6 +325,42 @@ fn absorbs(inner: &Content) -> bool {
 fn owns_items(inner: &Content) -> bool {
     let elem = inner.elem();
     elem == ListElem::ELEM || elem == EnumElem::ELEM || elem == TermsElem::ELEM
+}
+
+/// Whether `inner` is of a kind that the emit pipeline may turn into a node
+/// (the elements `convert` queries).
+fn is_node_kind(inner: &Content) -> bool {
+    let elem = inner.elem();
+    elem == ParElem::ELEM
+        || elem == HeadingElem::ELEM
+        || elem == TableElem::ELEM
+        || elem == FigureElem::ELEM
+        || elem == QuoteElem::ELEM
+        || elem == RawElem::ELEM
+        || elem == EquationElem::ELEM
+        || elem == ListElem::ELEM
+        || elem == EnumElem::ELEM
+        || elem == TermsElem::ELEM
+        || elem == ImageElem::ELEM
+}
+
+/// Whether `inner` owns cell slots: a table or a grid.
+fn owns_cells(inner: &Content) -> bool {
+    let elem = inner.elem();
+    elem == TableElem::ELEM || elem == GridElem::ELEM
+}
+
+/// The resolved `(x, y)` position of a table or grid cell. The tag holds the
+/// materialized cell, whose position the grid resolved.
+fn cell_position(inner: &Content) -> Option<(usize, usize)> {
+    let styles = StyleChain::default();
+    if let Some(cell) = inner.to_packed::<TableCell>() {
+        Some((cell.x.get(styles).custom()?, cell.y.get(styles).custom()?))
+    } else if let Some(cell) = inner.to_packed::<GridCell>() {
+        Some((cell.x.get(styles).custom()?, cell.y.get(styles).custom()?))
+    } else {
+        None
+    }
 }
 
 /// Whether `inner` is a `place` that floats. Materialized, so `float` holds
@@ -583,6 +659,10 @@ struct Open {
     absorbs: bool,
     /// Whether it owns item slots (see [`owns_items`]).
     owns_items: bool,
+    /// Whether it owns cell slots (see [`owns_cells`]).
+    owns_cells: bool,
+    /// Whether it is a grid, which needs an anchor (see [`Ancestry::grids`]).
+    is_grid: bool,
     /// Glyph runs drawn for this paragraph inside / outside artifact-marked
     /// content. A paragraph all of whose glyphs are drawn inside an artifact
     /// is page furniture, whichever way the two tags happen to nest.
@@ -822,9 +902,19 @@ fn walk(
                 let scope = scope.enter(group, places, stack.len());
                 walk(&group.frame, engine, floats, places, scope, stack, ancestry);
             }
-            FrameItem::Tag(Tag::Start(inner, _)) => {
+            FrameItem::Tag(Tag::Start(inner, flags)) => {
                 let Some(location) = inner.location() else { continue };
                 let is_par = inner.elem() == ParElem::ELEM;
+                if inner.elem() == GridElem::ELEM
+                    && ancestry.grid_locations.insert(location)
+                {
+                    ancestry.grids.push((location, inner.clone()));
+                }
+                if flags.introspectable && is_node_kind(inner) {
+                    for open in stack.iter().filter(|open| open.is_grid) {
+                        ancestry.grid_anchors.entry(open.location).or_insert(location);
+                    }
+                }
                 let opens = SlotKey::opened_by(inner, location);
                 let mut in_floats = floats.holding(inner.span()).to_vec();
                 // A marker is made by layout, often with no span of its own:
@@ -842,39 +932,19 @@ fn walk(
                     }
                 }
 
-                let par = is_par.then(|| {
-                    let mut par = OpenPar {
-                        range: content_range(engine, inner),
-                        content: inner.clone(),
-                        text: OnceCell::new(),
-                        floats: Vec::new(),
-                        floats_by_source: Vec::new(),
-                        body_of: Vec::new(),
-                    };
-                    for index in floats.candidates(&par) {
-                        let float = &floats.all[index];
-                        let by_range = float.holds_by_range(&par);
-                        let by_text = float.holds_by_text(&par);
-                        if by_range || by_text {
-                            par.floats.push(index);
-                        }
-                        let sure = by_range || (by_text && par.range.is_none());
-                        if sure {
-                            par.floats_by_source.push(index);
-                        }
-                        // Traversing the paragraph is the costly test, and
-                        // rarely needed: last.
-                        if sure
-                            && by_text
-                            && (par.range.is_none() || float.holds_in_body(&par))
-                        {
-                            par.body_of.push(index);
-                        }
-                    }
-                    par
-                });
+                let par = is_par.then(|| open_par(engine, floats, inner));
                 if let Some(par) = &par
                     && let Some(parent) = covering_par(stack, par)
+                {
+                    ancestry.covered_by_par.insert(location, parent);
+                }
+                // A list, a table or a grid in an inline `box` is laid out
+                // inside the line of the paragraph that holds it, which
+                // renders its text: the same test as for a box's paragraph.
+                if (owns_items(inner) || owns_cells(inner))
+                    && stack.iter().any(|open| open.par.is_some())
+                    && let Some(parent) =
+                        covering_par(stack, &open_par(engine, floats, inner))
                 {
                     ancestry.covered_by_par.insert(location, parent);
                 }
@@ -898,6 +968,19 @@ fn walk(
                 }
 
                 let slot = opens;
+                if let Some(slot @ SlotKey::Cell(_)) = slot
+                    && let Some(position) = cell_position(inner)
+                    && let Some(owner) = stack.iter().rev().find(|open| open.owns_cells)
+                {
+                    // The first copy of a position is the cell; a repeated
+                    // header's or footer's copies are not.
+                    ancestry
+                        .cell_slots
+                        .entry(owner.location)
+                        .or_default()
+                        .entry(position)
+                        .or_insert(slot);
+                }
                 if let Some(slot) = slot
                     && matches!(slot, SlotKey::Item(_) | SlotKey::TermDescription(_))
                 {
@@ -925,6 +1008,8 @@ fn walk(
                     slot,
                     absorbs: absorbs(inner),
                     owns_items: owns_items(inner),
+                    owns_cells: owns_cells(inner),
+                    is_grid: inner.elem() == GridElem::ELEM,
                     glyphs_in_artifact: 0,
                     glyphs_outside_artifact: 0,
                     is_text_node: is_par || is_text_node(inner),
@@ -1024,6 +1109,37 @@ fn content_range(engine: &Engine, content: &Content) -> Option<SourceRange> {
         ControlFlow::<()>::Continue(())
     });
     range
+}
+
+/// An element laid out as (part of) a paragraph, as [`covering_par`] tests
+/// it: its source range, and the floats that may hold it.
+fn open_par(engine: &Engine, floats: &Floats, inner: &Content) -> OpenPar {
+    let mut par = OpenPar {
+        range: content_range(engine, inner),
+        content: inner.clone(),
+        text: OnceCell::new(),
+        floats: Vec::new(),
+        floats_by_source: Vec::new(),
+        body_of: Vec::new(),
+    };
+    for index in floats.candidates(&par) {
+        let float = &floats.all[index];
+        let by_range = float.holds_by_range(&par);
+        let by_text = float.holds_by_text(&par);
+        if by_range || by_text {
+            par.floats.push(index);
+        }
+        let sure = by_range || (by_text && par.range.is_none());
+        if sure {
+            par.floats_by_source.push(index);
+        }
+        // Traversing the paragraph is the costly test, and
+        // rarely needed: last.
+        if sure && by_text && (par.range.is_none() || float.holds_in_body(&par)) {
+            par.body_of.push(index);
+        }
+    }
+    par
 }
 
 /// The paragraph `par` is part of, if any.

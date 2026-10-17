@@ -392,6 +392,12 @@ pub fn all_example_files() -> Vec<PathBuf> {
 /// A deliberate exception to walking every slot: what these tests pin is
 /// the reading flow, and that the text a container carries is not *also*
 /// emitted as a paragraph of the flow.
+/// The paragraphs of the reading flow, in order: those of the body and of
+/// its sections, read through layouts. A grid used for arrangement is a
+/// `layout` whose cells hold its blocks, in reading order, so its
+/// paragraphs are read where the grid sits — as they were when grids were
+/// flattened. A table's, a list's or a quote's paragraphs are not part of
+/// the flow.
 pub fn paragraph_texts_in_order(nodes: &[CndNode]) -> Vec<String> {
     let mut out = Vec::new();
     fn flow(nodes: &[CndNode], out: &mut Vec<String>) {
@@ -399,6 +405,11 @@ pub fn paragraph_texts_in_order(nodes: &[CndNode]) -> Vec<String> {
             match node {
                 CndNode::Paragraph(p) => out.push(p.text.value.clone()),
                 CndNode::Heading(h) => flow(&h.children, out),
+                CndNode::Layout(l) => {
+                    for cell in &l.cells {
+                        flow(&cell.children, out);
+                    }
+                }
                 _ => {}
             }
         }

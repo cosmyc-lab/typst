@@ -1,17 +1,13 @@
 use ecow::EcoString;
 use typst_library::World;
-use typst_library::WorldExt;
 use typst_library::engine::Engine;
 use typst_library::foundations::{
     Content, Label, NativeElement, Packed, StyleChain, Synthesize,
 };
-use typst_library::introspection::Introspector;
+use typst_library::introspection::{Introspector, Location};
 use typst_library::layout::GridElem;
 use typst_library::layout::grid::resolve::{CellGrid, Entry};
-use typst_library::model::{
-    FigureCaption, FigureElem, TableChild, TableElem, TableHeader, TableItem,
-};
-use typst_syntax::Span;
+use typst_library::model::{FigureCaption, FigureElem, TableElem};
 use uuid::Uuid;
 
 use crate::emit::convert::{self, NodeRecord, Records, Synthetic, TextRecord};
@@ -98,19 +94,13 @@ pub fn from_figure(
     let mut figure = figure.clone();
     figure.synthesize(engine, styles)?;
 
-    let caption = figure
-        .caption
-        .get_cloned(styles)
-        .as_ref()
-        .map(caption_text)
-        .or_else(|| caption_from_source(engine, content.span()))
-        .or_else(|| caption_from_source(engine, figure.span()))
-        .or_else(|| caption_from_source(engine, Span::detached()));
+    let caption = figure.caption.get_cloned(styles).as_ref().map(caption_text);
     let fig_number = convert::figure_number(engine, &figure, styles);
     let (mut wrapper_record, wrapper_edges) =
         convert::make_record(engine, introspector, content, &[])?;
 
-    let (table_node, mut table_records) = convert(engine, introspector, table, styles)?;
+    let (table_node, mut table_records) =
+        figure_table(engine, introspector, table, styles)?;
     table_records.locate_in(content.location());
 
     let wrapper_id = Uuid::new_v4();
@@ -164,10 +154,9 @@ pub fn from_figure_grid(
         .records
         .push((layout_id, NodeRecord::synthetic(content.location())));
     let mut layout = LayoutNode::new(layout_id, placeholder_location());
-    layout.cells = cells_from_cell_grid(
-        grid.grid.as_ref().map(|grid| grid.as_ref()),
-        &mut synthetic,
-    );
+    if let Some(grid) = grid.grid.as_ref() {
+        layout.cells = text_cells(grid, 0, &mut synthetic);
+    }
 
     let wrapper_id = Uuid::new_v4();
     let mut wrapper = FigureNode::new(wrapper_id, placeholder_location());
@@ -192,10 +181,99 @@ fn caption_text(caption: &Packed<FigureCaption>) -> EcoString {
 }
 
 /// Convert a table element into a CND table node. `TableNode` carries no
-/// caption of its own — a captioned table is this node wrapped in a
-/// `FigureNode` by the caller (`from_figure`). Its span-less edges go to its
-/// first cell paragraph (interim rule).
+/// caption of its own — a captioned table is a node wrapped in a
+/// `FigureNode`. Its cells' `children` are filled by `convert::assemble`
+/// with the blocks laid out in each cell. A table has no text, so it keeps
+/// no edge: a marker written in a cell is an edge of the cell's paragraph.
 pub fn convert(
+    engine: &mut Engine,
+    introspector: &dyn Introspector,
+    table: &Packed<TableElem>,
+    styles: StyleChain,
+) -> typst_library::diag::SourceResult<(TableNode, NodeRecord)> {
+    let mut table = table.clone();
+    if table.grid.is_none() {
+        table.synthesize(engine, styles)?;
+    }
+    let (record, _) =
+        convert::make_record(engine, introspector, &table.clone().pack(), &[])?;
+    let mut node = TableNode::new(Uuid::new_v4(), placeholder_location());
+    if let Some(grid) = table.grid.as_ref() {
+        node.cells = cells_from_grid(grid, header_rows(grid));
+    }
+    Ok((node, record))
+}
+
+/// Convert a bare grid — one used for arrangement, outside any figure —
+/// into a `LayoutNode`. Its cells are filled as a table's are. The
+/// introspector does not know the grid, so its record takes `anchor`, the
+/// first element laid out in it, for its page and state.
+pub fn from_grid(
+    engine: &mut Engine,
+    introspector: &dyn Introspector,
+    grid: &Packed<GridElem>,
+    anchor: Location,
+    styles: StyleChain,
+) -> typst_library::diag::SourceResult<(LayoutNode, NodeRecord)> {
+    let mut grid = grid.clone();
+    if grid.grid.is_none() {
+        grid.synthesize(engine, styles)?;
+    }
+    let record = NodeRecord {
+        location: Some(anchor),
+        label: grid.label(),
+        state_metadata: convert::metadata_at(engine, introspector, anchor)?,
+        texts: Vec::new(),
+    };
+    let mut node = LayoutNode::new(Uuid::new_v4(), placeholder_location());
+    if let Some(cells) = grid.grid.as_ref() {
+        node.cells = cells_from_grid(cells, 0);
+    }
+    Ok((node, record))
+}
+
+/// The cells of a resolved grid, in `entries` order: row-major, which is
+/// reading order. A cell spanning several positions comes once, at its
+/// first. The first `header_rows` rows are header cells. Their `children`
+/// are left empty: `convert::assemble` fills them through each cell's slot
+/// (`Ancestry::cell_slot`), found by the same `(col, row)` position.
+pub fn cells_from_grid(grid: &CellGrid, header_rows: usize) -> Vec<Cell> {
+    let cols = grid.non_gutter_column_count();
+    if cols == 0 {
+        return Vec::new();
+    }
+    grid.entries
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, entry)| {
+            let cell = entry.as_cell()?;
+            let row = idx / cols;
+            Some(Cell {
+                row: row as i32,
+                col: (idx % cols) as i32,
+                rowspan: cell.rowspan.get() as i32,
+                colspan: cell.colspan.get() as i32,
+                is_header: row < header_rows,
+                children: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// How many rows, from the first, the grid's headers cover. A header's
+/// range counts gutter rows, which sit between every two rows.
+fn header_rows(grid: &CellGrid) -> usize {
+    let is_header = |row: usize| {
+        let track = if grid.has_gutter { 2 * row } else { row };
+        grid.headers.iter().any(|header| header.range.contains(&track))
+    };
+    (0..).take_while(|row| is_header(*row)).count()
+}
+
+/// A table inside a figure, whose cells each hold one paragraph made from
+/// their text. Interim, until figure bodies are routed: the figure's
+/// span-less edges go to its first cell paragraph.
+fn figure_table(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     table: &Packed<TableElem>,
@@ -206,15 +284,15 @@ pub fn convert(
         table.synthesize(engine, styles)?;
     }
 
-    let id = uuid::Uuid::new_v4();
-    let location = placeholder_location();
+    let id = Uuid::new_v4();
     let packed = table.clone().pack();
     let (record, edges) = convert::make_record(engine, introspector, &packed, &[])?;
     let mut synthetic = Synthetic::new(record.location);
 
-    let header_rows = count_header_rows(&table);
-    let mut node = TableNode::new(id, location);
-    node.cells = cells_from_grid(&table, header_rows, &mut synthetic);
+    let mut node = TableNode::new(id, placeholder_location());
+    if let Some(grid) = table.grid.as_ref() {
+        node.cells = text_cells(grid, header_rows(grid), &mut synthetic);
+    }
     let _ = synthetic.attach_to_first_slot(
         node.cells.iter().map(|cell| cell.children.as_slice()),
         edges,
@@ -229,93 +307,23 @@ pub fn convert(
     ))
 }
 
-fn count_header_rows(table: &Packed<TableElem>) -> i32 {
-    let mut rows = 0_usize;
-    for child in &table.children {
-        if let TableChild::Header(header) = child {
-            rows += count_header_items(header);
-        }
-    }
-    if rows == 0 && table.children.iter().any(|c| matches!(c, TableChild::Header(_))) {
-        rows = 1;
-    }
-    rows as i32
-}
-
-fn count_header_items(header: &Packed<TableHeader>) -> usize {
-    let mut max_row = 0_usize;
-    for item in &header.children {
-        if let TableItem::Cell(cell) = item {
-            max_row = max_row.max(1);
-            let _ = cell;
-        }
-    }
-    max_row.max(1)
-}
-
-fn cells_from_grid(
-    table: &Packed<TableElem>,
-    header_rows: i32,
+/// The cells of a grid inside a figure: a cell with text gets one paragraph
+/// child holding it; an empty cell has no children. Interim, until figure
+/// bodies are routed.
+fn text_cells(
+    grid: &CellGrid,
+    header_rows: usize,
     synthetic: &mut Synthetic,
 ) -> Vec<Cell> {
-    cells_from_cell_grid(table.grid.as_ref().map(|grid| grid.as_ref()), synthetic)
-        .into_iter()
-        .map(|mut cell| {
-            cell.is_header = cell.row < header_rows;
-            cell
-        })
-        .collect()
-}
-
-/// The cells of a resolved grid. A cell with text gets one paragraph child
-/// holding it; an empty cell has no children.
-pub fn cells_from_cell_grid(
-    grid: Option<&CellGrid>,
-    synthetic: &mut Synthetic,
-) -> Vec<Cell> {
-    let Some(grid) = grid else {
-        return Vec::new();
-    };
-
-    let cols = grid.non_gutter_column_count();
-    if cols == 0 {
-        return Vec::new();
-    }
-
-    let mut cells = Vec::new();
-    for (idx, entry) in grid.entries.iter().enumerate() {
-        let Entry::Cell(cell) = entry else { continue };
-        let row = (idx / cols) as i32;
-        let col = (idx % cols) as i32;
-        let text = extract_text(&cell.body);
-        let children = if text.is_empty() {
-            Vec::new()
-        } else {
-            vec![synthetic.paragraph(RichText::plain(text))]
-        };
-        cells.push(Cell {
-            row,
-            col,
-            rowspan: cell.rowspan.get() as i32,
-            colspan: cell.colspan.get() as i32,
-            is_header: false,
-            children,
-        });
+    let mut cells = cells_from_grid(grid, header_rows);
+    let bodies = grid.entries.iter().filter_map(Entry::as_cell);
+    for (cell, body) in cells.iter_mut().zip(bodies) {
+        let text = extract_text(&body.body);
+        if !text.is_empty() {
+            cell.children.push(synthetic.paragraph(RichText::plain(text)));
+        }
     }
     cells
-}
-
-fn raw_typst_from_span(engine: &Engine, span: Span) -> Option<String> {
-    let id = span.id()?;
-    let range = engine.world.range(span)?;
-    let source = engine.world.source(id).ok()?;
-    let text = source.text();
-    let start = range.start.min(text.len());
-    let end = range.end.min(text.len());
-    if start >= end {
-        return None;
-    }
-    Some(extract_table_snippet(&text[start..end]))
 }
 
 fn raw_typst_from_label(engine: &Engine, label: Option<Label>) -> Option<String> {
@@ -355,56 +363,4 @@ fn matching_paren_end(text: &str) -> Option<usize> {
         }
     }
     None
-}
-
-fn caption_from_source(engine: &Engine, span: Span) -> Option<EcoString> {
-    if let Some(snippet) = raw_typst_from_span(engine, span)
-        && let Some(caption) = parse_caption(&snippet)
-    {
-        return Some(caption);
-    }
-    let main = engine.world.main();
-    let source = engine.world.source(main).ok()?;
-    parse_caption(source.text())
-}
-
-fn parse_caption(text: &str) -> Option<EcoString> {
-    let marker = "caption:";
-    let start = text.find(marker)? + marker.len();
-    let rest = text[start..].trim_start();
-    if !rest.starts_with('[') {
-        return None;
-    }
-    let mut depth = 0_usize;
-    let mut end = None;
-    for (idx, ch) in rest.char_indices() {
-        match ch {
-            '[' => depth += 1,
-            ']' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    end = Some(idx + 1);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let end = end?;
-    Some(rest[..end].trim_matches(|c| c == '[' || c == ']').into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_caption_from_figure_block() {
-        let text = "#figure(
-  table(columns: 2),
-  caption: [Paramètres nominaux de fonctionnement.],
-) <tab-params>";
-        let caption = parse_caption(text).unwrap();
-        assert_eq!(caption.as_str(), "Paramètres nominaux de fonctionnement.");
-    }
 }

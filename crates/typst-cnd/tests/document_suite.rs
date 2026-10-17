@@ -253,9 +253,29 @@ fn complex_tables_standalone_and_figure_variants() {
 
     let standalone =
         find_by_label(&cnd.nodes, "tab-config-standalone").expect("standalone");
-    let CndNode::Table(_standalone) = standalone else {
+    let CndNode::Table(standalone) = standalone else {
         panic!("expected bare table (standalone is not figure-wrapped)");
     };
+    // Its cells hold the paragraphs laid out in them, in reading order, and
+    // the header row is marked.
+    assert_eq!(
+        standalone
+            .cells
+            .iter()
+            .map(|cell| (first_paragraph(&cell.children), cell.is_header))
+            .collect::<Vec<_>>(),
+        [
+            ("Clé", true),
+            ("Valeur", true),
+            ("mode", false),
+            ("production", false),
+            ("revision", false),
+            ("3.1", false),
+        ]
+    );
+    for cell in &standalone.cells {
+        assert_eq!(node_types(&cell.children), ["paragraph"]);
+    }
 
     let tables = table_stats(&cnd.nodes);
     assert_eq!(tables.with_caption, 2, "only figure tables have captions");
@@ -305,6 +325,8 @@ fn complex_columns_reading_order_flatten() {
     let cnd = cnd_for_example("complex_columns.typ");
     let mut stats = NodeStats::default();
     walk_nodes(&cnd.nodes, &mut stats);
+    // Columns stay flattened: only a grid is a `layout`.
+    assert_eq!(stats.layouts, 0);
 
     assert_tag_sequence(
         &cnd.nodes,
@@ -741,6 +763,22 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
     assert!(
         grid_fig.children.iter().any(|c| matches!(c, CndNode::Layout(_))),
         "grid layout child"
+    );
+    let layout = grid_fig
+        .children
+        .iter()
+        .find_map(|c| match c {
+            CndNode::Layout(layout) => Some(layout),
+            _ => None,
+        })
+        .expect("layout");
+    assert_eq!(
+        layout
+            .cells
+            .iter()
+            .map(|cell| first_paragraph(&cell.children))
+            .collect::<Vec<_>>(),
+        ["X", "Y", "1", "2"]
     );
 
     let tail = find_by_label(&cnd.nodes, "sec-tail").expect("tail");
@@ -1290,6 +1328,7 @@ fn example_files_exist() {
         "figure_raw.typ",
         "figure_helper_drawing.typ",
         "containers_lists.typ",
+        "containers_grids.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1408,6 +1447,28 @@ fn layout_container_content_is_not_lost() {
             "container content {expected:?} missing from the CND, got {paragraphs:?}"
         );
     }
+
+    // The cards' grid is a `layout`: each card's blocks are its cell's
+    // paragraphs, in reading order.
+    let layouts: Vec<&typst_cnd::LayoutNode> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Layout(layout) => Some(layout),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(layouts.len(), 1);
+    assert_eq!(
+        layouts[0]
+            .cells
+            .iter()
+            .map(|cell| paragraph_values(&cell.children))
+            .collect::<Vec<_>>(),
+        [
+            ["LEFT CARD", "Left item one", "Left item two"],
+            ["RIGHT CARD", "Right item one", "Right item two"],
+        ]
+    );
 
     // An inline `box` is part of its enclosing paragraph, which already
     // renders its text — it must not also become a paragraph of its own.
@@ -2883,4 +2944,263 @@ fn list_markers_are_not_paragraphs() {
             }
         }
     }
+}
+
+/// The first heading of the tree, in reading order, whose text is `text`.
+fn find_heading<'a>(nodes: &'a [CndNode], text: &str) -> &'a typst_cnd::HeadingNode {
+    all_nodes(nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Heading(heading) if heading.text.value == text => Some(heading),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no heading {text:?}"))
+}
+
+/// The cells of a table or a layout.
+fn cells_of(node: &CndNode) -> &[typst_cnd::Cell] {
+    match node {
+        CndNode::Table(table) => &table.cells,
+        CndNode::Layout(layout) => &layout.cells,
+        other => panic!("a {} has no cells", node_type(other)),
+    }
+}
+
+/// How many times `needle` occurs over every text of the CND: the body,
+/// every slot entered, and the footnote pool.
+fn occurrences(cnd: &typst_cnd::Cnd, needle: &str) -> usize {
+    all_nodes_full(cnd)
+        .into_iter()
+        .flat_map(|node| node.texts())
+        .map(|text| text.value.matches(needle).count())
+        .sum()
+}
+
+#[test]
+fn table_cells_hold_blocks() {
+    let cnd = cnd_for_example("containers_grids.typ");
+    let outer = find_heading(&cnd.nodes, "Outer");
+    let table = outer
+        .children
+        .iter()
+        .find(|node| matches!(node, CndNode::Table(_)))
+        .expect("the 2×2 table under Outer");
+    let cells = cells_of(table);
+    assert_eq!(cells.len(), 4);
+    assert_eq!(
+        cells
+            .iter()
+            .map(|cell| (cell.row, cell.col, cell.is_header))
+            .collect::<Vec<_>>(),
+        [(0, 0, true), (0, 1, true), (1, 0, false), (1, 1, false)]
+    );
+    assert_eq!(paragraph_values(&cells[0].children), ["Notes"]);
+    assert_eq!(node_types(&cells[2].children), ["paragraph", "paragraph"]);
+    assert_eq!(
+        paragraph_values(&cells[2].children),
+        ["First paragraph of the alpha notes.", "Second paragraph of the alpha notes."]
+    );
+    assert_eq!(node_types(&cells[3].children), ["image"]);
+    let CndNode::Image(image) = &cells[3].children[0] else { unreachable!() };
+    assert_eq!(image.alt.as_deref(), Some("Alpha cover"));
+    // The image is the cell's only copy: none escapes beside the table.
+    let images = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter(|node| matches!(node, CndNode::Image(_)))
+        .count();
+    assert_eq!(images, 1);
+}
+
+#[test]
+fn bare_grid_is_a_layout() {
+    let cnd = cnd_for_example("containers_grids.typ");
+    let outer = find_heading(&cnd.nodes, "Outer");
+    let left = "Left block of the bare grid.";
+    let right = "Right block of the bare grid.";
+    // Outer holds two grids: this one and the sectioned one. Exactly one
+    // layout holds the bare grid's blocks.
+    let bare: Vec<&CndNode> = outer
+        .children
+        .iter()
+        .filter(|node| {
+            matches!(node, CndNode::Layout(_))
+                && cells_of(node)
+                    .iter()
+                    .any(|cell| first_paragraph(&cell.children) == left)
+        })
+        .collect();
+    assert_eq!(bare.len(), 1, "one layout for the bare grid");
+    let cells = cells_of(bare[0]);
+    assert_eq!(cells.len(), 2);
+    assert_eq!(
+        cells.iter().map(|cell| (cell.row, cell.col)).collect::<Vec<_>>(),
+        [(0, 0), (0, 1)]
+    );
+    assert_eq!(paragraph_values(&cells[0].children), [left]);
+    assert_eq!(paragraph_values(&cells[1].children), [right]);
+    for text in [left, right] {
+        assert_eq!(occurrences(&cnd, text), 1, "{text:?} is kept once");
+    }
+    // Each grid of the document is one layout; none is a table.
+    let mut stats = NodeStats::default();
+    walk_nodes(&cnd.nodes, &mut stats);
+    assert_eq!(stats.layouts, 2);
+}
+
+#[test]
+fn heading_in_grid_cell_stays_in_cell() {
+    let cnd = cnd_for_example("containers_grids.typ");
+    let outer = find_heading(&cnd.nodes, "Outer");
+    let sectioned = outer
+        .children
+        .iter()
+        .find(|node| {
+            matches!(node, CndNode::Layout(_))
+                && cells_of(node).iter().any(|cell| {
+                    matches!(cell.children.first(), Some(CndNode::Heading(_)))
+                })
+        })
+        .expect("the sectioned grid under Outer");
+    let cells = cells_of(sectioned);
+    assert_eq!(node_types(&cells[0].children), ["heading"]);
+    let CndNode::Heading(inner) = &cells[0].children[0] else { unreachable!() };
+    assert_eq!(inner.text.value, "Inner");
+    assert_eq!(inner.heading_path, ["Outer", "Inner"]);
+    assert_eq!(node_types(&inner.children), ["paragraph"]);
+    assert_eq!(paragraph_values(&inner.children), ["Paragraph under the inner heading."]);
+    assert_eq!(
+        paragraph_values(&cells[1].children),
+        ["Second cell of the sectioned grid."]
+    );
+    // The heading's section ends with its cell: the paragraph after the
+    // grid belongs to Outer.
+    assert!(
+        paragraph_values(&outer.children).contains(&"After the sectioned grid."),
+        "the paragraph after the grid is Outer's"
+    );
+    assert_eq!(occurrences(&cnd, "After the sectioned grid."), 1);
+    assert_eq!(occurrences(&cnd, "Paragraph under the inner heading."), 1);
+}
+
+#[test]
+fn edge_inside_a_cell_sits_on_the_cell_paragraph() {
+    let cnd = cnd_for_example("containers_grids.typ");
+    let related = find_heading(&cnd.nodes, "Related");
+    let table = related
+        .children
+        .iter()
+        .find(|node| matches!(node, CndNode::Table(_)))
+        .expect("the table under Related");
+    assert!(table.texts().is_empty(), "a table has no texts");
+    let cells = cells_of(table);
+    assert_eq!(node_types(&cells[1].children), ["paragraph"]);
+    let paragraph = paragraph_at(&cells[1].children, 0);
+    let value = paragraph.text.value.as_str();
+    assert!(value.starts_with("Cell text pointing to"), "{value:?}");
+
+    assert_eq!(paragraph.text.refs.len(), 1);
+    let reference = &paragraph.text.refs[0];
+    assert_eq!(reference.label, "grid-note");
+    let span = reference.text_span.as_ref().expect("the ref edge has a span");
+    assert_eq!(codepoint_slice(value, span), "Section\u{a0}1");
+
+    assert_eq!(paragraph.text.footnotes.len(), 1);
+    let note = &paragraph.text.footnotes[0];
+    let span = note.text_span.as_ref().expect("the footnote edge has a span");
+    assert_eq!(codepoint_slice(value, span), note.label);
+
+    // No other paragraph carries either edge. The section fallback of
+    // `refs::resolve_refs` still puts a span-less copy of every reference
+    // written in a section on its heading, as it does for any paragraph's,
+    // until that fallback goes.
+    for node in all_nodes(&cnd.nodes) {
+        if node.id() == paragraph.base.id {
+            continue;
+        }
+        for text in node.texts() {
+            for reference in text.refs.iter().filter(|r| r.label == "grid-note") {
+                assert!(
+                    matches!(node, CndNode::Heading(_)) && reference.text_span.is_none(),
+                    "a {} also refers to grid-note: {reference:?}",
+                    node_type(node)
+                );
+            }
+        }
+    }
+    let texts = all_texts(&cnd.nodes);
+    let edges_to_note = texts
+        .iter()
+        .flat_map(|text| &text.footnotes)
+        .filter(|edge| edge.label == note.label)
+        .count();
+    assert_eq!(edges_to_note, 1);
+    assert_pool_refs_resolve(&cnd);
+}
+
+#[test]
+fn a_list_in_a_cell_is_kept_once_whatever_holds_the_table() {
+    let cnd = cnd_for_example("containers_grids.typ");
+    for text in [
+        "Quoted cell item one.",
+        "Quoted cell item two.",
+        "Noted cell item one.",
+        "Noted cell item two.",
+        "Itemized cell entry one.",
+        "Itemized cell entry two.",
+    ] {
+        assert_eq!(occurrences(&cnd, text), 1, "{text:?} is kept once");
+    }
+
+    // A table in a list item is a block of that item, and its cell holds
+    // the list.
+    let lists = outer_lists(&cnd.nodes);
+    let holder = list_starting_with(&lists, "Item holding a table:");
+    let item = &holder.items[0];
+    assert_eq!(node_types(&item.children), ["paragraph", "table"]);
+    let cells = cells_of(&item.children[1]);
+    assert_eq!(cells.len(), 1);
+    assert_eq!(node_types(&cells[0].children), ["list"]);
+    let CndNode::List(list) = &cells[0].children[0] else { unreachable!() };
+    assert_eq!(
+        list.items.iter().map(item_text).collect::<Vec<_>>(),
+        ["Itemized cell entry one.", "Itemized cell entry two."]
+    );
+
+    // A table in a quote or in a footnote is that container's text until
+    // their bodies are routed: no table leaks into the body beside them.
+    let tables: Vec<&CndNode> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter(|node| matches!(node, CndNode::Table(_)))
+        .collect();
+    for table in &tables {
+        for cell in cells_of(table) {
+            for node in all_nodes(&cell.children) {
+                for text in node.texts() {
+                    assert!(
+                        !text.value.contains("Quoted") && !text.value.contains("Noted"),
+                        "a quote's or a footnote's table leaked: {:?}",
+                        text.value
+                    );
+                }
+            }
+        }
+    }
+    // The 2×2 table, the Related table and the item's table.
+    assert_eq!(tables.len(), 3);
+}
+
+#[test]
+fn an_inline_list_in_a_box_is_kept_once() {
+    let cnd = cnd_for_example("containers_grids.typ");
+    assert_eq!(occurrences(&cnd, "Boxed list entry."), 1);
+    let sentence = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Paragraph(p) if p.text.value.starts_with("A sentence with") => {
+                Some(p.text.value.as_str())
+            }
+            _ => None,
+        })
+        .expect("the sentence holding the box");
+    assert!(sentence.contains("Boxed list entry."), "{sentence:?}");
 }
