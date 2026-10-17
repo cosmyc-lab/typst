@@ -1,88 +1,71 @@
 use typst_library::engine::Engine;
-use typst_library::foundations::{
-    Content, NativeElement, Packed, Smart, StyleChain, Synthesize,
-};
+use typst_library::foundations::{Content, Packed, Smart, StyleChain, Synthesize};
 use typst_library::introspection::Introspector;
 use typst_library::loading::DataSource;
 use typst_library::model::{FigureElem, FigureKind};
-use typst_library::text::RawElem;
 use typst_library::visualize::ImageElem;
 use uuid::Uuid;
 
-use crate::emit::convert::{self, NodeRecord, Records, Synthetic};
-use crate::emit::{code, table};
+use crate::emit::convert::{self, NodeRecord};
 use crate::location::placeholder_location;
-use crate::model::{CndNode, FigureNode, ImageNode, RawSource, RichText};
+use crate::model::{FigureNode, ImageNode, RawSource, RichText};
 
-/// Convert a non-table figure (image, code, custom kind, …) into a wrapper
-/// `FigureNode` plus whatever children it carries. Table/grid figures are
-/// intercepted earlier in `convert::dispatch` and never reach this
-/// function (see `table::from_figure`/`table::from_figure_grid`).
+/// Convert a figure into its wrapper node: kind, caption and numbering. Its
+/// `children` are left empty: `convert::assemble` fills them with the
+/// blocks laid out in its body, each a node of its own (an image, a code
+/// block, a table, a layout, paragraphs, a nested figure…).
+///
+/// A `drawing` (see `Ancestry::is_drawing`) keeps no children: its `raw`
+/// holds the source of its body instead, and the edges written anywhere in
+/// the figure go to its caption. Any other figure's caption holds the edges
+/// written in the caption only: those of its body sit on the body's texts.
 pub fn from_figure(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     content: &Content,
     figure: &Packed<FigureElem>,
+    drawing: bool,
     styles: StyleChain,
-) -> typst_library::diag::SourceResult<(FigureNode, Records)> {
+) -> typst_library::diag::SourceResult<(FigureNode, NodeRecord)> {
     let mut figure = figure.clone();
     figure.synthesize(engine, styles)?;
 
-    let caption = figure
-        .caption
-        .get_cloned(styles)
-        .as_ref()
-        .map(convert::caption_text)
-        .map(RichText::plain);
+    let caption = figure.caption.get_cloned(styles);
     let fig_number = convert::figure_number(engine, &figure, styles);
-    let (mut record, edges) = convert::make_record(engine, introspector, content, &[])?;
+    let (mut record, all_edges) =
+        convert::make_record(engine, introspector, content, &[])?;
 
-    let id = uuid::Uuid::new_v4();
-    let location = placeholder_location();
-    let mut node = FigureNode::new(id, location);
-    node.caption = caption;
+    let mut node = FigureNode::new(Uuid::new_v4(), placeholder_location());
+    node.caption = caption.as_ref().map(convert::caption_text).map(RichText::plain);
     node.numbering =
         convert::numbering(fig_number, convert::figure_counter_label(&figure, styles));
     node.kind = figure_kind(&figure, styles);
 
-    let mut records = Vec::new();
-
-    if let Some(image) = content.query_first_naive(&ImageElem::ELEM.select()) {
-        if let Some(image) = image.to_packed::<ImageElem>() {
-            let child_id = Uuid::new_v4();
-            let mut child = ImageNode::new(child_id, placeholder_location());
-            child.alt = image.alt.get_cloned(styles).map(Into::into);
-            child.path = image_path(image);
-            records.push((child_id, minimal_record(content)));
-            node.children.push(CndNode::Image(child));
+    let edges = if drawing {
+        node.raw = convert::source_text(engine, figure.body.span()).map(RawSource::typst);
+        Some(all_edges)
+    } else {
+        match &caption {
+            Some(caption) => {
+                Some(convert::make_record(engine, introspector, &caption.body, &[])?.1)
+            }
+            None => None,
         }
-    } else if let Some(raw) = content.query_first_naive(&RawElem::ELEM.select())
-        && let Some(raw) = raw.to_packed::<RawElem>()
+    };
+    if node.caption.is_some()
+        && let Some(mut edges) = edges
     {
-        let (child, child_record) = code::convert(engine, introspector, raw, styles)?;
-        let child_id = child.base.id;
-        records.push((child_id, child_record));
-        node.children.push(CndNode::Code(child));
+        edges.slot = crate::model::TextSlot::Caption;
+        record.add_text(edges);
     }
-
-    node.raw = table::raw_typst_for_label(engine, content.label()).map(RawSource::typst);
-
-    // No body here holds a paragraph, so the edges go to the caption.
-    let mut synthetic = Synthetic::new(content.location());
-    table::attach_figure_edges(&node, &mut record, edges, &mut synthetic);
-    records.insert(0, (id, record));
-
-    let mut records = Records { own: records, synthetic: synthetic.records };
-    records.locate_in(content.location());
-    Ok((node, records))
+    Ok((node, record))
 }
 
-/// Convert a bare `#image(...)` outside any figure into a standalone
-/// `ImageNode` — the "bare image outside any figure is an `ImageNode` with
-/// no wrapper" shape the CND model allows. Images inside figures never
-/// reach this: `convert`'s collection loop skips any image whose source
-/// range falls inside a figure (or other container), and the figure emits
-/// it as its own child instead.
+/// Convert an `#image(...)` into an `ImageNode`: bare outside any figure —
+/// the "bare image outside any figure is an `ImageNode` with no wrapper"
+/// shape the CND model allows — or a figure's child, which
+/// `convert::assemble` routes into its body. The image owns its location;
+/// the figure around it owns its own.
 pub fn bare_image(
     engine: &mut Engine,
     introspector: &dyn Introspector,
@@ -97,12 +80,6 @@ pub fn bare_image(
     node.alt = image.alt.get_cloned(styles).map(Into::into);
     node.path = image_path(image);
     Ok((node, record))
-}
-
-/// A record carrying only a location, for a figure's synthetic child node —
-/// nothing else is inherited from the wrapper (ADR 0010).
-fn minimal_record(content: &Content) -> NodeRecord {
-    NodeRecord::synthetic(content.location())
 }
 
 /// Read the figure kind Typst itself already resolved during

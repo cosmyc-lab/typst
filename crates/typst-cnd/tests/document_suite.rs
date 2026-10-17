@@ -288,6 +288,11 @@ fn complex_tables_standalone_and_figure_variants() {
     let CndNode::Figure(b) = plages_b else { panic!() };
     assert_ne!(a.base.id, b.base.id);
     assert_ne!(a.caption, b.caption);
+    // Each figure holds its table only, and no `raw`: only a drawing does.
+    for figure in [a, b] {
+        assert_eq!(node_types(&figure.children), ["table"]);
+        assert!(figure.raw.is_none());
+    }
     let a_table = a
         .children
         .iter()
@@ -979,6 +984,21 @@ fn image_figure_carries_path_and_alt() {
         image.path
     );
     assert_eq!(image.alt.as_deref(), Some("Department cover art"));
+    assert_eq!(node_types(&figure.children), ["image"]);
+    assert!(figure.raw.is_none(), "an image figure is no drawing");
+    // The figure owns its label and location; the image its own.
+    assert!(image.base.label.is_none());
+    let see = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|n| match n {
+            CndNode::Paragraph(p) if p.text.value.starts_with("See ") => Some(p),
+            _ => None,
+        })
+        .expect("the referring paragraph");
+    assert_eq!(
+        see.text.refs.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(),
+        ["fig-cover"]
+    );
 
     assert_refs_resolve(&cnd.nodes);
 }
@@ -1025,6 +1045,11 @@ fn figure_wrapped_image_is_not_also_emitted_bare() {
     walk_nodes(&cnd.nodes, &mut stats);
     assert_eq!(stats.images, 1, "exactly the figure's child, no bare twin");
     assert_eq!(stats.figures, 1);
+    let CndNode::Figure(figure) = find_by_label(&cnd.nodes, "fig-cover").expect("figure")
+    else {
+        panic!("expected figure wrapper");
+    };
+    assert_eq!(node_types(&figure.children), ["image"]);
 }
 
 #[test]
@@ -1359,6 +1384,7 @@ fn example_files_exist() {
         "containers_lists.typ",
         "containers_grids.typ",
         "tables_across_pages.typ",
+        "figure_kinds.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -2374,23 +2400,59 @@ fn figure_bodies_are_not_duplicated() {
             "{cell:?} must be one table cell: {cells:?}"
         );
     }
+    for cell in ["FC1 key", "FC2 value"] {
+        assert_eq!(
+            cells.iter().filter(|c| **c == cell).count(),
+            1,
+            "{cell:?} must be one layout cell: {cells:?}"
+        );
+    }
     let paragraphs = paragraph_texts_in_order(&cnd.nodes);
     assert_eq!(paragraphs, ["FE1 bare grid key", "FE2 bare grid value"]);
-    // The list inside the framed figure body is kept once, as a list.
+    // The framed body's paragraph and list are the figure's children, in
+    // reading order, each once.
+    let framed = cnd
+        .nodes
+        .iter()
+        .find_map(|n| match n {
+            CndNode::Figure(f) if value(&f.caption) == Some("FA3 caption one") => Some(f),
+            _ => None,
+        })
+        .expect("the framed figure");
+    assert_eq!(node_types(&framed.children), ["paragraph", "list"]);
+    assert_eq!(paragraph_values(&framed.children), ["FA1 paragraph in figure."]);
     assert_eq!(all_list_item_texts(&cnd), ["FA2 list item in figure"]);
+    assert!(framed.raw.is_none());
+    // Each grid or table figure holds its grid or table, and nothing else.
+    let bodies: Vec<(&str, Vec<&str>)> = cnd
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            CndNode::Figure(f) => Some((value(&f.caption)?, node_types(&f.children))),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        bodies,
+        [
+            ("FA3 caption one", vec!["paragraph", "list"]),
+            ("FB5 caption grid", vec!["layout"]),
+            ("FC3 caption context grid", vec!["layout"]),
+            ("FD3 caption block grid", vec!["layout"]),
+            ("FF3 caption table", vec!["table"]),
+        ]
+    );
     let counts = word_counts(&cnd);
-    for token in ["FA2", "FB1", "FB4", "FD1", "FE1", "FE2"] {
+    for token in [
+        "FA1", "FA2", "FA3", "FB1", "FB4", "FB5", "FC1", "FC2", "FC3", "FD1", "FE1",
+        "FE2", "FF1", "FF3",
+    ] {
         assert_eq!(
             counts.get(token).copied(),
             Some(1),
             "{token} must appear exactly once"
         );
     }
-    // Known gap: a figure keeps only its caption when its body is not an image,
-    // a raw block, a table or a grid it can reach: the paragraph of the
-    // framed body (FA1) and the cells of a grid built under `context` (FC1,
-    // FC2) are lost, and the list (FA2) is emitted beside the figure rather
-    // than inside it.
 }
 
 #[test]
@@ -2483,34 +2545,189 @@ fn a_figure_carries_its_raw_block() {
             (Some("RC2 caption styled no context"), vec!["rc1: 1"]),
         ]
     );
-    // Known gap: each raw block is also emitted as a code node beside its
-    // figure, so its text appears twice.
+    // Each raw block is its figure's only child, and is not also emitted
+    // beside it.
+    for figure in &figures {
+        assert_eq!(node_types(&figure.children), ["code"]);
+        assert!(figure.raw.is_none());
+    }
+    let mut stats = NodeStats::default();
+    walk_nodes(&cnd.nodes, &mut stats);
+    assert_eq!(stats.code, 3, "one code node per raw block");
+    assert_eq!(node_types(&cnd.nodes), ["figure", "figure", "figure"]);
 }
 
 #[test]
-fn a_figure_around_a_helper_drawing_keeps_its_caption_and_image() {
+fn a_helper_drawing_is_raw() {
+    // A figure around a drawing built by a helper (an image, a grid of
+    // shapes and a label, each positioned by `place`) is a drawing (spec
+    // §6.7): its caption is kept, it has no children, its `raw` holds the
+    // helper's source, and nothing laid out in it escapes beside it.
     let cnd = cnd_for_example("figure_helper_drawing.typ");
-    let nodes = all_nodes(&cnd.nodes);
-    let captions: Vec<&str> = nodes
+    let [CndNode::Figure(figure)] = cnd.nodes.as_slice() else {
+        panic!("one figure, alone: {:?}", node_types(&cnd.nodes));
+    };
+    assert_eq!(value(&figure.caption), Some("HA2 caption"));
+    assert!(figure.children.is_empty(), "{:?}", node_types(&figure.children));
+    let raw = figure.raw.as_ref().expect("raw");
+    assert_eq!(raw.format, "typst");
+    // The body is the helper's value: its source is where the helper builds
+    // it, in the `#let`.
+    for part in
+        ["place(", "image(\"newsletter/newsletter-cover.png\"", "HA1 callout label"]
+    {
+        assert!(raw.value.contains(part), "{part:?} in {:?}", raw.value);
+    }
+    let mut stats = NodeStats::default();
+    walk_nodes(&cnd.nodes, &mut stats);
+    assert_eq!(stats.images, 0, "no bare image escapes the drawing");
+    assert_eq!(stats.nodes, 1);
+}
+
+/// The `figure_kinds.typ` figure whose caption is `caption`.
+fn figure_with_caption<'a>(
+    cnd: &'a typst_cnd::Cnd,
+    caption: &str,
+) -> &'a typst_cnd::FigureNode {
+    all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|n| match n {
+            CndNode::Figure(f) if value(&f.caption) == Some(caption) => Some(f),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a figure captioned {caption:?}"))
+}
+
+#[test]
+fn theorem_figure_holds_its_paragraphs() {
+    let cnd = cnd_for_example("figure_kinds.typ");
+    let theorem = figure_with_caption(&cnd, "KA1 completeness");
+    assert_eq!(theorem.kind.as_deref(), Some("theorem"));
+    let numbering = theorem.numbering.as_ref().expect("numbering");
+    assert_eq!(numbering.name.as_deref(), Some("Theorem"));
+    assert_eq!(numbering.value, "1");
+    assert_eq!(node_types(&theorem.children), ["paragraph", "paragraph"]);
+    assert_eq!(
+        paragraph_values(&theorem.children),
+        [
+            "Every bounded set of real numbers has a least upper bound.",
+            "A second paragraph, beside Figure\u{a0}1.",
+        ]
+    );
+    assert!(theorem.raw.is_none());
+    // The body's edges sit on its own texts, spanned, and are not repeated
+    // on the caption.
+    let CndNode::Paragraph(second) = &theorem.children[1] else { unreachable!() };
+    assert_eq!(second.text.refs.len(), 1);
+    assert_eq!(second.text.refs[0].label, "fig-pair");
+    let span = second.text.refs[0].text_span.as_ref().expect("a span");
+    assert_eq!(codepoint_slice(&second.text.value, span), "Figure\u{a0}1");
+    let caption = theorem.caption.as_ref().expect("caption");
+    assert!(caption.refs.is_empty(), "{:?}", caption.refs);
+    // Every node keeps its own location: the label resolves to the figure.
+    assert!(matches!(
+        find_by_label(&cnd.nodes, "thm-complete"),
+        Some(CndNode::Figure(f)) if f.kind.as_deref() == Some("theorem")
+    ));
+    assert_refs_resolve(&cnd.nodes);
+}
+
+#[test]
+fn figure_grid_is_a_layout_child() {
+    let cnd = cnd_for_example("figure_kinds.typ");
+    let pair = figure_with_caption(&cnd, "KB1 two covers");
+    assert_eq!(node_types(&pair.children), ["layout"]);
+    assert!(pair.raw.is_none());
+    let CndNode::Layout(layout) = &pair.children[0] else { unreachable!() };
+    let cells: Vec<(i32, i32, Vec<Option<&str>>)> = layout
+        .cells
         .iter()
+        .map(|cell| {
+            let alts = cell
+                .children
+                .iter()
+                .map(|child| match child {
+                    CndNode::Image(image) => image.alt.as_deref(),
+                    other => panic!("an image per cell, got {}", node_type(other)),
+                })
+                .collect();
+            (cell.row, cell.col, alts)
+        })
+        .collect();
+    assert_eq!(
+        cells,
+        [(0, 0, vec![Some("Left cover")]), (0, 1, vec![Some("Right cover")])]
+    );
+}
+
+#[test]
+fn subfigures_are_nested_figures() {
+    let cnd = cnd_for_example("figure_kinds.typ");
+    let outer = figure_with_caption(&cnd, "KC3 two parts");
+    assert_eq!(node_types(&outer.children), ["figure", "figure"]);
+    let parts: Vec<(Option<&str>, Option<&str>, Vec<&str>)> = outer
+        .children
+        .iter()
+        .map(|child| {
+            let CndNode::Figure(part) = child else { unreachable!() };
+            (part.base.label.as_deref(), value(&part.caption), node_types(&part.children))
+        })
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            (Some("fig-part-a"), Some("KC1 first part"), vec!["image"]),
+            (Some("fig-part-b"), Some("KC2 second part"), vec!["image"]),
+        ]
+    );
+    // Each subfigure is nested once, never also a sibling of its parent.
+    let figures: Vec<_> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter(|n| matches!(n, CndNode::Figure(_)))
+        .collect();
+    assert_eq!(figures.len(), 7);
+    let counts = word_counts(&cnd);
+    for token in ["KC1", "KC2", "KC3"] {
+        assert_eq!(counts.get(token).copied(), Some(1), "{token} once");
+    }
+}
+
+#[test]
+fn drawing_figure_has_raw_and_no_children() {
+    let cnd = cnd_for_example("figure_kinds.typ");
+    let drawing = figure_with_caption(&cnd, "KD1 a drawing");
+    assert!(drawing.children.is_empty(), "{:?}", node_types(&drawing.children));
+    let raw = drawing.raw.as_ref().expect("raw");
+    assert_eq!(raw.format, "typst");
+    assert!(raw.value.contains("rect("), "{:?}", raw.value);
+    assert_eq!(raw.value, "rect(width: 2cm, height: 1cm)");
+    // Only a drawing carries its source.
+    let with_raw: Vec<_> = all_nodes(&cnd.nodes)
+        .into_iter()
         .filter_map(|n| match n {
-            CndNode::Figure(f) => value(&f.caption),
+            CndNode::Figure(f) if f.raw.is_some() => value(&f.caption),
             _ => None,
         })
         .collect();
-    assert_eq!(captions, ["HA2 caption"]);
-    let images: Vec<&str> = nodes
-        .iter()
-        .filter_map(|n| match n {
-            CndNode::Image(i) => i.path.as_deref(),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(images.len(), 1, "the image is emitted once: {images:?}");
-    assert!(images[0].contains("newsletter-cover.png"), "{images:?}");
-    // Known gap: the image escapes the figure and is emitted bare beside it,
-    // the figure's child is the decorative grid with empty cells, and the
-    // label text (HA1) is lost.
+    assert_eq!(with_raw, ["KD1 a drawing"]);
+}
+
+#[test]
+fn a_floating_figure_keeps_its_body() {
+    // A figure with a `placement` floats through a `place` its own show
+    // rule writes inside it: the figure is not in its own body, and stays
+    // in the list item it is written in.
+    let cnd = cnd_for_example("figure_kinds.typ");
+    let floating = figure_with_caption(&cnd, "KE3 floating caption");
+    assert_eq!(floating.base.label.as_deref(), Some("fig-float"));
+    assert_eq!(paragraph_values(&floating.children), ["KE2 floating body."]);
+    let lists = find_lists(&cnd.nodes);
+    let [list] = lists.as_slice() else { panic!("one list: {}", lists.len()) };
+    assert_eq!(node_types(&list.items[0].children), ["paragraph", "figure"]);
+    let counts = word_counts(&cnd);
+    for token in ["KE1", "KE2", "KE3"] {
+        assert_eq!(counts.get(token).copied(), Some(1), "{token} once");
+    }
 }
 
 /// Content wrapped in `pdf.artifact` is decorative and never reaches the CND

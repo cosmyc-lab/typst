@@ -1,7 +1,6 @@
 use std::ops::ControlFlow;
 
 use ecow::{EcoString, eco_vec};
-use typst_library::WorldExt;
 use typst_library::engine::Engine;
 use typst_library::foundations::{
     Content, Label, NativeElement, Packed, Selector, StyleChain,
@@ -15,6 +14,7 @@ use typst_library::model::{
 };
 use typst_library::text::RawElem;
 use typst_library::visualize::ImageElem;
+use typst_library::{World, WorldExt};
 use typst_syntax::{FileId, Span};
 use uuid::Uuid;
 
@@ -163,34 +163,12 @@ pub struct Records {
     pub synthetic: Vec<(Uuid, NodeRecord)>,
 }
 
-impl Records {
-    /// Give the records that have no location of their own `location`, the
-    /// location of the container that holds them (a figure's body read from
-    /// its unrealized content), so that every node gets a page. They then
-    /// share that location, so they are filed as synthetic.
-    pub fn locate_in(&mut self, location: Option<Location>) {
-        let (unlocated, located): (Vec<_>, Vec<_>) =
-            self.own.drain(..).partition(|(_, record)| record.location.is_none());
-        self.own = located;
-        for (id, mut record) in unlocated {
-            record.location = location;
-            self.synthetic.push((id, record));
-        }
-        for (_, record) in &mut self.synthetic {
-            if record.location.is_none() {
-                record.location = location;
-            }
-        }
-    }
-}
-
 /// Builds the synthetic nodes that fill a container's slots: each gets its
 /// own id and a record with the container's location.
 ///
 /// Interim shape for the containers whose slots are not routed yet (quotes,
-/// figures with the tables and grids inside them, footnotes; see
-/// [`ROUTED`]): the container's span-less edges move to its first paragraph
-/// descendant, see [`Synthetic::attach_to_first_paragraph`].
+/// footnotes; see [`ROUTED`]): the container's span-less edges move to its
+/// first paragraph descendant, see [`Synthetic::attach_to_first_paragraph`].
 #[derive(Debug)]
 pub struct Synthetic {
     location: Option<Location>,
@@ -211,21 +189,6 @@ impl Synthetic {
     pub fn paragraph(&mut self, text: RichText) -> CndNode {
         let id = self.record();
         CndNode::Paragraph(ParagraphNode::new(id, text, placeholder_location()))
-    }
-
-    /// Give `text` to the first paragraph of the first slot (an item's or
-    /// a cell's children) that has one. Returns it back when none does.
-    pub fn attach_to_first_slot<'a>(
-        &mut self,
-        slots: impl IntoIterator<Item = &'a [CndNode]>,
-        text: TextRecord,
-    ) -> Option<TextRecord> {
-        let mut text = text;
-        for slot in slots {
-            // `None` means attached: stop there.
-            text = self.attach_to_first_paragraph(slot, text)?;
-        }
-        Some(text)
     }
 
     /// Give `text` to the first paragraph among `nodes`, in reading order.
@@ -327,7 +290,8 @@ impl ConvertContext {
 /// [`assemble`]. The content of any other slot keeps its interim handling:
 /// it is skipped when its container carries the text, kept in the flow
 /// otherwise (see [`admits_block`]).
-const ROUTED: &[SlotKind] = &[SlotKind::Item, SlotKind::TermDescription, SlotKind::Cell];
+const ROUTED: &[SlotKind] =
+    &[SlotKind::Item, SlotKind::TermDescription, SlotKind::Cell, SlotKind::FigureBody];
 
 /// Active heading container while assembling a list of nodes.
 struct HeadingFrame {
@@ -372,8 +336,9 @@ fn range_contains(outer: SourceRange, inner: SourceRange) -> bool {
 /// The source ranges whose paragraphs are not nodes: those of the
 /// containers that carry their text themselves, and those of the headings.
 struct SkipRanges {
-    /// Quotes and figures. A list's or a term list's paragraphs are routed
-    /// into its items instead.
+    /// Quotes and figures. A list's, a term list's, a cell's or a figure
+    /// body's paragraphs are routed into their slots instead, so for a
+    /// figure this only catches what is written in it outside its body.
     containers: Vec<SourceRange>,
     /// A heading show rule that re-emits `it.body` inside fresh markup
     /// (`it => [ … #text(…, it.body) … ]`) realizes an extra `ParElem` whose
@@ -455,40 +420,40 @@ pub fn convert_from_introspector(
         items.push((loc, elem));
     }
 
-    // A table in a figure is the figure's child (`table::from_figure`).
+    // A table in a figure is routed into the figure's body.
     for elem in introspector.query(&TableElem::ELEM.select()) {
         let Some(loc) = elem.location() else { continue };
-        if table::is_table_in_figure(introspector, &elem) || !admits_block(ancestry, loc)
-        {
+        if !admits_block(ancestry, loc) {
             continue;
         }
         items.push((loc, elem));
     }
 
-    // Every grid is a `layout`, those of templates and show rules included,
-    // except one in a figure, which is the figure's child
-    // (`table::from_figure_grid`). The introspector does not know a grid:
-    // its anchor stands in for it (see `Ancestry::grids`).
+    // Every grid is a `layout`, those of templates, show rules and figures
+    // included. The introspector does not know a grid: its anchor stands in
+    // for it (see `Ancestry::grids`).
     let mut anchors: rustc_hash::FxHashMap<Location, Location> =
         rustc_hash::FxHashMap::default();
     for (loc, elem, anchor) in ancestry.grids() {
         let Some(anchor) = anchor else { continue };
-        if !admits_block(ancestry, loc)
-            || matches!(ancestry.slot_of(loc), Some(SlotKey::FigureBody(_)))
-        {
+        if !admits_block(ancestry, loc) {
             continue;
         }
         anchors.insert(loc, anchor);
         items.push((loc, elem.clone()));
     }
 
-    // Bare images only: the CND model's "bare image outside any figure is
-    // an ImageNode with no wrapper". An image inside a figure is emitted as
-    // that figure's child (figure::from_figure); one inside a quote belongs
-    // to its text. One in a cell is routed into it.
+    // An image is a node of its own: bare in the flow ("a bare image
+    // outside any figure is an ImageNode with no wrapper"), or routed into
+    // the figure, cell or item it is laid out in. One inside a quote or a
+    // heading belongs to its text, one inside a caption to its figure.
     for elem in introspector.query(&ImageElem::ELEM.select()) {
         let Some(loc) = elem.location() else { continue };
-        if let Some(range) = source_range(engine, elem.span())
+        if ancestry.is_absorbed(loc) {
+            continue;
+        }
+        if !is_routed(ancestry, loc)
+            && let Some(range) = source_range(engine, elem.span())
             && skip_ranges.all().any(|outer| range_contains(*outer, range))
         {
             continue;
@@ -563,14 +528,15 @@ pub fn convert_from_introspector(
             continue;
         }
         if is_routed(ancestry, loc) {
-            // A paragraph of a list item, a term's description or a cell is
-            // a node of that slot, whatever container is around it.
+            // A paragraph of a list item, a term's description, a cell or a
+            // figure's body is a node of that slot, whatever container is
+            // around it.
             if should_skip_paragraph(engine, &elem, skip_ranges.headings.iter()) {
                 continue;
             }
         } else {
-            // A paragraph inside a table, a quote, a figure or a footnote
-            // entry: that container renders this text itself.
+            // A paragraph inside a table, a quote or a footnote entry, or a
+            // figure's caption: that container renders this text itself.
             if ancestry.is_in_emitted_container(loc) {
                 continue;
             }
@@ -604,12 +570,15 @@ pub fn convert_from_introspector(
 
     let mut nodes = Vec::with_capacity(items.len());
     for (location, content) in items {
-        let anchor = anchors.get(&location).copied();
+        let site = Site {
+            anchor: anchors.get(&location).copied(),
+            drawing: ancestry.is_drawing(location),
+        };
         if let Some(node) = dispatch(
             engine,
             introspector,
             &content,
-            anchor,
+            site,
             styles,
             doc_lang.as_deref(),
             ctx,
@@ -742,6 +711,11 @@ impl Assembler<'_> {
             }
             CndNode::Table(table) => self.cell_slots(location, &mut table.cells),
             CndNode::Layout(layout) => self.cell_slots(location, &mut layout.cells),
+            // A drawing keeps no children: what is laid out in its body is
+            // left in its slot, and dropped (its `raw` holds the source).
+            CndNode::Figure(figure) if !self.ancestry.is_drawing(location) => {
+                vec![(&mut figure.children, SlotKey::FigureBody(location))]
+            }
             _ => return,
         };
         for (children, key) in slots {
@@ -809,13 +783,22 @@ fn absorb_covered_paragraphs(ctx: &mut ConvertContext, absorbed: &[(Location, Co
     }
 }
 
-/// Convert one element into its node, registering the records. `anchor`
-/// stands in for a grid's location (see `Ancestry::grids`).
+/// What the frames say about an element that its content does not.
+#[derive(Debug, Clone, Copy)]
+struct Site {
+    /// For a grid, the element that stands in for its location (see
+    /// `Ancestry::grids`).
+    anchor: Option<Location>,
+    /// For a figure, whether it is a drawing (see `Ancestry::is_drawing`).
+    drawing: bool,
+}
+
+/// Convert one element into its node, registering the records.
 fn dispatch(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     content: &Content,
-    anchor: Option<Location>,
+    site: Site,
     styles: StyleChain,
     doc_lang: Option<&str>,
     ctx: &mut ConvertContext,
@@ -860,43 +843,22 @@ fn dispatch(
         ctx.register(node.base.id, record);
         CndNode::Image(node)
     } else if let Some(figure) = content.to_packed::<FigureElem>() {
-        if let Some(table_content) = table::table_content_in(content) {
-            let Some(table_elem) = table_content.to_packed::<TableElem>() else {
-                return Ok(None);
-            };
-            let (node, records) = table::from_figure(
-                engine,
-                introspector,
-                content,
-                figure,
-                table_elem,
-                styles,
-            )?;
-            ctx.register_records(records);
-            CndNode::Figure(node)
-        } else if let Some(grid) = table::grid_in_content(content) {
-            let (node, records) = table::from_figure_grid(
-                engine,
-                introspector,
-                content,
-                figure,
-                &grid,
-                styles,
-            )?;
-            ctx.register_records(records);
-            CndNode::Figure(node)
-        } else {
-            let (node, records) =
-                figure::from_figure(engine, introspector, content, figure, styles)?;
-            ctx.register_records(records);
-            CndNode::Figure(node)
-        }
+        let (node, record) = figure::from_figure(
+            engine,
+            introspector,
+            content,
+            figure,
+            site.drawing,
+            styles,
+        )?;
+        ctx.register(node.base.id, record);
+        CndNode::Figure(node)
     } else if let Some(table_elem) = content.to_packed::<TableElem>() {
         let (node, record) = table::convert(engine, introspector, table_elem, styles)?;
         ctx.register(node.base.id, record);
         CndNode::Table(node)
     } else if let Some(grid) = content.to_packed::<GridElem>() {
-        let Some(anchor) = anchor else { return Ok(None) };
+        let Some(anchor) = site.anchor else { return Ok(None) };
         let (node, record) =
             table::from_grid(engine, introspector, grid, anchor, styles)?;
         // The anchor is another element's location: it gives the layout a
@@ -1181,4 +1143,19 @@ pub fn figure_counter_label(
 
 pub fn caption_text(caption: &Packed<FigureCaption>) -> EcoString {
     extract::extract_text(&caption.body)
+}
+
+/// The source text `span` covers, trimmed: what an author wrote for an
+/// element, kept as its `raw` when the model cannot express it.
+pub fn source_text(engine: &Engine, span: Span) -> Option<String> {
+    let id = span.id()?;
+    let range = engine.world.range(span)?;
+    let source = engine.world.source(id).ok()?;
+    let text = source.text();
+    let start = range.start.min(text.len());
+    let end = range.end.min(text.len());
+    if start >= end {
+        return None;
+    }
+    Some(text[start..end].trim().to_string())
 }

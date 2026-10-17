@@ -54,9 +54,9 @@ use typst_library::introspection::{Introspector, Location, Tag};
 use typst_library::layout::{Frame, FrameItem, GridCell, GridElem, GroupItem, PlaceElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    ArtifactElem, BibliographyElem, EnumElem, FigureElem, FootnoteEntry, HeadingElem,
-    ListElem, OutlineElem, ParElem, ParbreakElem, PdfMarkerTag, PdfMarkerTagKind,
-    QuoteElem, TableCell, TableCellKind, TableElem, TermsElem,
+    ArtifactElem, BibliographyElem, EnumElem, FigureCaption, FigureElem, FootnoteEntry,
+    HeadingElem, ListElem, OutlineElem, ParElem, ParbreakElem, PdfMarkerTag,
+    PdfMarkerTagKind, QuoteElem, TableCell, TableCellKind, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_library::visualize::ImageElem;
@@ -107,6 +107,19 @@ impl SlotKey {
             Self::FigureBody(_) => SlotKind::FigureBody,
             Self::FootnoteBody(_) => SlotKind::FootnoteBody,
             Self::AdmonitionBody(_) => SlotKind::AdmonitionBody,
+        }
+    }
+
+    /// The location of the tag that opens this slot.
+    pub fn location(&self) -> Location {
+        match self {
+            Self::Item(location)
+            | Self::TermDescription(location)
+            | Self::Cell(location)
+            | Self::QuoteBody(location)
+            | Self::FigureBody(location)
+            | Self::FootnoteBody(location)
+            | Self::AdmonitionBody(location) => *location,
         }
     }
 
@@ -173,6 +186,15 @@ pub struct Ancestry {
     grid_locations: FxHashSet<Location>,
     /// Each grid's anchor (see [`Ancestry::grids`]).
     grid_anchors: FxHashMap<Location, Location>,
+    /// The figures whose body has an element laid out in it that may become
+    /// a node (see [`Ancestry::is_drawing`]).
+    figures_with_nodes: FxHashSet<Location>,
+    /// The figures whose body has such an element inside a `place` that
+    /// does not float, written in the body: a positioned drawing.
+    figures_with_placed_nodes: FxHashSet<Location>,
+    /// While walking: the grids laid out in a figure's body that have no
+    /// anchor yet, with that figure and whether they sit in a `place`.
+    grids_in_figures: FxHashMap<Location, (Location, bool)>,
 }
 
 impl Ancestry {
@@ -248,10 +270,11 @@ impl Ancestry {
     }
 
     /// Whether `location` sits inside a container that is emitted as its own
-    /// node and renders the text itself — a quote, a figure, a footnote
-    /// entry, the lines of a code block, an equation's numbering. A list's,
-    /// a term list's or a table's content is not: it is routed into their
-    /// slots (see [`Ancestry::slot_of`]), which `convert` asks first.
+    /// node and renders the text itself — a quote, a figure's caption, a
+    /// footnote entry, the lines of a code block, an equation's numbering. A
+    /// list's, a term list's, a table's or a figure body's content is not:
+    /// it is routed into their slots (see [`Ancestry::slot_of`]), which
+    /// `convert` asks first.
     pub fn is_in_emitted_container(&self, location: Location) -> bool {
         self.in_container.contains(&location)
     }
@@ -309,6 +332,27 @@ impl Ancestry {
     pub fn is_absorbed(&self, location: Location) -> bool {
         self.absorbed.contains(&location) || self.is_artifact(location)
     }
+
+    /// Note that an element that may become a node is laid out in the body
+    /// of the figure at `figure`, inside a `place` that does not float when
+    /// `placed`.
+    fn note_figure_node(&mut self, figure: Location, placed: bool) {
+        self.figures_with_nodes.insert(figure);
+        if placed {
+            self.figures_with_placed_nodes.insert(figure);
+        }
+    }
+
+    /// Whether the figure at `figure` is a drawing (cnd-sdk spec §6.7): its
+    /// body lays out no element that may become a node (a `rect`, a line, a
+    /// canvas of shapes), or one of those elements sits inside a `place`
+    /// that does not float, written in the body — a diagram, or a helper
+    /// that positions labels. Its content is then its source, not the
+    /// scattered pieces lifted out of it.
+    pub fn is_drawing(&self, figure: Location) -> bool {
+        !self.figures_with_nodes.contains(&figure)
+            || self.figures_with_placed_nodes.contains(&figure)
+    }
 }
 
 /// Whether a paragraph laid out inside `elem` is a second copy of text the
@@ -316,8 +360,9 @@ impl Ancestry {
 /// `grid`, a `block`, a `place` — are deliberately absent: they produce no
 /// node, so their paragraphs are the only carrier of that text. So are
 /// lists and term lists: their items' paragraphs are routed into their
-/// slots. A table's cells are routed too (a routed slot is asked first), so
-/// a table only counts here for what is laid out in it outside any cell.
+/// slots. A table's cells and a figure's body are routed too (a routed slot
+/// is asked first), so a table only counts here for what is laid out in it
+/// outside any cell, and a figure for its caption.
 ///
 /// Two kinds qualify. Most are emitted as a node that renders its own
 /// content, so a paragraph inside is that content seen twice. The outline is
@@ -361,6 +406,8 @@ fn absorbs(inner: &Content) -> bool {
         || elem == EquationElem::ELEM
         || elem == OutlineElem::ELEM
         || elem == BibliographyElem::ELEM
+        // A figure's caption, which the figure node carries.
+        || elem == FigureCaption::ELEM
 }
 
 /// Whether `inner` owns item slots: a list, an enum or a term list.
@@ -436,6 +483,24 @@ fn is_float(inner: &Content) -> bool {
     inner
         .to_packed::<PlaceElem>()
         .is_some_and(|place| place.float.get(StyleChain::default()))
+}
+
+/// Whether `inner` is a `place` that does not float: content positioned at
+/// a fixed point of its container.
+fn is_placed(inner: &Content) -> bool {
+    inner
+        .to_packed::<PlaceElem>()
+        .is_some_and(|place| !place.float.get(StyleChain::default()))
+}
+
+/// Whether a `place` that does not float is open inside the figure at
+/// `figure`, deeper on `stack` than the figure itself. A `place` written
+/// around the figure does not count.
+fn is_placed_in(stack: &[Open], figure: Location) -> bool {
+    stack
+        .iter()
+        .rposition(|open| open.location == figure)
+        .is_some_and(|index| stack[index + 1..].iter().any(|open| open.is_placed))
 }
 
 /// What identifies a float's body once it is drawn away from its tags.
@@ -736,6 +801,8 @@ struct Open {
     is_body_cell: bool,
     /// Whether it is a grid, which needs an anchor (see [`Ancestry::grids`]).
     is_grid: bool,
+    /// Whether it is a `place` that does not float (see [`is_placed`]).
+    is_placed: bool,
     /// For a cell, the table or grid it is a cell of, and its position.
     cell_owner: Option<Location>,
     cell_position: Option<(usize, usize)>,
@@ -991,6 +1058,12 @@ fn walk(
                 if flags.introspectable && is_node_kind(inner) {
                     for open in stack.iter().filter(|open| open.is_grid) {
                         ancestry.grid_anchors.entry(open.location).or_insert(location);
+                        // A grid becomes a node once it has an anchor.
+                        if let Some((figure, placed)) =
+                            ancestry.grids_in_figures.remove(&open.location)
+                        {
+                            ancestry.note_figure_node(figure, placed);
+                        }
                     }
                 }
                 let opens = SlotKey::opened_by(inner, location);
@@ -1041,9 +1114,24 @@ fn walk(
                 {
                     ancestry.absorbed.insert(location);
                 }
-                match innermost_slot(stack, floats, &in_floats) {
+                match innermost_slot(stack, floats, &in_floats, location) {
                     Some(Found::Slot(slot)) => {
                         ancestry.slots.insert(location, slot);
+                        if let SlotKey::FigureBody(figure) = slot
+                            && !ancestry.absorbed.contains(&location)
+                            && !ancestry.in_artifact.contains(&location)
+                            && !ancestry.covered_by_par.contains_key(&location)
+                        {
+                            let placed = is_placed_in(stack, figure);
+                            if flags.introspectable && is_node_kind(inner) {
+                                ancestry.note_figure_node(figure, placed);
+                            } else if inner.elem() == GridElem::ELEM {
+                                // Settled when the grid finds its anchor.
+                                ancestry
+                                    .grids_in_figures
+                                    .insert(location, (figure, placed));
+                            }
+                        }
                     }
                     Some(Found::InTable(owner)) => {
                         if let Some((_, cells)) = ancestry.fragment_cells.get(&owner)
@@ -1133,6 +1221,7 @@ fn walk(
                     footer_start: footer_start(inner),
                     is_body_cell,
                     is_grid: inner.elem() == GridElem::ELEM,
+                    is_placed: is_placed(inner),
                     cell_owner,
                     cell_position: cell_position(inner),
                     had_child: false,
@@ -1199,8 +1288,21 @@ fn walk(
 /// An element laid out in a table or a grid with no cell open around it is
 /// the content of a row laid out across pages, whose cells' tags closed
 /// before it (see the module docs): `InTable` names that table or grid.
-fn innermost_slot(stack: &[Open], floats: &Floats, held_by: &[usize]) -> Option<Found> {
-    let written_in = held_by.iter().find_map(|index| floats.all[*index].slot);
+///
+/// A slot that `own`, the element itself, opens is never its slot. A figure
+/// with a `placement` floats through a `place` that its own show rule
+/// writes inside it: that float is written in the figure's body, and the
+/// figure is held by it, since they share their span.
+fn innermost_slot(
+    stack: &[Open],
+    floats: &Floats,
+    held_by: &[usize],
+    own: Location,
+) -> Option<Found> {
+    let written_in = held_by
+        .iter()
+        .filter_map(|index| floats.all[*index].slot)
+        .find(|slot| slot.location() != own);
     for open in stack.iter().rev().filter(|open| open.encloses(floats, held_by)) {
         if open.owns_cells {
             return Some(Found::InTable(open.location));
