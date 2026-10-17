@@ -446,3 +446,18 @@ pub fn find_lists(nodes: &[CndNode]) -> Vec<&ListNode> {
         })
         .collect()
 }
+
+/// The lists not nested in another list's item, in reading order.
+pub fn outer_lists(nodes: &[CndNode]) -> Vec<&ListNode> {
+    let lists = find_lists(nodes);
+    let nested: HashSet<uuid::Uuid> = lists
+        .iter()
+        .flat_map(|list| list.items.iter())
+        .flat_map(nested_lists)
+        .map(|list| list.base.id)
+        .collect();
+    lists
+        .into_iter()
+        .filter(|list| !nested.contains(&list.base.id))
+        .collect()
+}

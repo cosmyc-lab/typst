@@ -6,7 +6,7 @@ use common::{
     assert_pool_refs_resolve, assert_refs_resolve, assert_tag_sequence,
     assert_unique_ids, cnd_for_example, codepoint_slice, compile_example, example_path,
     find_by_label, find_lists, first_paragraph, footnote_text, heading_texts,
-    incoming_count, item_text, label_exists, nested_items, nested_lists,
+    incoming_count, item_text, label_exists, nested_items, nested_lists, outer_lists,
     paragraph_texts_in_order, table_stats, tags_under_heading, walk_nodes,
 };
 use typst_cnd::{CndNode, ListItem, RichText, cnd_to_json};
@@ -114,7 +114,8 @@ fn comprehensive_document_structure() {
         .filter(|n| matches!(n, CndNode::Paragraph(_)))
         .count();
     assert_eq!(root_paragraphs, 1, "expected one pre-heading paragraph at document root");
-    assert!(stats.paragraphs >= 8);
+    // The flow paragraphs; cells hold their own.
+    assert_eq!(paragraph_texts_in_order(&cnd.nodes).len(), 8);
     assert!(stats.max_heading_level >= 3);
     assert_eq!(stats.tables, 4);
 
@@ -411,7 +412,8 @@ fn newsletter_dashing_dept_news_template() {
     let mut stats = NodeStats::default();
     walk_nodes(&cnd.nodes, &mut stats);
     assert!(stats.headings >= 5);
-    assert!(stats.paragraphs >= 10);
+    // The flow paragraphs; the quote holds its own.
+    assert!(paragraph_texts_in_order(&cnd.nodes).len() >= 10);
 
     let headings = heading_texts(&cnd.nodes);
     for expected in [
@@ -466,7 +468,7 @@ fn rich_document_node_types() {
     walk_nodes(&cnd.nodes, &mut stats);
 
     assert!(stats.quotes >= 1, "expected at least one quote node");
-    assert!(stats.lists >= 2, "expected bullet and numbered lists");
+    assert!(outer_lists(&cnd.nodes).len() >= 2, "expected bullet and numbered lists");
     assert!(stats.code >= 1, "expected a code block node");
     assert!(stats.math >= 1, "expected a block math node");
     // Every captioned float is now a figure wrapper, including the
@@ -515,7 +517,8 @@ fn complex_semantic_all_node_types_and_xrefs() {
 
     assert!(stats.headings >= 8);
     assert_eq!(stats.quotes, 2);
-    assert!(stats.lists >= 2);
+    // Lists written in the flow; a nested list is a node inside its item.
+    assert!(outer_lists(&cnd.nodes).len() >= 2);
     assert_eq!(stats.code, 2);
     assert_eq!(stats.math, 2);
     // Two tables and a grid, which is a `layout` in 0.5.

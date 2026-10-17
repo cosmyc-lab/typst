@@ -222,6 +222,21 @@ impl Synthetic {
 
     /// Give `text` to the first paragraph among `nodes`, in reading order.
     /// Returns it back when there is none.
+    /// Give `text` to the first paragraph of the first slot (an item's or
+    /// a cell's children) that has one. Returns it back when none does.
+    pub fn attach_to_first_slot<'a>(
+        &mut self,
+        slots: impl IntoIterator<Item = &'a [CndNode]>,
+        text: TextRecord,
+    ) -> Option<TextRecord> {
+        let mut text = text;
+        for slot in slots {
+            // `None` means attached: stop there.
+            text = self.attach_to_first_paragraph(slot, text)?;
+        }
+        Some(text)
+    }
+
     pub fn attach_to_first_paragraph(
         &mut self,
         nodes: &[CndNode],

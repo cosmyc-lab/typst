@@ -39,7 +39,11 @@ pub fn from_list(
         .iter()
         .map(|item| list_item(introspector, item, styles, &mut synthetic))
         .collect();
-    attach_list_edges(&node, edges, &mut synthetic);
+    // The list's span-less edges go to its first paragraph (interim rule).
+    let _ = synthetic.attach_to_first_slot(
+        node.items.iter().map(|item| item.children.as_slice()),
+        edges,
+    );
 
     Ok((
         node,
@@ -65,7 +69,11 @@ pub fn from_enum(
     let mut node = ListNode::new(id, location);
     node.ordered = true;
     node.items = enum_items(introspector, enum_, styles, &mut synthetic);
-    attach_list_edges(&node, edges, &mut synthetic);
+    // The list's span-less edges go to its first paragraph (interim rule).
+    let _ = synthetic.attach_to_first_slot(
+        node.items.iter().map(|item| item.children.as_slice()),
+        edges,
+    );
 
     Ok((
         node,
@@ -74,22 +82,6 @@ pub fn from_enum(
             synthetic: synthetic.records,
         },
     ))
-}
-
-/// The list's span-less edges go to its first paragraph (interim rule).
-fn attach_list_edges(
-    node: &ListNode,
-    edges: convert::TextRecord,
-    synthetic: &mut Synthetic,
-) {
-    for item in &node.items {
-        if synthetic
-            .attach_to_first_paragraph(&item.children, edges.clone())
-            .is_none()
-        {
-            return;
-        }
-    }
 }
 
 /// Convert a Typst definition list (`/ term: description`) into a
@@ -111,14 +103,10 @@ pub fn from_terms(
         .iter()
         .map(|item| term_item(item, &mut synthetic))
         .collect();
-    for item in &node.items {
-        if synthetic
-            .attach_to_first_paragraph(&item.children, edges.clone())
-            .is_none()
-        {
-            break;
-        }
-    }
+    let _ = synthetic.attach_to_first_slot(
+        node.items.iter().map(|item| item.children.as_slice()),
+        edges,
+    );
 
     Ok((
         node,

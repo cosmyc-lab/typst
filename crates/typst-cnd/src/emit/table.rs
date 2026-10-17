@@ -215,14 +215,10 @@ pub fn convert(
     let header_rows = count_header_rows(&table);
     let mut node = TableNode::new(id, location);
     node.cells = cells_from_grid(&table, header_rows, &mut synthetic);
-    for cell in &node.cells {
-        if synthetic
-            .attach_to_first_paragraph(&cell.children, edges.clone())
-            .is_none()
-        {
-            break;
-        }
-    }
+    let _ = synthetic.attach_to_first_slot(
+        node.cells.iter().map(|cell| cell.children.as_slice()),
+        edges,
+    );
 
     Ok((
         node,
