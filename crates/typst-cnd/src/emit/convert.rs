@@ -1313,17 +1313,42 @@ fn collect_footnote_locs(content: &Content) -> Vec<Location> {
 pub fn apply_metadata(ctx: &mut ConvertContext) {
     let records = &ctx.records;
     let mut apply = |node: &mut CndNode| {
-        let Some(record) = records.get(&node.id()) else { return };
-        if let Some(label) = &record.label {
-            set_label(node, label.resolve().as_str());
+        if let Some(record) = records.get(&node.id()) {
+            if let Some(label) = &record.label {
+                set_label(node, label.resolve().as_str());
+            }
+            if !record.state_metadata.is_empty() {
+                set_metadata(node, record.state_metadata.clone());
+            }
         }
-        if !record.state_metadata.is_empty() {
-            set_metadata(node, record.state_metadata.clone());
-        }
+        promote_hints(node);
     };
     crate::model::walk_mut(&mut ctx.roots, &mut apply);
     for note in &mut ctx.footnotes {
         crate::model::walk_mut(&mut note.children, &mut apply);
+    }
+}
+
+/// The state key under which the authoring package's `cnd.table` holds the
+/// author's table kind, around the table it wraps.
+const TABLE_KIND_HINT: &str = "table-kind";
+
+/// Turn the authoring hints a node's metadata holds into the fields they
+/// stand for, and take them out of the metadata.
+///
+/// A string under `table-kind` on a table becomes its `kind` (cnd-sdk spec
+/// §6.3): the kind comes from the author only, never from a guess. Any
+/// other value says nothing. Everything laid out inside the bracketed
+/// table sees the hint too (its cells' paragraphs, a figure around it), so
+/// the key leaves every node's metadata.
+fn promote_hints(node: &mut CndNode) {
+    let Some(hint) = node.base_mut().state_metadata.remove(TABLE_KIND_HINT) else {
+        return;
+    };
+    if let CndNode::Table(table) = node
+        && let serde_json::Value::String(kind) = hint
+    {
+        table.kind = Some(kind);
     }
 }
 

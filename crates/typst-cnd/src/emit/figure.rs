@@ -10,6 +10,7 @@ use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::{label_text, source_text};
 use crate::location::placeholder_location;
 use crate::model::{FigureNode, ImageNode, RawSource};
+use crate::rich_text::RichText;
 
 /// Convert a figure into its wrapper node: kind, caption and numbering. Its
 /// `children` are left empty: `convert::assemble` fills them with the
@@ -44,6 +45,10 @@ pub fn from_figure(
     node.numbering =
         convert::numbering(fig_number, convert::figure_counter_label(&figure, styles));
     node.kind = figure_kind(&figure, styles);
+    // Typst's `alt` is the text equivalent of the figure's visual, which is
+    // what the description is (cnd-sdk spec §6.7). An image's own `alt`
+    // stays on the image.
+    node.description = figure.alt.get_cloned(styles).map(RichText::plain);
     if drawing {
         node.raw = convert::source_text(engine, figure.body.span()).map(RawSource::typst);
     }

@@ -1,159 +1,70 @@
-use ecow::eco_vec;
-use typst_library::foundations::{Content, Label, NativeElement, Selector};
+use typst_library::foundations::Label;
 use typst_library::introspection::Introspector;
-use typst_library::math::EquationElem;
-use typst_library::model::{
-    EnumElem, FigureElem, HeadingElem, ListElem, ParElem, QuoteElem, RefElem, TermsElem,
-};
-use typst_library::text::RawElem;
 use uuid::Uuid;
 
 use crate::emit::convert::ConvertContext;
 use crate::emit::extract::LinkDest;
 use crate::model::{CndNode, LinkRef, NodeRef, TextSlot};
 
-/// `(source node, source text, target node, the target's label, the
-/// marker's text span)`.
+/// `(source node, source text, target node, the label the marker names —
+/// none for a location destination —, the marker's text span)`.
 type RefEdge = (Uuid, TextSlot, Uuid, Option<String>, Option<(i64, i64)>);
 /// A `links` edge before it reaches the node: (node id, text, href, span).
 /// Sibling of `RefEdge` above — same reason, and clippy's `type_complexity`
 /// is denied by CI's `-Dwarnings`.
 type LinkEdge = (Uuid, TextSlot, String, Option<(i64, i64)>);
 
-fn doc_selector() -> Selector {
-    Selector::Or(eco_vec![
-        HeadingElem::ELEM.select(),
-        ParElem::ELEM.select(),
-        typst_library::model::TableElem::ELEM.select(),
-        FigureElem::ELEM.select(),
-        QuoteElem::ELEM.select(),
-        RawElem::ELEM.select(),
-        EquationElem::ELEM.select(),
-        ListElem::ELEM.select(),
-        EnumElem::ELEM.select(),
-        TermsElem::ELEM.select(),
-    ])
-}
-
 /// Resolve cross-references and populate the forward-only `refs` list on
 /// each source text (ADR 0008). The reverse index is derived on demand by
 /// the SDK (`Cnd.incoming`), never materialized here.
-pub fn resolve_refs(
-    ctx: &mut ConvertContext,
-    introspector: &dyn Introspector,
-    content: &Content,
-) {
-    // Edge: (source, target, target label, marker text span). The span is
-    // populated only on the primary path, from the source node's flat-text
-    // `ref_markers` (ADR 0013); it runs first, so it wins the dedup-by-
-    // target-id in `set_ref` and the fallback path's `None` never clobbers it.
+///
+/// An edge sits only on the text its marker was written in: a marker
+/// realized in the text gives its span (ADR 0013), and a label text (a
+/// caption, a term) or an attribution, walked as authored, gives a
+/// span-less edge. Nothing is guessed from the section a reference sits
+/// in, and an edge lands only on the node that carries the label it names.
+pub fn resolve_refs(ctx: &mut ConvertContext, introspector: &dyn Introspector) {
     let mut edges: Vec<RefEdge> = Vec::new();
-    let _selector = doc_selector();
-
-    // Primary path: a flat node's own `ref_markers` — the marker is in that
-    // node's realized body, giving correct attribution *and* the text span
-    // (ADR 0013). This supersedes the index-correlation heuristic below for
-    // any node that carries markers, which is where refs actually resolve
-    // (the realized content keeps only the rendered link, not a bare
-    // RefElem, so `ref_targets` is empty for flat nodes).
-    let mut ref_marker_sources: rustc_hash::FxHashSet<Uuid> =
-        rustc_hash::FxHashSet::default();
     for (source_id, record) in ctx.records_sorted() {
         for text in &record.texts {
             // `ref_markers` first: these carry spans, and `set_ref` dedups
             // first-wins per target, so the spanned edge must be pushed
-            // before the span-less `ref_targets` edge for the same target
-            // (today `ref_targets` is empty for realized flat nodes, but keep
-            // the order robust against that ever changing).
-            for (label, span) in &text.ref_markers {
-                if ctx.bib_key_to_id.contains_key(label) {
-                    continue;
-                }
-                if let Some(target_id) = resolve_label(*label, ctx, introspector) {
-                    ref_marker_sources.insert(source_id);
-                    edges.push((
-                        source_id,
-                        text.slot,
-                        target_id,
-                        Some(label.resolve().as_str().into()),
-                        *span,
-                    ));
-                }
-            }
-            for label in &text.ref_targets {
+            // before a span-less `ref_targets` edge for the same target.
+            let spanned = text.ref_markers.iter().map(|(label, span)| (*label, *span));
+            let spanless = text.ref_targets.iter().map(|label| (*label, None));
+            for (label, span) in spanned.chain(spanless) {
                 // A `@key` citation is a RefElem too, but resolves in the
-                // bibliography pool, not the node tree — keep it out of
+                // bibliography pool, not the node tree: keep it out of
                 // `refs`.
-                if ctx.bib_key_to_id.contains_key(label) {
+                if ctx.bib_key_to_id.contains_key(&label) {
                     continue;
                 }
-                if let Some(target_id) = resolve_label(*label, ctx, introspector) {
+                if let Some(target_id) = resolve_label(label, ctx, introspector) {
                     edges.push((
                         source_id,
                         text.slot,
                         target_id,
                         Some(label.resolve().as_str().into()),
-                        None,
+                        span,
                     ));
                 }
             }
         }
     }
+    set_refs(ctx, edges);
+}
 
-    // Fallback path: index-correlation over the original content, for nodes
-    // whose refs did not surface as markers (e.g. list items / table cells,
-    // whose text is not a single flat string). Emits `text_span: None`.
-    let ref_edges = ref_edges_from_content(content);
-    let paragraph_ids = paragraph_ids_from_nodes(&ctx.roots);
-    let heading_ids = heading_ids_from_nodes(&ctx.roots);
-    for (source_kind, index, label) in ref_edges {
-        if ctx.bib_key_to_id.contains_key(&label) {
-            continue;
-        }
-        let source_id = match source_kind {
-            RefSourceKind::Paragraph => paragraph_ids.get(index).copied(),
-            RefSourceKind::Heading => heading_ids.get(index).copied(),
-        };
-        let Some(source_id) = source_id else { continue };
-        // A node that produced its own markers is authoritative — skip it
-        // here so the imperfect index correlation cannot mis-attribute.
-        if ref_marker_sources.contains(&source_id) {
-            continue;
-        }
-        if let Some(target_id) = resolve_label(label, ctx, introspector) {
-            edges.push((
-                source_id,
-                TextSlot::Text,
-                target_id,
-                Some(label.resolve().as_str().into()),
-                None,
-            ));
-            if matches!(source_kind, RefSourceKind::Heading)
-                && let Some(paragraph_id) =
-                    last_paragraph_under_heading(&ctx.roots, source_id)
-                && !ref_marker_sources.contains(&paragraph_id)
-            {
-                edges.push((
-                    paragraph_id,
-                    TextSlot::Text,
-                    target_id,
-                    Some(label.resolve().as_str().into()),
-                    None,
-                ));
-            }
-        }
-    }
-
+/// Put each edge on its source text, named by its target's label (ADR
+/// 0017). An edge from a marker lands only when the target carries exactly
+/// the label the marker names. One from a location destination names the
+/// target by the label it carries, and is dropped when it carries none:
+/// there is nothing to name it by.
+fn set_refs(ctx: &mut ConvertContext, edges: Vec<RefEdge>) {
     for (source, slot, target, marker_label, span) in edges {
-        // An edge names its target by label (ADR 0017). Prefer the label the
-        // target node actually carries — that is the one a consumer resolves
-        // against; the marker label is the fallback for the rare case where
-        // the target resolved through the introspector but the node itself
-        // never received a label. With neither there is nothing to name, so
-        // the edge is dropped rather than emitted unresolvable.
-        let Some(label) = node_label(ctx, target).or(marker_label) else {
+        let Some(label) = node_label(ctx, target) else { continue };
+        if marker_label.is_some_and(|marker| marker != label) {
             continue;
-        };
+        }
         set_ref(ctx, source, slot, label, span);
     }
 }
@@ -211,10 +122,7 @@ pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) 
         }
     }
 
-    for (source, slot, target, marker_label, span) in ref_edges {
-        let Some(label) = node_label(ctx, target).or(marker_label) else { continue };
-        set_ref(ctx, source, slot, label, span);
-    }
+    set_refs(ctx, ref_edges);
 }
 
 fn collect_link_edge(
@@ -260,8 +168,7 @@ fn collect_link_edge(
 
 /// A marker that opened and closed at the same code-point position rendered
 /// no text (e.g. an image link's body) — null the span rather than emit a
-/// degenerate `[n, n]` (design's null-span rule, generalised from the
-/// `refs` fallback below to `links`).
+/// degenerate `[n, n]` (design's null-span rule).
 fn normalize_link_span(span: Option<(i64, i64)>) -> Option<Vec<i64>> {
     match span {
         Some((start, end)) if start != end => Some(vec![start, end]),
@@ -269,93 +176,10 @@ fn normalize_link_span(span: Option<(i64, i64)>) -> Option<Vec<i64>> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RefSourceKind {
-    Heading,
-    Paragraph,
-}
-
-fn ref_edges_from_content(content: &Content) -> Vec<(RefSourceKind, usize, Label)> {
-    let mut out = Vec::new();
-    let mut current: Option<(RefSourceKind, usize)> = None;
-    let mut par_index = 0_usize;
-    let mut heading_index = 0_usize;
-    // Decorative content emits no node, so its paragraphs and headings are
-    // not counted, and its references yield no edge.
-    crate::emit::extract::traverse_kept(content, &mut |element| {
-        if element.to_packed::<ParElem>().is_some() {
-            current = Some((RefSourceKind::Paragraph, par_index));
-            par_index += 1;
-        } else if element.to_packed::<HeadingElem>().is_some() {
-            current = Some((RefSourceKind::Heading, heading_index));
-            heading_index += 1;
-        } else if let Some(reference) = element.to_packed::<RefElem>()
-            && let Some((kind, index)) = current
-        {
-            out.push((kind, index, reference.target));
-        }
-    });
-    out
-}
-
-fn paragraph_ids_from_nodes(nodes: &[CndNode]) -> Vec<Uuid> {
-    let mut out = Vec::new();
-    walk_paragraph_ids(nodes, &mut out);
-    out
-}
-
-fn heading_ids_from_nodes(nodes: &[CndNode]) -> Vec<Uuid> {
-    let mut out = Vec::new();
-    walk_heading_ids(nodes, &mut out);
-    out
-}
-
-/// The flow paragraphs, in reading order: those under headings and figures,
-/// never one inside another container's slot.
-///
-/// A deliberate exception to walking every slot: the fallback above pairs
-/// this list by index with the `ParElem`s of the source content, and the
-/// paragraphs an emitter builds to fill a container (a list item's, a
-/// cell's) have no `ParElem` there, so counting them would shift every
-/// index after them and misattribute the edges.
-fn walk_paragraph_ids(nodes: &[CndNode], out: &mut Vec<Uuid>) {
-    for node in nodes {
-        match node {
-            CndNode::Paragraph(n) => out.push(n.base.id),
-            CndNode::Heading(n) => walk_paragraph_ids(&n.children, out),
-            CndNode::Figure(n) => walk_paragraph_ids(&n.children, out),
-            _ => {}
-        }
-    }
-}
-
-/// Every heading of the tree, in reading order, whatever slot it sits in:
-/// the fallback above pairs this list by index with every `HeadingElem` of
-/// the source content, and a heading written in a list item or a cell is
-/// one of them. Skipping it would shift every index after it.
-fn walk_heading_ids(nodes: &[CndNode], out: &mut Vec<Uuid>) {
-    crate::model::walk(nodes, &mut |node| {
-        if let CndNode::Heading(n) = node {
-            out.push(n.base.id);
-        }
-    });
-}
-
-/// The id of the node carrying `label`.
-///
-/// Two nodes sharing a label is ill-formed but possible, and then the
-/// smallest id wins rather than whichever the hash map happened to yield
-/// first — so the two calls this makes per labelled element agree with each
-/// other. `min_by_key` rather than sorting: this runs once per labelled
-/// element, and sorting the whole map each time would be quadratic.
-fn find_by_label(ctx: &ConvertContext, label: Label) -> Option<Uuid> {
-    ctx.records
-        .iter()
-        .filter(|(_, record)| record.label == Some(label))
-        .map(|(id, _)| *id)
-        .min()
-}
-
+/// The node that carries `label`: the one built from the element the label
+/// is attached to, and no other. A label whose element yields no node — on
+/// decorative content, in a drawing's body, on a node `assemble` dropped —
+/// names nothing in the CND, and a reference to it has no edge.
 fn resolve_label(
     label: Label,
     ctx: &ConvertContext,
@@ -364,84 +188,12 @@ fn resolve_label(
     if let Some(id) = ctx.label_to_id.get(&label).copied() {
         return Some(id);
     }
-
-    let content = introspector.query_label(label).ok()?;
-    // A label on decorative content names nothing (cnd-sdk spec §2): no
-    // fallback below may hand its references to some other node.
-    if content
-        .location()
-        .is_some_and(|loc| ctx.artifact_locations.contains(&loc))
-    {
+    let location = introspector.query_label(label).ok()?.location()?;
+    // A label on decorative content names nothing (cnd-sdk spec §2).
+    if ctx.artifact_locations.contains(&location) {
         return None;
     }
-    if let Some(loc) = content.location()
-        && let Some(id) = ctx.location_to_id.get(&loc).copied()
-    {
-        return Some(id);
-    }
-
-    for elem in introspector.query(&FigureElem::ELEM.select()) {
-        if elem.label() != Some(label) {
-            continue;
-        }
-        if let Some(loc) = elem.location()
-            && let Some(id) = ctx.location_to_id.get(&loc).copied()
-        {
-            return Some(id);
-        }
-    }
-
-    if content.to_packed::<FigureElem>().is_some() {
-        return find_by_label(ctx, label).or_else(|| find_labeled_table(ctx));
-    }
-
-    find_by_label(ctx, label)
-}
-
-/// The first table or figure in reading order.
-fn find_labeled_table(ctx: &ConvertContext) -> Option<Uuid> {
-    let mut found = None;
-    crate::model::walk(&ctx.roots, &mut |node| {
-        if found.is_none() && matches!(node, CndNode::Table(_) | CndNode::Figure(_)) {
-            found = Some(node.id());
-        }
-    });
-    found
-}
-
-fn last_paragraph_under_heading(nodes: &[CndNode], heading_id: Uuid) -> Option<Uuid> {
-    fn walk(nodes: &[CndNode], target: Uuid, last: &mut Option<Uuid>) -> bool {
-        for node in nodes {
-            // Not a `match` with a guard: the recursive descent writes through
-            // `last`, and a side-effecting guard would run — or not — by arm
-            // order alone.
-            let CndNode::Heading(n) = node else { continue };
-            if n.base.id == target {
-                find_last_paragraph(&n.children, last);
-                return true;
-            }
-            if walk(&n.children, target, last) {
-                return true;
-            }
-        }
-        false
-    }
-
-    // The last *flow* paragraph, as `walk_paragraph_ids` counts them: a
-    // paragraph inside a container slot is not the heading's own text.
-    fn find_last_paragraph(nodes: &[CndNode], last: &mut Option<Uuid>) {
-        for node in nodes {
-            match node {
-                CndNode::Paragraph(n) => *last = Some(n.base.id),
-                CndNode::Heading(n) => find_last_paragraph(&n.children, last),
-                _ => {}
-            }
-        }
-    }
-
-    let mut last = None;
-    walk(nodes, heading_id, &mut last);
-    last
+    ctx.location_to_id.get(&location).copied()
 }
 
 fn node_label(ctx: &ConvertContext, id: Uuid) -> Option<String> {

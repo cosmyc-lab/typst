@@ -205,9 +205,25 @@ fn complex_refs_dense_graph() {
     let CndNode::Heading(overview) = overview else {
         panic!("expected heading");
     };
-    assert!(
-        !overview.text.refs.is_empty(),
-        "overview heading should reference labelled targets"
+    // The references are written in the chapter's first paragraph, which
+    // holds them with their spans; the heading's own text holds none.
+    assert!(overview.text.refs.is_empty(), "{:?}", overview.text.refs);
+    let intro = paragraph_at(&overview.children, 0);
+    assert_eq!(
+        intro
+            .text
+            .refs
+            .iter()
+            .map(|r| {
+                let span = r.text_span.as_ref().expect("a span");
+                (r.label.as_str(), codepoint_slice(&intro.text.value, span))
+            })
+            .collect::<Vec<_>>(),
+        [
+            ("sec-detail", "Section\u{a0}11".to_string()),
+            ("tab-signaux", "Tableau\u{a0}1".to_string()),
+            ("sec-annexe", "Section\u{a0}2".to_string()),
+        ]
     );
 
     let signaux = find_by_label(&cnd.nodes, "tab-signaux").expect("signaux");
@@ -1470,6 +1486,9 @@ fn example_files_exist() {
         "marks.typ",
         "bib_rich.typ",
         "lang.typ",
+        "table_kinds.typ",
+        "figure_description.typ",
+        "ref_exact_targets.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -3548,22 +3567,19 @@ fn edge_inside_a_cell_sits_on_the_cell_paragraph() {
     let span = note.text_span.as_ref().expect("the footnote edge has a span");
     assert_eq!(codepoint_slice(value, span), note.label);
 
-    // No other paragraph carries either edge. The section fallback of
-    // `refs::resolve_refs` still puts a span-less copy of every reference
-    // written in a section on its heading, as it does for any paragraph's,
-    // until that fallback goes.
+    // No other node carries the edge: not the heading of the section, nor
+    // any paragraph of it.
     for node in all_nodes(&cnd.nodes) {
         if node.id() == paragraph.base.id {
             continue;
         }
         for text in node.texts() {
-            for reference in text.refs.iter().filter(|r| r.label == "grid-note") {
-                assert!(
-                    matches!(node, CndNode::Heading(_)) && reference.text_span.is_none(),
-                    "a {} also refers to grid-note: {reference:?}",
-                    node_type(node)
-                );
-            }
+            assert!(
+                text.refs.iter().all(|r| r.label != "grid-note"),
+                "a {} also refers to grid-note: {:?}",
+                node_type(node),
+                text.refs
+            );
         }
     }
     let texts = all_texts(&cnd.nodes);
@@ -4683,4 +4699,167 @@ fn a_dropped_citation_leaves_one_space_in_a_label() {
     assert_eq!(caption.value, "Shown in and later.");
     let cites: Vec<_> = caption.cites.iter().map(|c| c.label.as_str()).collect();
     assert_eq!(cites, ["knuth"]);
+}
+
+/// The figure with `label`, wherever it sits.
+fn figure_by_label<'a>(
+    cnd: &'a typst_cnd::Cnd,
+    label: &str,
+) -> &'a typst_cnd::FigureNode {
+    all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Figure(figure) if figure.base.label.as_deref() == Some(label) => {
+                Some(figure)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no figure labelled {label}"))
+}
+
+#[test]
+fn figure_alt_is_description() {
+    let cnd = cnd_for_example("figure_description.typ");
+    let shares = figure_by_label(&cnd, "fig-shares");
+    let description = shares.description.as_ref().expect("a description");
+    assert_eq!(description.value, "Bars: A 38 %, B 27 %");
+    assert!(description.marks.is_empty() && description.refs.is_empty());
+    assert_eq!(value(&shares.caption), Some("Shares"));
+    // The image's own alt stays the image's: it is not the figure's.
+    let plain = figure_by_label(&cnd, "fig-plain");
+    assert!(plain.description.is_none(), "{:?}", plain.description);
+    let CndNode::Image(image) = &plain.children[0] else { panic!("an image") };
+    assert_eq!(image.alt.as_deref(), Some("Cover art"));
+}
+
+/// Every table of `table_kinds.typ`, in reading order, figures entered.
+fn tables_of(cnd: &typst_cnd::Cnd) -> Vec<&typst_cnd::TableNode> {
+    all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Table(table) => Some(table),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn table_kind_comes_from_the_hint() {
+    let cnd = cnd_for_example("table_kinds.typ");
+    let kinds: Vec<_> = tables_of(&cnd)
+        .iter()
+        .map(|table| (first_paragraph(&table.cells[0].children), table.kind.as_deref()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("Sensor", Some("data")),
+            ("Plan", Some("content")),
+            ("North", None),
+            ("1", Some("matrix")),
+            // A non-string hint says nothing.
+            ("Numbered hint", None),
+            ("Year", Some("data")),
+        ]
+    );
+    // The kind is the table's: the figure around one has its own.
+    let figure = figure_by_label(&cnd, "tab-counts");
+    assert_eq!(figure.kind.as_deref(), Some("table"));
+}
+
+#[test]
+fn table_kind_hint_never_leaks() {
+    for path in all_example_files() {
+        let name = path.file_name().and_then(|n| n.to_str()).expect("name");
+        let cnd = cnd_for_example(name);
+        for node in all_nodes_full(&cnd) {
+            assert!(
+                !node.base().state_metadata.contains_key("table-kind"),
+                "{name}: a {} keeps the hint: {:?}",
+                node_type(node),
+                node.base().state_metadata
+            );
+        }
+    }
+    // The author's own metadata stays, on the tables and in their cells.
+    let cnd = cnd_for_example("table_kinds.typ");
+    for table in tables_of(&cnd) {
+        let section = table.base.state_metadata.get("section");
+        assert_eq!(section.and_then(|v| v.as_str()), Some("tables"));
+        for cell in &table.cells {
+            for node in &cell.children {
+                let section = node.base().state_metadata.get("section");
+                assert_eq!(section.and_then(|v| v.as_str()), Some("tables"));
+            }
+        }
+    }
+}
+
+#[test]
+fn ref_never_lands_on_an_unlabelled_target() {
+    // Over every example: an edge names a label a node carries, and no
+    // heading holds an edge, since no example writes a reference in a
+    // heading's own text.
+    for path in all_example_files() {
+        let name = path.file_name().and_then(|n| n.to_str()).expect("name");
+        let cnd = cnd_for_example(name);
+        let nodes = all_nodes_full(&cnd);
+        let carries = |label: &str| {
+            nodes.iter().any(|node| node.base().label.as_deref() == Some(label))
+        };
+        for node in &nodes {
+            for text in node.texts() {
+                for reference in &text.refs {
+                    assert!(
+                        carries(&reference.label),
+                        "{name}: @{} names no node",
+                        reference.label
+                    );
+                }
+            }
+            if let CndNode::Heading(heading) = node {
+                assert!(
+                    heading.text.refs.is_empty(),
+                    "{name}: heading {:?} holds {:?}",
+                    heading.text.value,
+                    heading.text.refs
+                );
+            }
+        }
+    }
+
+    // The figure placed in a drawing is no node: a reference to it has no
+    // edge, and its label goes to no other node.
+    let cnd = cnd_for_example("ref_exact_targets.typ");
+    let labels: Vec<_> = all_nodes_full(&cnd)
+        .into_iter()
+        .filter_map(|node| node.base().label.as_deref())
+        .collect();
+    assert_eq!(labels, ["fig-plain", "fig-drawing"]);
+    let refs = |text: &RichText| -> Vec<(String, String)> {
+        text.refs
+            .iter()
+            .map(|r| {
+                let span = r.text_span.as_ref().expect("a ref in a paragraph has a span");
+                (r.label.clone(), codepoint_slice(&text.value, span))
+            })
+            .collect()
+    };
+    let targets = find_heading(&cnd.nodes, "Targets");
+    assert!(targets.text.refs.is_empty(), "{:?}", targets.text.refs);
+    let paragraph = paragraph_at(&targets.children, 2);
+    assert_eq!(
+        refs(&paragraph.text),
+        [
+            ("fig-plain".to_string(), "Table\u{a0}1".to_string()),
+            ("fig-drawing".to_string(), "Figure\u{a0}1".to_string()),
+        ]
+    );
+    let elsewhere = find_heading(&cnd.nodes, "Elsewhere");
+    assert!(elsewhere.text.refs.is_empty(), "{:?}", elsewhere.text.refs);
+    let paragraph = paragraph_at(&elsewhere.children, 0);
+    assert_eq!(
+        refs(&paragraph.text),
+        [("fig-plain".to_string(), "Table\u{a0}1".to_string())]
+    );
 }

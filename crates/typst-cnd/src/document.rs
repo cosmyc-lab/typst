@@ -118,7 +118,7 @@ impl Output for CndDocument {
         // Bibliography pool must precede cross-reference resolution so a
         // `@key` citation (a RefElem) is kept out of the `refs` index.
         pools::build_bibliography_pool(engine, introspector.as_ref(), &mut ctx)?;
-        refs::resolve_refs(&mut ctx, introspector.as_ref(), content);
+        refs::resolve_refs(&mut ctx, introspector.as_ref());
 
         // `links` (ADR 0024, cnd-sdk): a label/location `LinkElem` folds
         // into the same `refs` edges above; needs `ctx.label_to_id`/
