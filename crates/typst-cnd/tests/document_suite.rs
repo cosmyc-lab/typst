@@ -2685,7 +2685,7 @@ fn subfigures_are_nested_figures() {
         .into_iter()
         .filter(|n| matches!(n, CndNode::Figure(_)))
         .collect();
-    assert_eq!(figures.len(), 7);
+    assert_eq!(figures.len(), 8);
     let counts = word_counts(&cnd);
     for token in ["KC1", "KC2", "KC3"] {
         assert_eq!(counts.get(token).copied(), Some(1), "{token} once");
@@ -2710,6 +2710,26 @@ fn drawing_figure_has_raw_and_no_children() {
         })
         .collect();
     assert_eq!(with_raw, ["KD1 a drawing"]);
+}
+
+#[test]
+fn inline_images_side_by_side_are_the_figure_children() {
+    // Two boxed images on one line realize a paragraph holding only the
+    // space between them: the images are nodes of their own, so that
+    // paragraph has nothing left and is no child.
+    let cnd = cnd_for_example("figure_kinds.typ");
+    let pair = figure_with_caption(&cnd, "KF1 inline pair");
+    assert_eq!(node_types(&pair.children), ["image", "image"]);
+    let alts: Vec<Option<&str>> = pair
+        .children
+        .iter()
+        .map(|child| match child {
+            CndNode::Image(image) => image.alt.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(alts, [Some("Inline left"), Some("Inline right")]);
+    assert!(pair.raw.is_none());
 }
 
 #[test]

@@ -10,6 +10,7 @@ use typst_library::model::{
     PdfMarkerTagKind, QuoteElem, RefElem, TableElem, TermsElem,
 };
 use typst_library::text::{LinebreakElem, RawElem};
+use typst_library::visualize::ImageElem;
 
 /// Extract plain text from content without duplicating inline code.
 ///
@@ -292,6 +293,14 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
     if content.elem() == ArtifactElem::ELEM {
         ctx.excluded_any = true;
         ctx.collapse_space = true;
+        return;
+    }
+
+    // An image in a `box` is met unrealized, in the box's body. It is a node
+    // of its own: a paragraph holding only such images (two side by side)
+    // has nothing left.
+    if content.elem() == ImageElem::ELEM {
+        ctx.excluded_any = true;
         return;
     }
 

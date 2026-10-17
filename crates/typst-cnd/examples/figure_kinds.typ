@@ -1,6 +1,7 @@
 // Figures around different bodies: an author-defined kind holding
 // paragraphs, two images side by side in a grid, two subfigures, a
-// drawing, and a floating figure in a list item.
+// drawing, two inline images side by side, and a floating figure in a
+// list item.
 #set document(title: "Figure kinds", author: "typst-cnd")
 
 = Kinds
@@ -38,6 +39,11 @@
 ) <fig-parts>
 
 #figure(rect(width: 2cm, height: 1cm), caption: [KD1 a drawing]) <fig-drawing>
+
+#figure(
+  [#box(image("newsletter/newsletter-cover.png", alt: "Inline left", width: 1cm)) #box(image("newsletter/newsletter-cover.png", alt: "Inline right", width: 1cm))],
+  caption: [KF1 inline pair],
+) <fig-inline>
 
 - KE1 item holding a floating figure.
   #figure([KE2 floating body.], caption: [KE3 floating caption], placement: bottom) <fig-float>
