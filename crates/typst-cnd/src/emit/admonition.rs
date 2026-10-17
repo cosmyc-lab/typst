@@ -16,7 +16,16 @@
 //!   that one is absorbed.
 //!
 //! The marker labels name no node: they are never a node's label, and never
-//! enter the label index.
+//! enter the label index. Nor does a label the author writes on the call
+//! (`#cnd.admonition(..)[..] <name>`): Typst attaches it to the sequence the
+//! helper returns, which is no node, so it names nothing in the CND (and
+//! Typst cannot reference it either).
+//!
+//! A start marker that no end marker closes — written by hand, or cut off
+//! by the container it is written in — brackets nothing and yields no node
+//! (see `Ancestry::is_admonition`). An admonition in an inline `box` that
+//! the paragraph around the box renders whole yields none either (see
+//! `Ancestry::is_boxed_admonition`).
 
 use ecow::EcoString;
 use typst_library::engine::Engine;
@@ -73,6 +82,18 @@ pub fn is_marker_label(label: Label) -> bool {
 /// The selector of every start marker.
 pub fn start_selector() -> Option<Selector> {
     Label::new(PicoStr::intern(START)).map(Selector::Label)
+}
+
+/// Whether the start marker `content` gives a title.
+pub fn has_title(content: &Content) -> bool {
+    content
+        .to_packed::<MetadataElem>()
+        .is_some_and(|marker| match &marker.value {
+            Value::Dict(dict) => {
+                dict.get("title").is_ok_and(|title| *title != Value::None)
+            }
+            _ => false,
+        })
 }
 
 /// Convert a start marker into an `AdmonitionNode` with no children:

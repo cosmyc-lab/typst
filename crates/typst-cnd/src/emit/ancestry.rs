@@ -226,6 +226,13 @@ pub struct Ancestry {
     /// it: a figure's caption by the figure, a term by its description's
     /// slot (see [`Ancestry::label_lang_of`]).
     label_scopes: FxHashMap<Location, Location>,
+    /// The start markers that an end marker closed: the admonitions.
+    admonitions: FxHashSet<Location>,
+    /// The start markers laid out inside a paragraph, with that paragraph.
+    admonitions_in_par: FxHashMap<Location, Location>,
+    /// The start markers whose printed title an enclosing paragraph
+    /// renders.
+    covered_titles: FxHashSet<Location>,
 }
 
 impl Ancestry {
@@ -259,7 +266,64 @@ impl Ancestry {
             );
         }
         ancestry.settle_fragments(paged.introspector().as_ref());
+        ancestry.settle_brackets();
         ancestry
+    }
+
+    /// Give what was laid out after a start marker that no end marker
+    /// closed — one written by hand, or cut off by the container it was
+    /// written in — the slot that marker itself sits in: such a marker
+    /// brackets nothing (see [`Ancestry::is_admonition`]).
+    fn settle_brackets(&mut self) {
+        let unpaired = |slot: &SlotKey| {
+            slot.kind() == SlotKind::AdmonitionBody
+                && !self.admonitions.contains(&slot.location())
+        };
+        let stray: Vec<(Location, SlotKey)> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| unpaired(slot))
+            .map(|(location, slot)| (*location, *slot))
+            .collect();
+        // Each is settled against the slots as the walk left them, so the
+        // order they come in does not matter.
+        let mut settled = Vec::with_capacity(stray.len());
+        for (location, mut slot) in stray {
+            // Up through every unpaired marker it sits in; markers are
+            // finitely nested, the bound only guards a cycle.
+            let mut outer = None;
+            for _ in 0..64 {
+                match self.slots.get(&slot.location()) {
+                    Some(next) if unpaired(next) => slot = *next,
+                    found => {
+                        outer = found.copied();
+                        break;
+                    }
+                }
+            }
+            settled.push((location, outer));
+        }
+        for (location, outer) in settled {
+            match outer {
+                Some(slot) => self.slots.insert(location, slot),
+                None => self.slots.remove(&location),
+            };
+        }
+    }
+
+    /// Whether the start marker at `location` opens an admonition: an end
+    /// marker closed it.
+    pub fn is_admonition(&self, location: Location) -> bool {
+        self.admonitions.contains(&location)
+    }
+
+    /// Whether the admonition at `location` is laid out in an inline `box`
+    /// whose paragraph renders it, title included: its start marker sits
+    /// in a paragraph, and its printed title, if any, is part of one. Its
+    /// body then routes nothing (see `convert`).
+    pub fn is_boxed_admonition(&self, location: Location, has_title: bool) -> bool {
+        self.admonitions_in_par.contains_key(&location)
+            && (!has_title || self.covered_titles.contains(&location))
     }
 
     /// Give each element laid out in a row that spans pages the cell whose
@@ -565,6 +629,9 @@ struct Float {
     ancestors: FxHashSet<Location>,
     /// The innermost slot open where the `place` is written.
     slot: Option<SlotKey>,
+    /// The `place` itself: the logical parent of the group its body is
+    /// drawn in.
+    location: Option<Location>,
 }
 
 impl Float {
@@ -621,6 +688,7 @@ fn floats(
                         text: paragraphs_text(&place.body),
                         ancestors: open.iter().map(|(location, _)| *location).collect(),
                         slot: open.iter().rev().find_map(|(_, slot)| *slot),
+                        location: inner.location(),
                     });
                 }
                 let Some(location) = inner.location() else { continue };
@@ -672,6 +740,8 @@ struct Floats {
     /// The floats whose text has each word (a maximal run of letters and
     /// digits) in it.
     by_word: FxHashMap<String, Vec<usize>>,
+    /// Each float, by its `place`'s location.
+    by_location: FxHashMap<Location, usize>,
 }
 
 /// A float's source range in [`Floats::by_start`].
@@ -720,7 +790,12 @@ impl Floats {
                 entry.reach = reach;
             }
         }
-        Self { all, by_span, by_start, by_word }
+        let by_location = all
+            .iter()
+            .enumerate()
+            .filter_map(|(index, float)| Some((float.location?, index)))
+            .collect();
+        Self { all, by_span, by_start, by_word, by_location }
     }
 
     /// The floats whose body holds the element written at `span`.
@@ -884,6 +959,8 @@ struct Open {
     /// Whether this is an admonition's bracket (see the module docs): no
     /// end tag of its own closes it, its end marker does.
     bracket: bool,
+    /// For an admonition's printed title, the admonition's start marker.
+    title_of: Option<Location>,
     /// Whether a paragraph inside it is absorbed (see [`absorbs`]).
     absorbs: bool,
     /// Whether it owns item slots (see [`owns_items`]).
@@ -1139,17 +1216,27 @@ struct DrawScope {
     decorative: bool,
     /// The stack depth where the current float body starts; `0` in the flow.
     base: usize,
+    /// The float whose body this is, as an index into the document's
+    /// floats; `None` in the flow.
+    float: Option<usize>,
 }
 
 impl DrawScope {
-    const FLOW: Self = Self { decorative: false, base: 0 };
+    const FLOW: Self = Self { decorative: false, base: 0, float: None };
 
     /// The scope of a group's content: a float's body starts afresh.
-    fn enter(self, group: &GroupItem, places: &FloatPlaces, depth: usize) -> Self {
+    fn enter(
+        self,
+        group: &GroupItem,
+        places: &FloatPlaces,
+        floats: &Floats,
+        depth: usize,
+    ) -> Self {
         match group.parent {
             Some(parent) if places.all.contains(&parent.location) => Self {
                 decorative: places.decorative.contains(&parent.location),
                 base: depth,
+                float: floats.by_location.get(&parent.location).copied(),
             },
             _ => self,
         }
@@ -1176,13 +1263,17 @@ fn walk(
         match item {
             // Depth-first keeps the tag stream in document order.
             FrameItem::Group(group) => {
-                let scope = scope.enter(group, places, stack.len());
+                let scope = scope.enter(group, places, floats, stack.len());
                 match group.parent {
                     // A note's frame: what is open around it is the flow's,
                     // not the note's (see `NoteStacks`).
                     Some(parent) if ancestry.printed_notes.contains(&parent.location) => {
                         let mut own = ancestry.note_stacks.take(parent.location);
-                        let scope = DrawScope { decorative: scope.decorative, base: 0 };
+                        let scope = DrawScope {
+                            decorative: scope.decorative,
+                            base: 0,
+                            float: None,
+                        };
                         walk(
                             &group.frame,
                             engine,
@@ -1227,8 +1318,19 @@ fn walk(
                     }
                 }
                 let bracket = admonition::marker(inner);
-                if bracket == Some(admonition::Marker::End) {
-                    close_bracket(stack);
+                if bracket == Some(admonition::Marker::End)
+                    && let Some(start) = close_bracket(stack)
+                {
+                    ancestry.admonitions.insert(start);
+                }
+                // An admonition laid out inside a paragraph: in an inline
+                // `box`, whose paragraph may render all of it.
+                if bracket == Some(admonition::Marker::Start)
+                    && let Some(par) = stack.get(scope.base..).and_then(|open| {
+                        open.iter().rev().find(|open| open.par.is_some())
+                    })
+                {
+                    ancestry.admonitions_in_par.insert(location, par.location);
                 }
                 let opens = match bracket {
                     Some(admonition::Marker::Start) => {
@@ -1239,10 +1341,17 @@ fn walk(
                 let mut in_floats = floats.holding(inner.span()).to_vec();
                 // An admonition marker's span is in the authoring package,
                 // the same for every call: like a layout marker, it sits
-                // where its parent does.
+                // where its parent does — or, first in a float's body, where
+                // nothing of the body is open yet, in that float.
                 if bracket.is_some() {
-                    in_floats =
-                        stack.last().map(|open| open.floats.clone()).unwrap_or_default();
+                    in_floats = match scope.float {
+                        Some(float) if stack.len() <= scope.base => vec![float],
+                        _ => stack
+                            .get(scope.base..)
+                            .and_then(<[Open]>::last)
+                            .map(|open| open.floats.clone())
+                            .unwrap_or_default(),
+                    };
                 }
                 // A marker is made by layout, often with no span of its own:
                 // it sits wherever what made it does. An item's body sits
@@ -1264,6 +1373,13 @@ fn walk(
                     && let Some(parent) = covering_par(stack, par)
                 {
                     ancestry.covered_by_par.insert(location, parent);
+                    // An admonition's printed title that an enclosing
+                    // paragraph renders.
+                    if let Some(admonition) =
+                        stack.iter().rev().find_map(|open| open.title_of)
+                    {
+                        ancestry.covered_titles.insert(admonition);
+                    }
                 }
                 // A list, a table, a grid or a block quote in an inline
                 // `box` is laid out inside the line of the paragraph that
@@ -1411,6 +1527,7 @@ fn walk(
                     is_artifact: inner.elem() == ArtifactElem::ELEM,
                     slot,
                     bracket: bracket == Some(admonition::Marker::Start),
+                    title_of: label_owner.filter(|_| admonition::is_title(inner)),
                     absorbs: absorbs(inner),
                     owns_items: owns_items(inner),
                     owns_cells: owns_cells(inner),
@@ -1503,12 +1620,11 @@ fn walk(
     }
 }
 
-/// Close the innermost open admonition bracket, if any: an end marker with
-/// no bracket open closes nothing.
-fn close_bracket(stack: &mut Vec<Open>) {
-    if let Some(index) = stack.iter().rposition(|open| open.bracket) {
-        stack.remove(index);
-    }
+/// Close the innermost open admonition bracket, if any, and return its start
+/// marker: an end marker with no bracket open closes nothing.
+fn close_bracket(stack: &mut Vec<Open>) -> Option<Location> {
+    let index = stack.iter().rposition(|open| open.bracket)?;
+    Some(stack.remove(index).location)
 }
 
 /// Whether the open paragraph `par` holds the tags of the element at

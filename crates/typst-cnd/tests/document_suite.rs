@@ -1494,6 +1494,11 @@ fn example_files_exist() {
         "doc_metadata_markers.typ",
         "admonitions.typ",
         "admonition_across_pages.typ",
+        "admonition_floats.typ",
+        "admonition_boxed.typ",
+        "admonition_stray_marker.typ",
+        "admonition_containers.typ",
+        "admonition_columns.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -5291,4 +5296,177 @@ fn admonition_title_carries_its_edges() {
             assert!(text.links.is_empty(), "another text links: {:?}", text.value);
         }
     }
+}
+
+/// `(kind, title, paragraph values of its children)` of an admonition.
+fn admonition_shape(
+    admonition: &typst_cnd::AdmonitionNode,
+) -> (&str, Option<&str>, Vec<&str>) {
+    (
+        admonition.kind.as_str(),
+        value(&admonition.title),
+        paragraph_values(&admonition.children),
+    )
+}
+
+#[test]
+fn admonition_in_a_float_keeps_its_body() {
+    let cnd = cnd_for_example("admonition_floats.typ");
+    assert_cnd_contract(&cnd);
+    let shapes: Vec<_> =
+        admonitions(&cnd.nodes).into_iter().map(admonition_shape).collect();
+    assert_eq!(
+        shapes,
+        [
+            (
+                "note",
+                Some("Holds a float"),
+                vec!["Body one.", "Floated paragraph inside.", "Body two."]
+            ),
+            ("tip", Some("Float top"), vec!["Top body."]),
+            ("tip", Some("Float bottom"), vec!["Bottom body."]),
+            ("tip", Some("Placed"), vec!["Placed body."]),
+            ("example", None, vec!["Figure float body."]),
+        ]
+    );
+    // No body paragraph escapes to the top level, and the figure holds its
+    // admonition and nothing else.
+    assert_eq!(paragraph_values(&cnd.nodes), ["Opening.", "Closing."]);
+    let figure = cnd
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            CndNode::Figure(figure) => Some(figure),
+            _ => None,
+        })
+        .expect("the floating figure");
+    assert_eq!(node_types(&figure.children), ["admonition"]);
+    assert_eq!(
+        node_types(&cnd.nodes)
+            .into_iter()
+            .filter(|kind| *kind == "admonition")
+            .count(),
+        4,
+        "no empty admonition beside the figure"
+    );
+}
+
+#[test]
+fn boxed_admonition_is_its_paragraph() {
+    let cnd = cnd_for_example("admonition_boxed.typ");
+    // A box's paragraph renders the callout whole: no admonition repeats its
+    // title.
+    let titles: Vec<Option<&str>> = admonitions(&cnd.nodes)
+        .iter()
+        .map(|admonition| value(&admonition.title))
+        .collect();
+    assert_eq!(titles, [Some("Inline title"), Some("Item title")]);
+    let paragraphs = paragraph_values(&cnd.nodes);
+    for (expected, title) in [
+        ("Lead", "Boxed title"),
+        ("Second", "Boxed list"),
+        ("Third", "Untitled boxed body."),
+    ] {
+        let par = paragraphs
+            .iter()
+            .find(|p| p.starts_with(expected))
+            .unwrap_or_else(|| panic!("paragraph {expected:?}: {paragraphs:?}"));
+        assert!(par.contains(title), "{par:?} renders {title:?}");
+    }
+    let json = serde_json::to_string(&cnd).unwrap();
+    for text in ["Boxed title", "Boxed list", "Untitled boxed body."] {
+        assert_eq!(json.matches(text).count(), 1, "{text:?} is emitted once");
+    }
+    // A callout written inline in a paragraph or an item keeps its body.
+    let shapes: Vec<_> =
+        admonitions(&cnd.nodes).into_iter().map(admonition_shape).collect();
+    assert_eq!(
+        shapes,
+        [
+            ("note", Some("Inline title"), vec!["Inline body."]),
+            ("tip", Some("Item title"), vec!["Item body."]),
+        ]
+    );
+}
+
+#[test]
+fn stray_start_marker_brackets_nothing() {
+    let cnd = cnd_for_example("admonition_stray_marker.typ");
+    assert_eq!(
+        node_types(&cnd.nodes),
+        ["paragraph", "paragraph", "admonition", "paragraph"]
+    );
+    assert_eq!(paragraph_values(&cnd.nodes), ["Opening.", "Middle.", "Closing."]);
+    let shapes: Vec<_> =
+        admonitions(&cnd.nodes).into_iter().map(admonition_shape).collect();
+    assert_eq!(shapes, [("tip", None, vec!["Real body."])]);
+}
+
+#[test]
+fn admonitions_in_containers() {
+    let cnd = cnd_for_example("admonition_containers.typ");
+    assert_refs_resolve(&cnd.nodes);
+    let CndNode::Heading(section) = &cnd.nodes[0] else { panic!("a section") };
+    assert_eq!(
+        node_types(&section.children),
+        ["table", "quote", "paragraph", "admonition", "admonition", "paragraph"]
+    );
+    let CndNode::Table(table) = &section.children[0] else { unreachable!() };
+    assert_eq!(node_types(&table.cells[0].children), ["admonition"]);
+    let CndNode::Admonition(in_cell) = &table.cells[0].children[0] else {
+        unreachable!()
+    };
+    assert_eq!(admonition_shape(in_cell), ("note", Some("In cell"), vec!["Cell body."]));
+    let CndNode::Quote(quote) = &section.children[1] else { unreachable!() };
+    let CndNode::Admonition(in_quote) = &quote.children[0] else { panic!("{quote:?}") };
+    assert_eq!(
+        admonition_shape(in_quote),
+        ("note", Some("In quote"), vec!["Quote body."])
+    );
+    // A footnote's content holds its admonition.
+    let note = &cnd.footnotes[0];
+    let CndNode::Admonition(in_note) = &note.children[0] else { panic!("{note:?}") };
+    assert_eq!(admonition_shape(in_note), ("note", Some("In note"), vec!["Note body."]));
+    // A figure and a heading in the body are its children, the heading
+    // gathering what follows it.
+    let CndNode::Admonition(holder) = &section.children[3] else { unreachable!() };
+    assert_eq!(
+        node_types(&holder.children),
+        ["paragraph", "figure", "paragraph", "heading"]
+    );
+    let CndNode::Heading(inner) = &holder.children[3] else { unreachable!() };
+    assert_eq!(paragraph_values(&inner.children), ["Paragraph after heading."]);
+    assert_eq!(incoming_count(&cnd.nodes, "inner"), 1);
+    // Show rules that restyle the block and the title change nothing.
+    let CndNode::Admonition(restyled) = &section.children[4] else { unreachable!() };
+    assert_eq!(value(&restyled.title), Some("Restyled"));
+    assert!(restyled.title.as_ref().unwrap().marks.is_empty(), "styling is no mark");
+    assert_eq!(node_types(&restyled.children), ["paragraph", "list"]);
+}
+
+#[test]
+fn admonition_flows_through_columns_and_pages() {
+    let cnd = cnd_for_example("admonition_columns.typ");
+    assert_eq!(node_types(&cnd.nodes), ["paragraph", "admonition", "paragraph"]);
+    let CndNode::Admonition(flowing) = &cnd.nodes[1] else { unreachable!() };
+    let expected: Vec<String> = (1..=24)
+        .map(|i| {
+            let mark = if i == 5 { "1" } else { "" };
+            format!("Body {i} of the callout{mark}.")
+        })
+        .collect();
+    assert_eq!(paragraph_values(&flowing.children), expected);
+    let pages: std::collections::BTreeSet<i32> = flowing
+        .children
+        .iter()
+        .map(|node| node.base().location.page)
+        .collect();
+    assert!(pages.len() > 1, "the body spans pages: {pages:?}");
+    let json = serde_json::to_string(&cnd).unwrap();
+    assert!(!json.contains("Running header"), "page furniture is never emitted");
+    assert!(!json.contains("Page 1"), "page furniture is never emitted");
+    let notes: Vec<String> = cnd.footnotes.iter().map(footnote_text).collect();
+    assert_eq!(notes, ["Note five."]);
+    let CndNode::Paragraph(fifth) = &flowing.children[4] else { unreachable!() };
+    assert_eq!(fifth.text.footnotes.len(), 1, "the body paragraph holds its edge");
 }

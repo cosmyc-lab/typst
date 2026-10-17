@@ -598,11 +598,12 @@ pub fn convert_from_introspector(
     }
 
     // An admonition is built from its start marker. One in a heading, a
-    // caption or an artifact is none.
+    // caption or an artifact is none, and so is a start marker that no end
+    // marker closes, which brackets nothing.
     if let Some(selector) = admonition::start_selector() {
         for elem in introspector.query(&selector) {
             let Some(loc) = elem.location() else { continue };
-            if ancestry.is_absorbed(loc) {
+            if ancestry.is_absorbed(loc) || !ancestry.is_admonition(loc) {
                 continue;
             }
             items.push((loc, elem));
@@ -691,6 +692,18 @@ pub fn convert_from_introspector(
     // emitting it would add one copy of the footer — and one page number —
     // per page.
     items.retain(|(loc, _)| !ancestry.is_artifact(*loc));
+
+    // An admonition in an inline `box` is rendered whole by the paragraph
+    // holding the box, as a list or a table there is: when nothing of its
+    // body is routed into it and that paragraph renders its title, it is
+    // no node. Its title would be a second copy.
+    let routed: rustc_hash::FxHashSet<SlotKey> =
+        items.iter().filter_map(|(loc, _)| ancestry.slot_of(*loc)).collect();
+    items.retain(|(loc, content)| {
+        admonition::marker(content) != Some(admonition::Marker::Start)
+            || routed.contains(&SlotKey::AdmonitionBody(*loc))
+            || !ancestry.is_boxed_admonition(*loc, admonition::has_title(content))
+    });
 
     reading_order::sort_by_reading_order(
         &mut items,
