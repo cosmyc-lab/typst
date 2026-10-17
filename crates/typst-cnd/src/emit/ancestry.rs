@@ -45,7 +45,14 @@
 //!   whose logical parent is the footnote; a note too long for its page
 //!   continues in another such frame on the next page. What is open in a
 //!   note's frames is the note's own, kept across pages apart from the
-//!   flow (see [`NoteStacks`]).
+//!   flow (see [`NoteStacks`]);
+//! - an admonition's body: no element. The authoring package brackets it
+//!   between two `metadata` markers (see `emit::admonition`), whose tags
+//!   open and close back to back, so the slot is a *bracket*: it opens at
+//!   the start marker and stays open, across pages, until the end marker.
+//!   Brackets nest like any slot, and a container that closes closes the
+//!   brackets opened inside it. The printed title is absorbed: the node
+//!   carries it.
 //!
 //! [`Feature::CndSemantics`]: typst_library::Feature::CndSemantics
 
@@ -71,7 +78,7 @@ use typst_library::text::{Locale, RawElem};
 use typst_library::visualize::ImageElem;
 use typst_syntax::{FileId, Span};
 
-use crate::emit::extract;
+use crate::emit::{admonition, extract};
 
 /// The body of a container, which holds the nodes laid out in it. Each is
 /// keyed by the location of the tag that opens it (see the module docs).
@@ -89,8 +96,8 @@ pub enum SlotKey {
     FigureBody(Location),
     /// A footnote's entry, printed at the bottom of the page.
     FootnoteBody(Location),
-    /// An admonition's body. No tag opens one yet.
-    #[allow(dead_code)]
+    /// An admonition's body, bracketed by the start marker at this location
+    /// and the end marker after it.
     AdmonitionBody(Location),
 }
 
@@ -423,7 +430,9 @@ fn absorbs(inner: &Content) -> bool {
         );
     }
     let elem = inner.elem();
-    elem == HeadingElem::ELEM
+    // An admonition's printed title, which its node carries.
+    admonition::is_title(inner)
+        || elem == HeadingElem::ELEM
         || elem == RawElem::ELEM
         || elem == EquationElem::ELEM
         || elem == OutlineElem::ELEM
@@ -439,10 +448,11 @@ fn owns_items(inner: &Content) -> bool {
 }
 
 /// Whether `inner` is of a kind that the emit pipeline may turn into a node
-/// (the elements `convert` queries).
+/// (the elements `convert` queries, and an admonition's start marker).
 fn is_node_kind(inner: &Content) -> bool {
     let elem = inner.elem();
-    elem == ParElem::ELEM
+    admonition::marker(inner) == Some(admonition::Marker::Start)
+        || elem == ParElem::ELEM
         || elem == HeadingElem::ELEM
         || elem == TableElem::ELEM
         || elem == FigureElem::ELEM
@@ -613,19 +623,40 @@ fn floats(
                         slot: open.iter().rev().find_map(|(_, slot)| *slot),
                     });
                 }
-                if let Some(location) = inner.location() {
-                    open.push((location, SlotKey::opened_by(inner, location)));
+                let Some(location) = inner.location() else { continue };
+                // An admonition's bracket, as in `walk`.
+                match admonition::marker(inner) {
+                    Some(admonition::Marker::Start) => {
+                        open.push((location, Some(SlotKey::AdmonitionBody(location))));
+                    }
+                    Some(admonition::Marker::End) => {
+                        if let Some(index) =
+                            open.iter().rposition(|(_, slot)| is_bracket(*slot))
+                        {
+                            open.remove(index);
+                        }
+                    }
+                    None => open.push((location, SlotKey::opened_by(inner, location))),
                 }
             }
-            // As in `walk`, pop to the matching start.
+            // As in `walk`, pop to the matching start; a bracket is closed by
+            // its end marker only.
             FrameItem::Tag(Tag::End(location, ..)) => {
-                if let Some(index) = open.iter().rposition(|(open, _)| open == location) {
+                if let Some(index) = open
+                    .iter()
+                    .rposition(|(open, slot)| open == location && !is_bracket(*slot))
+                {
                     open.truncate(index);
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Whether `slot` is an admonition's bracket.
+fn is_bracket(slot: Option<SlotKey>) -> bool {
+    slot.is_some_and(|slot| slot.kind() == SlotKind::AdmonitionBody)
 }
 
 /// The document's floats, indexed so that a paragraph or a tag is only
@@ -850,6 +881,9 @@ struct Open {
     is_artifact: bool,
     /// The slot this element opens, if any.
     slot: Option<SlotKey>,
+    /// Whether this is an admonition's bracket (see the module docs): no
+    /// end tag of its own closes it, its end marker does.
+    bracket: bool,
     /// Whether a paragraph inside it is absorbed (see [`absorbs`]).
     absorbs: bool,
     /// Whether it owns item slots (see [`owns_items`]).
@@ -958,7 +992,8 @@ impl OpenPar {
 
 /// The container owning the label text `inner` opens, if it opens one: a
 /// figure's caption is owned by the figure, a term by its description's
-/// slot, which also holds it.
+/// slot, which also holds it, an admonition's printed title by its start
+/// marker.
 fn label_owner(inner: &Content, stack: &[Open]) -> Option<Location> {
     let owner = |kind: SlotKind| {
         stack
@@ -969,6 +1004,9 @@ fn label_owner(inner: &Content, stack: &[Open]) -> Option<Location> {
     };
     if inner.elem() == FigureCaption::ELEM {
         return owner(SlotKind::FigureBody);
+    }
+    if admonition::is_title(inner) {
+        return owner(SlotKind::AdmonitionBody);
     }
     let marker = inner.to_packed::<PdfMarkerTag>()?;
     (marker.kind == PdfMarkerTagKind::TermsItemLabel)
@@ -1188,8 +1226,24 @@ fn walk(
                         }
                     }
                 }
-                let opens = SlotKey::opened_by(inner, location);
+                let bracket = admonition::marker(inner);
+                if bracket == Some(admonition::Marker::End) {
+                    close_bracket(stack);
+                }
+                let opens = match bracket {
+                    Some(admonition::Marker::Start) => {
+                        Some(SlotKey::AdmonitionBody(location))
+                    }
+                    _ => SlotKey::opened_by(inner, location),
+                };
                 let mut in_floats = floats.holding(inner.span()).to_vec();
+                // An admonition marker's span is in the authoring package,
+                // the same for every call: like a layout marker, it sits
+                // where its parent does.
+                if bracket.is_some() {
+                    in_floats =
+                        stack.last().map(|open| open.floats.clone()).unwrap_or_default();
+                }
                 // A marker is made by layout, often with no span of its own:
                 // it sits wherever what made it does. An item's body sits
                 // where its list does, any other marker where its parent does.
@@ -1356,6 +1410,7 @@ fn walk(
                     par,
                     is_artifact: inner.elem() == ArtifactElem::ELEM,
                     slot,
+                    bracket: bracket == Some(admonition::Marker::Start),
                     absorbs: absorbs(inner),
                     owns_items: owns_items(inner),
                     owns_cells: owns_cells(inner),
@@ -1383,8 +1438,11 @@ fn walk(
                 // Pop to the matching frame. Tags are balanced in practice;
                 // popping by search rather than blindly keeps a stray end tag
                 // from unwinding unrelated ancestors.
-                if let Some(index) =
-                    stack.iter().rposition(|open| open.location == *location)
+                // A bracket is closed by its end marker, not by the end tag
+                // of its start marker, which shares its location.
+                if let Some(index) = stack
+                    .iter()
+                    .rposition(|open| open.location == *location && !open.bracket)
                 {
                     for open in stack.drain(index..) {
                         // A cell holding only untagged content (a `rect`, a
@@ -1442,6 +1500,14 @@ fn walk(
             }
             _ => {}
         }
+    }
+}
+
+/// Close the innermost open admonition bracket, if any: an end marker with
+/// no bracket open closes nothing.
+fn close_bracket(stack: &mut Vec<Open>) {
+    if let Some(index) = stack.iter().rposition(|open| open.bracket) {
+        stack.remove(index);
     }
 }
 

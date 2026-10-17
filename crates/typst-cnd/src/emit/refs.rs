@@ -252,6 +252,10 @@ pub fn rebuild_label_index(ctx: &mut ConvertContext, introspector: &dyn Introspe
 
     for elem in introspector.query_labelled() {
         let Some(label) = elem.label() else { continue };
+        // The authoring package's admonition markers name no node.
+        if crate::emit::admonition::is_marker_label(label) {
+            continue;
+        }
         let Some(id) = resolve_label(label, ctx, introspector) else { continue };
         ctx.label_to_id.insert(label, id);
         if let Some(record) = ctx.records.get_mut(&id) {

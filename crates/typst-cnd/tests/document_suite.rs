@@ -1492,6 +1492,8 @@ fn example_files_exist() {
         "math_refs.typ",
         "doc_metadata.typ",
         "doc_metadata_markers.typ",
+        "admonitions.typ",
+        "admonition_across_pages.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -5019,4 +5021,274 @@ fn doc_markers_override_and_drop() {
         cnd.doc.extra.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     assert_eq!(extra, [("client", "Globex"), ("team", "Docs")]);
     assert_eq!(cnd.doc.title, "Marker rules");
+}
+
+/// Every admonition of the tree, in reading order, every slot entered.
+fn admonitions(nodes: &[CndNode]) -> Vec<&typst_cnd::AdmonitionNode> {
+    all_nodes(nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Admonition(admonition) => Some(admonition),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every text value of `nodes` and of everything nested in them.
+fn text_values(nodes: &[CndNode]) -> Vec<&str> {
+    all_texts(nodes).into_iter().map(|text| text.value.as_str()).collect()
+}
+
+#[test]
+fn admonition_holds_its_body() {
+    let cnd = cnd_for_example("admonitions.typ");
+    assert_cnd_contract(&cnd);
+    let all = admonitions(&cnd.nodes);
+    let warning = all
+        .iter()
+        .find(|admonition| admonition.kind == "warning")
+        .expect("the warning admonition");
+    assert_eq!(value(&warning.title), Some("Careful"));
+    assert_eq!(node_types(&warning.children), ["paragraph", "list"]);
+    assert_eq!(paragraph_values(&warning.children), ["Para one."]);
+    assert!(
+        !text_values(&warning.children)
+            .iter()
+            .any(|text| text.contains("Careful")),
+        "the title is not a body text: {:?}",
+        text_values(&warning.children)
+    );
+    // The title is a text of the admonition only: no paragraph repeats it.
+    assert!(
+        !paragraph_texts_in_order(&cnd.nodes)
+            .iter()
+            .any(|p| p.contains("Careful")),
+        "the title is not a paragraph"
+    );
+    let all_paragraphs: Vec<&str> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Paragraph(p) => Some(p.text.value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        all_paragraphs.iter().filter(|p| **p == "Para one.").count(),
+        1,
+        "the body paragraph is emitted once: {all_paragraphs:?}"
+    );
+    // The admonitions sit in the section, in reading order, between the
+    // paragraphs written around them.
+    let CndNode::Heading(section) = &cnd.nodes[0] else { panic!("a section") };
+    assert_eq!(
+        node_types(&section.children),
+        [
+            "paragraph",
+            "admonition",
+            "admonition",
+            "list",
+            "admonition",
+            "admonition",
+            "paragraph",
+            "figure"
+        ]
+    );
+    assert_eq!(
+        paragraph_values(&section.children),
+        ["Before the callouts.", "After the callouts."]
+    );
+}
+
+#[test]
+fn admonition_in_figure_is_its_child() {
+    // The figure's body holds a node, the admonition: it is no drawing.
+    let cnd = cnd_for_example("admonitions.typ");
+    let CndNode::Heading(section) = &cnd.nodes[0] else { panic!("a section") };
+    let Some(CndNode::Figure(figure)) = section.children.last() else {
+        panic!("the figure ends the section")
+    };
+    assert_eq!(figure.raw, None, "not a drawing");
+    assert_eq!(node_types(&figure.children), ["admonition"]);
+    let CndNode::Admonition(boxed) = &figure.children[0] else { unreachable!() };
+    assert_eq!(boxed.kind, "tip");
+    assert_eq!(paragraph_values(&boxed.children), ["A callout shown as a figure."]);
+}
+
+#[test]
+fn free_admonition_kind_passes_through() {
+    let cnd = cnd_for_example("admonitions.typ");
+    let example = admonitions(&cnd.nodes)
+        .into_iter()
+        .find(|admonition| admonition.kind == "example")
+        .expect("the free kind passes through");
+    assert_eq!(example.title, None, "no title given, none emitted");
+    assert_eq!(paragraph_values(&example.children), ["An example body."]);
+}
+
+#[test]
+fn nested_admonition_inside_list_item() {
+    let cnd = cnd_for_example("admonitions.typ");
+    let CndNode::Heading(section) = &cnd.nodes[0] else { panic!("a section") };
+    let list = section
+        .children
+        .iter()
+        .find_map(|node| match node {
+            CndNode::List(list) => Some(list),
+            _ => None,
+        })
+        .expect("the outer list");
+    let item = &list.items[0];
+    assert_eq!(node_types(&item.children), ["paragraph", "admonition"]);
+    let CndNode::Admonition(tip) = &item.children[1] else { unreachable!() };
+    assert_eq!(tip.kind, "tip");
+    assert_eq!(value(&tip.title), Some("Nested"));
+    assert_eq!(paragraph_values(&tip.children), ["Inside the item."]);
+
+    // An admonition in another's body is a child of it, between the
+    // paragraphs written around it.
+    let important = admonitions(&cnd.nodes)
+        .into_iter()
+        .find(|admonition| admonition.kind == "important")
+        .expect("the outer admonition");
+    assert_eq!(node_types(&important.children), ["paragraph", "admonition", "paragraph"]);
+    assert_eq!(paragraph_values(&important.children), ["Outer body.", "Outer tail."]);
+    let CndNode::Admonition(inner) = &important.children[1] else { unreachable!() };
+    assert_eq!(inner.kind, "note");
+    assert_eq!(paragraph_values(&inner.children), ["Inner body."]);
+}
+
+#[test]
+fn admonition_labels_never_leak() {
+    let cnd = cnd_for_example("admonitions.typ");
+    assert_labels_globally_unique(&cnd);
+    assert_refs_resolve(&cnd.nodes);
+    let labels: Vec<String> = all_nodes_full(&cnd)
+        .into_iter()
+        .filter_map(|node| node.base().label.clone())
+        .collect();
+    assert!(
+        !labels.iter().any(|label| label.starts_with("cnd-")),
+        "a marker label became a node label: {labels:?}"
+    );
+    // A label written on the call is on the content the helper returns, a
+    // sequence that is no node: it names nothing in the CND.
+    assert!(
+        !labels.iter().any(|label| label == "warn-1"),
+        "the call's label is no node's: {labels:?}"
+    );
+}
+
+#[test]
+fn admonition_title_is_a_label_text() {
+    let cnd = cnd_for_example("admonitions.typ");
+    let all = admonitions(&cnd.nodes);
+    let important = all
+        .iter()
+        .find(|admonition| admonition.kind == "important")
+        .expect("the titled admonition");
+    let title = important.title.as_ref().expect("a title");
+    assert_eq!(title.value, "A styled title");
+    let marks: Vec<(&str, i64, i64)> = title
+        .marks
+        .iter()
+        .map(|mark| (mark.kind.as_str(), mark.start, mark.end))
+        .collect();
+    assert_eq!(marks, [("emph", 2, 8)]);
+    assert_eq!(title.lang, None, "the document's language is inherited");
+
+    let foreign = all
+        .iter()
+        .find(|admonition| value(&admonition.title) == Some("Achtung"))
+        .expect("the foreign title");
+    assert_eq!(foreign.title.as_ref().unwrap().lang.as_deref(), Some("de"));
+    let body = first_paragraph(&foreign.children);
+    assert_eq!(body, "A body in the document's language.");
+    let CndNode::Paragraph(par) = &foreign.children[0] else { unreachable!() };
+    assert_eq!(par.text.lang, None, "the body keeps the document's language");
+}
+
+#[test]
+fn decorative_admonition_is_never_emitted() {
+    let cnd = cnd_for_example("admonitions.typ");
+    assert!(
+        !admonitions(&cnd.nodes)
+            .iter()
+            .any(|admonition| admonition.kind == "caution"),
+        "a decorative admonition yields no node"
+    );
+    let json = serde_json::to_string(&cnd).unwrap();
+    for word in ["Ornamental", "Hidden"] {
+        assert!(!json.contains(word), "decorative text {word:?} reached the CND");
+    }
+}
+
+#[test]
+fn admonition_across_pages_keeps_its_body() {
+    let cnd = cnd_for_example("admonition_across_pages.typ");
+    assert_cnd_contract(&cnd);
+    assert_eq!(node_types(&cnd.nodes), ["paragraph", "admonition", "paragraph"]);
+    assert_eq!(
+        paragraph_values(&cnd.nodes),
+        ["Opening paragraph.", "Closing paragraph."]
+    );
+    let CndNode::Admonition(long) = &cnd.nodes[1] else { unreachable!() };
+    assert_eq!(value(&long.title), Some("Long"));
+    let expected: Vec<String> = (1..=30)
+        .map(|i| format!("Body paragraph {i} of the long callout."))
+        .collect();
+    assert_eq!(paragraph_values(&long.children), expected);
+    assert_eq!(long.base.location.page, 1, "the node is on its start marker's page");
+    let pages: std::collections::BTreeSet<i32> =
+        long.children.iter().map(|node| node.base().location.page).collect();
+    assert!(pages.len() > 1, "the body spans pages: {pages:?}");
+    let CndNode::Paragraph(closing) = &cnd.nodes[2] else { unreachable!() };
+    assert!(closing.base.location.page > 1);
+    // With a single admonition, its marker's label is unambiguous: it must
+    // still name nothing.
+    assert_eq!(long.base.label, None);
+    assert!(
+        !all_nodes_full(&cnd).iter().any(|node| node.base().label.is_some()),
+        "no node of this document is labelled"
+    );
+}
+#[test]
+fn admonition_title_carries_its_edges() {
+    let cnd = cnd_for_example("admonitions.typ");
+    assert_refs_resolve(&cnd.nodes);
+    let inner = admonitions(&cnd.nodes)
+        .into_iter()
+        .find(|admonition| {
+            admonition.kind == "note"
+                && admonition.title.is_some()
+                && admonition.title.as_ref().unwrap().value.starts_with("See")
+        })
+        .expect("the admonition whose title refers and links");
+    let title = inner.title.as_ref().unwrap();
+    assert_eq!(title.value, "See and the guide");
+    // A reference met as authored has no text, so no span (as in a caption).
+    let refs: Vec<(&str, Option<&Vec<i64>>)> = title
+        .refs
+        .iter()
+        .map(|reference| (reference.label.as_str(), reference.text_span.as_ref()))
+        .collect();
+    assert_eq!(refs, [("fig-tip", None)]);
+    assert_eq!(title.links.len(), 1);
+    let link = &title.links[0];
+    assert_eq!(link.href, "https://example.com");
+    let span = link.text_span.as_ref().expect("a link span");
+    assert_eq!(codepoint_slice(&title.value, span), "the guide");
+    // The title's edges are its own: no other text carries them.
+    for node in all_nodes(&cnd.nodes) {
+        for text in node.texts() {
+            if std::ptr::eq(text, title) {
+                continue;
+            }
+            assert!(
+                !text.refs.iter().any(|reference| reference.label == "fig-tip"),
+                "another text refers to the figure: {:?}",
+                text.value
+            );
+            assert!(text.links.is_empty(), "another text links: {:?}", text.value);
+        }
+    }
 }

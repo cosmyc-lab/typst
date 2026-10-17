@@ -21,7 +21,8 @@ use uuid::Uuid;
 use crate::emit::ancestry::{Ancestry, SlotKey, SlotKind};
 use crate::emit::extract::{ExtractedMarker, LinkDest, MarkerKind};
 use crate::emit::{
-    code, extract, figure, heading, list, math, paragraph, quote, reading_order, table,
+    admonition, code, extract, figure, heading, list, math, paragraph, quote,
+    reading_order, table,
 };
 use crate::location::placeholder_location;
 use crate::model::{
@@ -312,6 +313,7 @@ const ROUTED: &[SlotKind] = &[
     SlotKind::QuoteBody,
     SlotKind::FigureBody,
     SlotKind::FootnoteBody,
+    SlotKind::AdmonitionBody,
 ];
 
 /// Active heading container while assembling a list of nodes.
@@ -322,7 +324,7 @@ struct HeadingFrame {
 }
 
 fn doc_selector() -> Selector {
-    Selector::Or(eco_vec![
+    let mut selectors = eco_vec![
         HeadingElem::ELEM.select(),
         ParElem::ELEM.select(),
         TableElem::ELEM.select(),
@@ -334,7 +336,11 @@ fn doc_selector() -> Selector {
         EnumElem::ELEM.select(),
         TermsElem::ELEM.select(),
         ImageElem::ELEM.select(),
-    ])
+    ];
+    // An admonition's start marker, so that it is ordered before its body
+    // by document position, not by where it is drawn.
+    selectors.extend(admonition::start_selector());
+    Selector::Or(selectors)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -591,6 +597,18 @@ pub fn convert_from_introspector(
         items.push((loc, elem));
     }
 
+    // An admonition is built from its start marker. One in a heading, a
+    // caption or an artifact is none.
+    if let Some(selector) = admonition::start_selector() {
+        for elem in introspector.query(&selector) {
+            let Some(loc) = elem.location() else { continue };
+            if ancestry.is_absorbed(loc) {
+                continue;
+            }
+            items.push((loc, elem));
+        }
+    }
+
     for elem in introspector.query(&RawElem::ELEM.select()) {
         let Some(raw) = elem.to_packed::<RawElem>() else { continue };
         if !raw.block.get(styles) {
@@ -687,8 +705,14 @@ pub fn convert_from_introspector(
             anchor: anchors.get(&location).copied(),
             drawing: content.is::<FigureElem>() && ancestry.is_drawing(location),
             // A text's language is written only where it differs from the
-            // document's, which every text inherits (spec §4.1).
-            lang: ancestry.lang_of(location).filter(|lang| *lang != doc_lang),
+            // document's, which every text inherits (spec §4.1). An
+            // admonition's text is its title, laid out in its own scope.
+            lang: if admonition::marker(&content).is_some() {
+                ancestry.label_lang_of(location)
+            } else {
+                ancestry.lang_of(location)
+            }
+            .filter(|lang| *lang != doc_lang),
         };
         if let Some(node) = dispatch(engine, introspector, &content, site, styles, ctx)? {
             nodes.push((location, node));
@@ -934,6 +958,9 @@ impl Assembler<'_> {
             CndNode::Quote(quote) => {
                 vec![(&mut quote.children, SlotKey::QuoteBody(location))]
             }
+            CndNode::Admonition(admonition) => {
+                vec![(&mut admonition.children, SlotKey::AdmonitionBody(location))]
+            }
             _ => return,
         };
         for (children, key) in slots {
@@ -1107,6 +1134,11 @@ fn dispatch(
         let (node, record) = table::convert(engine, introspector, table_elem, styles)?;
         ctx.register(node.base.id, record);
         CndNode::Table(node)
+    } else if admonition::marker(content) == Some(admonition::Marker::Start) {
+        let (node, record) =
+            admonition::convert(engine, introspector, content, site.lang)?;
+        ctx.register(node.base.id, record);
+        CndNode::Admonition(node)
     } else if let Some(grid) = content.to_packed::<GridElem>() {
         let Some(anchor) = site.anchor else { return Ok(None) };
         let (node, record) =

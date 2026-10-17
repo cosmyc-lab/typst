@@ -615,6 +615,17 @@ impl QuoteNode {
     }
 }
 
+impl AdmonitionNode {
+    pub fn new(id: Uuid, kind: String, location: NodeLocation) -> Self {
+        Self {
+            base: NodeBase::new(id, location),
+            kind,
+            title: None,
+            children: Vec::new(),
+        }
+    }
+}
+
 impl CodeNode {
     pub fn new(id: Uuid, text: String, location: NodeLocation) -> Self {
         Self {
