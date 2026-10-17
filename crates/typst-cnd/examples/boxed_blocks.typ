@@ -21,3 +21,12 @@ $ a + b $
 ```
 BR2 flow raw
 ```
+
+// A block quote whose show rule boxes its body is a node of its own; the
+// paragraph it sits in leaves it out, and the space before it.
+= Boxed quote in an item
+
+#[
+  #show quote: it => box(it.body)
+  - BQ1 item text #quote(block: true)[BQ2 boxed quote.]
+]

@@ -452,6 +452,7 @@ pub fn extract_rich(content: &Content, source: SourceLookup<'_>) -> Extracted {
         mut marks,
         pos,
         suppressed,
+        excluded_any,
         ..
     } = ctx;
     for frame in open {
@@ -474,13 +475,25 @@ pub fn extract_rich(content: &Content, source: SourceLookup<'_>) -> Extracted {
     }
     let mut spans: Vec<&mut Option<(i64, i64)>> =
         done.iter_mut().map(|marker| &mut marker.span).collect();
-    let marks = canonical_marks(pos, marks, &mut spans);
-    Extracted {
-        value: out.into(),
-        marks,
-        markers: done,
-        suppressed,
-    }
+    // An element left out at either end of the text leaves the space that
+    // separated it from the rest: trim it, re-basing marks and spans.
+    let (value, marks, len) = if excluded_any {
+        let wide: Vec<bool> =
+            spans.iter().map(|span| span.is_some_and(|(s, e)| s < e)).collect();
+        let (value, marks) = trim_rebase(&out, marks, &mut spans);
+        // A span that held only the trimmed space covers nothing now.
+        for (span, wide) in spans.iter_mut().zip(wide) {
+            if wide && span.is_some_and(|(s, e)| s == e) {
+                **span = None;
+            }
+        }
+        let len = value.chars().count() as i64;
+        (value, marks, len)
+    } else {
+        (out.into(), marks, pos)
+    };
+    let marks = canonical_marks(len, marks, &mut spans);
+    Extracted { value, marks, markers: done, suppressed }
 }
 
 #[derive(Default)]

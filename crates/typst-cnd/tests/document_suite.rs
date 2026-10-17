@@ -4320,6 +4320,23 @@ fn boxed_terms_math_and_raw_are_text_of_their_paragraph() {
 }
 
 #[test]
+fn a_paragraph_drops_the_space_before_a_quote_it_leaves_out() {
+    // A block quote boxed by its show rule is a node of its own: the item's
+    // paragraph leaves it out, and the space that separated them.
+    let cnd = cnd_for_example("boxed_blocks.typ");
+    let section = find_heading(&cnd.nodes, "Boxed quote in an item");
+    assert_eq!(node_types(&section.children), ["list"]);
+    let CndNode::List(list) = &section.children[0] else { unreachable!() };
+    let item = &list.items[0];
+    assert_eq!(node_types(&item.children), ["paragraph", "quote"]);
+    assert_eq!(item_text(item), "BQ1 item text");
+    assert_eq!(block_quotes(&item.children).len(), 1);
+    for text in ["BQ1", "BQ2 boxed quote."] {
+        assert_eq!(occurrences(&cnd, text), 1, "{text:?} is kept once");
+    }
+}
+
+#[test]
 fn a_broken_footnote_keeps_its_rest() {
     // The rest of a note too long for its page is printed on the next page
     // with no entry around it, while a list of the flow is open across the
