@@ -3913,6 +3913,119 @@ fn a_broken_row_in_a_grid_stays_in_its_cell() {
     assert!(pages.last() > pages.first(), "the grid breaks: {pages:?}");
 }
 
+/// The item paragraphs of the lists and term lists in the broken cell of
+/// the table or layout under `section`: one entry per container, each its
+/// items' paragraph values in order.
+fn broken_cell_items(
+    cnd: &typst_cnd::Cnd,
+    section: &str,
+) -> Vec<(&'static str, Vec<Vec<String>>)> {
+    let heading = find_heading(&cnd.nodes, section);
+    let cells = cells_of(&heading.children[0]);
+    assert!(!first_paragraph(&cells[0].children).is_empty());
+    cells[1]
+        .children
+        .iter()
+        .map(|node| {
+            let items: Vec<Vec<String>> = match node {
+                CndNode::List(list) => list
+                    .items
+                    .iter()
+                    .map(|item| {
+                        paragraph_values(&item.children)
+                            .into_iter()
+                            .map(String::from)
+                            .collect()
+                    })
+                    .collect(),
+                CndNode::Terms(terms) => terms
+                    .items
+                    .iter()
+                    .map(|item| {
+                        paragraph_values(&item.children)
+                            .into_iter()
+                            .map(String::from)
+                            .collect()
+                    })
+                    .collect(),
+                other => {
+                    panic!("{section}: a stray {} in the broken cell", node_type(other))
+                }
+            };
+            (node_type(node), items)
+        })
+        .collect()
+}
+
+#[test]
+fn tight_items_in_a_broken_row_keep_their_paragraphs() {
+    let cnd = cnd_for_example("tables_across_pages.typ");
+    for (section, name) in [
+        ("Broken row with tight items", "Table"),
+        ("Broken grid with tight items", "Grid"),
+    ] {
+        let heading = find_heading(&cnd.nodes, section);
+        let cells = cells_of(&heading.children[0]);
+        let pages: Vec<i32> = all_nodes(&cells[1].children)
+            .iter()
+            .map(|node| node.base().location.page)
+            .collect();
+        assert!(pages.last() > pages.first(), "{section}: the row breaks: {pages:?}");
+
+        let long = |middle: &str, repeat: usize, end: &str| {
+            format!("{}{end}", middle.repeat(repeat))
+        };
+        let expected = [
+            (
+                "list",
+                vec![
+                    vec![format!("{name} bullet one.")],
+                    vec![format!(
+                        "{name} bullet two {}",
+                        long("runs on and on ", 40, "until it ends.")
+                    )],
+                    vec![format!("{name} bullet three.")],
+                ],
+            ),
+            (
+                "list",
+                vec![
+                    vec![format!("{name} enum one.")],
+                    vec![format!(
+                        "{name} enum two {}",
+                        long("keeps going ", 30, "to its end.")
+                    )],
+                ],
+            ),
+            (
+                "terms",
+                vec![
+                    vec![format!(
+                        "{name} description {}",
+                        long("goes further ", 30, "to its close.")
+                    )],
+                    vec![format!("{name} short description.")],
+                ],
+            ),
+        ];
+        assert_eq!(broken_cell_items(&cnd, section), expected, "{section}");
+        for text in [
+            format!("{name} bullet one."),
+            format!("{name} bullet two"),
+            format!("{name} bullet three."),
+            format!("{name} enum one."),
+            format!("{name} enum two"),
+            format!("{name} description"),
+            format!("{name} short description."),
+        ] {
+            assert_eq!(occurrences(&cnd, &text), 1, "{text:?} is kept once");
+        }
+    }
+    // The paragraph after the grid is the section's.
+    let section = find_heading(&cnd.nodes, "Broken grid with tight items");
+    assert_eq!(node_types(&section.children), ["layout", "paragraph"]);
+}
+
 /// The block quotes of the body, in reading order.
 fn block_quotes(nodes: &[CndNode]) -> Vec<&typst_cnd::QuoteNode> {
     all_nodes(nodes)

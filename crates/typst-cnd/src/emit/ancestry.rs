@@ -337,6 +337,16 @@ impl Ancestry {
                 .map(|position| position.as_paged_or_default().point.x)
         };
         for (location, cells) in std::mem::take(&mut self.pending_fragments) {
+            // A slot set after the fragment was queued is not a cell's: a
+            // tight item's paragraph belongs to its item, whatever column
+            // the item is drawn in.
+            let still_cell = self
+                .slots
+                .get(&location)
+                .is_some_and(|slot| cells.iter().any(|(cell, _)| cell == slot));
+            if !still_cell {
+                continue;
+            }
             let Some(own) =
                 x(self.grid_anchors.get(&location).copied().unwrap_or(location))
             else {

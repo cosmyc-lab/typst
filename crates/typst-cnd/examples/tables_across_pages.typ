@@ -94,3 +94,34 @@
 )
 
 After the broken grid.
+
+// Tight lists, enums and term lists in a row that breaks across pages:
+// each item's single paragraph stays in its item, in order.
+#let tight-items(name) = [
+  - #name bullet one.
+  - #name bullet two #("runs on and on " * 40)until it ends.
+  - #name bullet three.
+  + #name enum one.
+  + #name enum two #("keeps going " * 30)to its end.
+  / #name term: #name description #("goes further " * 30)to its close.
+  / #name other: #name short description.
+]
+
+= Broken row with tight items
+
+#table(
+  columns: 2,
+  [Tight left.],
+  tight-items("Table"),
+)
+
+= Broken grid with tight items
+
+#grid(
+  columns: 2,
+  gutter: 6pt,
+  [Grid tight left.],
+  tight-items("Grid"),
+)
+
+After the tight grid.
