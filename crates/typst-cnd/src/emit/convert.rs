@@ -17,16 +17,13 @@ use typst_library::visualize::ImageElem;
 use typst_syntax::{FileId, Span};
 use uuid::Uuid;
 
-use crate::emit::ancestry::Ancestry;
+use crate::emit::ancestry::{Ancestry, SlotKey, SlotKind};
 use crate::emit::extract::{ExtractedMarker, LinkDest, MarkerKind};
 use crate::emit::{
     code, extract, figure, heading, list, math, paragraph, quote, reading_order, table,
 };
 use crate::location::placeholder_location;
-use crate::model::{
-    CndNode, HeadingNode, ListItem, ListNode, Numbering, ParagraphNode, RichText,
-    TextSlot,
-};
+use crate::model::{CndNode, HeadingNode, Numbering, ParagraphNode, RichText, TextSlot};
 
 /// A citation marker occurring in a node's content, captured for
 /// resolution into a `CiteRef` once the bibliography pool exists. `span`
@@ -187,9 +184,10 @@ impl Records {
 /// Builds the synthetic nodes that fill a container's slots: each gets its
 /// own id and a record with the container's location.
 ///
-/// Interim shape (until the container bodies are rebuilt from the realized
-/// layout): the container's span-less edges move to its first paragraph
-/// descendant, see [`Synthetic::attach_to_first_paragraph`].
+/// Interim shape for the containers whose slots are not routed yet (cells,
+/// quotes, figures, footnotes; see [`ROUTED`]): the container's span-less
+/// edges move to its first paragraph descendant, see
+/// [`Synthetic::attach_to_first_paragraph`].
 #[derive(Debug)]
 pub struct Synthetic {
     location: Option<Location>,
@@ -210,14 +208,6 @@ impl Synthetic {
     pub fn paragraph(&mut self, text: RichText) -> CndNode {
         let id = self.record();
         CndNode::Paragraph(ParagraphNode::new(id, text, placeholder_location()))
-    }
-
-    pub fn list(&mut self, ordered: bool, items: Vec<ListItem>) -> CndNode {
-        let id = self.record();
-        let mut list = ListNode::new(id, placeholder_location());
-        list.ordered = ordered;
-        list.items = items;
-        CndNode::List(list)
     }
 
     /// Give `text` to the first paragraph of the first slot (an item's or
@@ -330,11 +320,17 @@ impl ConvertContext {
     }
 }
 
-/// Active heading container while walking the document.
-pub struct HeadingFrame {
-    pub level: i32,
-    pub path: Vec<String>,
-    pub node: HeadingNode,
+/// The slot kinds whose content is routed into its container's node by
+/// [`assemble`]. The content of any other slot keeps its interim handling:
+/// it is skipped when its container carries the text, kept in the flow
+/// otherwise.
+const ROUTED: &[SlotKind] = &[SlotKind::Item, SlotKind::TermDescription];
+
+/// Active heading container while assembling a list of nodes.
+struct HeadingFrame {
+    level: i32,
+    path: Vec<String>,
+    node: HeadingNode,
 }
 
 fn doc_selector() -> Selector {
@@ -370,42 +366,59 @@ fn range_contains(outer: SourceRange, inner: SourceRange) -> bool {
     outer.file == inner.file && inner.start >= outer.start && inner.end <= outer.end
 }
 
-fn build_skip_ranges(
-    engine: &Engine,
-    introspector: &dyn Introspector,
-) -> Vec<SourceRange> {
-    let selectors = [
-        QuoteElem::ELEM.select(),
-        ListElem::ELEM.select(),
-        EnumElem::ELEM.select(),
-        TermsElem::ELEM.select(),
-        FigureElem::ELEM.select(),
-        // A heading show rule that re-emits `it.body` inside fresh markup
-        // (`it => [ … #text(…, it.body) … ]`) realizes an extra ParElem
-        // whose span is the heading's own body — inside the heading's
-        // source range, so this selector catches it the same way a quote's
-        // body paragraph is caught by the quote's range.
-        HeadingElem::ELEM.select(),
-    ];
-    let mut ranges = Vec::new();
-    for selector in selectors {
-        for elem in introspector.query(&selector) {
-            if let Some(range) = source_range(engine, elem.span()) {
-                ranges.push(range);
-            }
-        }
-    }
-    ranges
+/// The source ranges whose paragraphs are not nodes: those of the
+/// containers that carry their text themselves, and those of the headings.
+struct SkipRanges {
+    /// Quotes and figures. A list's or a term list's paragraphs are routed
+    /// into its items instead.
+    containers: Vec<SourceRange>,
+    /// A heading show rule that re-emits `it.body` inside fresh markup
+    /// (`it => [ … #text(…, it.body) … ]`) realizes an extra `ParElem` whose
+    /// span is the heading's own body — inside the heading's source range,
+    /// so this catches it the same way a quote's body paragraph is caught by
+    /// the quote's range. It applies inside a slot too.
+    headings: Vec<SourceRange>,
 }
 
-fn should_skip_paragraph(
+impl SkipRanges {
+    fn all(&self) -> impl Iterator<Item = &SourceRange> {
+        self.containers.iter().chain(&self.headings)
+    }
+}
+
+fn build_skip_ranges(engine: &Engine, introspector: &dyn Introspector) -> SkipRanges {
+    let ranges = |selectors: &[Selector]| {
+        let mut ranges = Vec::new();
+        for selector in selectors {
+            for elem in introspector.query(selector) {
+                if let Some(range) = source_range(engine, elem.span()) {
+                    ranges.push(range);
+                }
+            }
+        }
+        ranges
+    };
+    SkipRanges {
+        containers: ranges(&[QuoteElem::ELEM.select(), FigureElem::ELEM.select()]),
+        headings: ranges(&[HeadingElem::ELEM.select()]),
+    }
+}
+
+fn should_skip_paragraph<'a>(
     engine: &Engine,
     content: &Content,
-    skip_ranges: &[SourceRange],
+    mut skip_ranges: impl Iterator<Item = &'a SourceRange>,
 ) -> bool {
     source_range(engine, content.span()).is_some_and(|par_range| {
-        skip_ranges.iter().any(|outer| range_contains(*outer, par_range))
+        skip_ranges.any(|outer| range_contains(*outer, par_range))
     })
+}
+
+/// Whether the element at `location` is in a slot that [`assemble`] routes.
+fn is_routed(ancestry: &Ancestry, location: Location) -> bool {
+    ancestry
+        .slot_of(location)
+        .is_some_and(|slot| ROUTED.contains(&slot.kind()))
 }
 
 /// Build CND nodes from introspector queries (post-layout, stable locations).
@@ -439,7 +452,7 @@ pub fn convert_from_introspector(
     // that figure's child (figure::from_figure); one inside a table cell or
     // any other skipped container belongs to its container's text.
     let image_skip_ranges: Vec<SourceRange> = {
-        let mut ranges = skip_ranges.clone();
+        let mut ranges: Vec<SourceRange> = skip_ranges.all().copied().collect();
         for elem in introspector.query(&TableElem::ELEM.select()) {
             if let Some(range) = source_range(engine, elem.span()) {
                 ranges.push(range);
@@ -467,13 +480,15 @@ pub fn convert_from_introspector(
         items.push((loc, elem));
     }
 
-    // A list laid out inside another list, an enum, a definition list, a
-    // quote or a footnote entry is that node's content: nested items are its
-    // children, a description, a quote or the footnote pool carries the text.
+    // A list laid out inside a quote or a footnote entry is that quote's or
+    // the footnote pool's text (until their slots are routed too). One in a
+    // list item or a term's description is routed into it by `assemble`.
     for selector in [ListElem::ELEM.select(), EnumElem::ELEM.select()] {
         for elem in introspector.query(&selector) {
             let Some(loc) = elem.location() else { continue };
-            if ancestry.is_list_carried(loc) {
+            if ancestry.slot_of(loc).is_some_and(|slot| {
+                matches!(slot, SlotKey::QuoteBody(_) | SlotKey::FootnoteBody(_))
+            }) {
                 continue;
             }
             items.push((loc, elem));
@@ -518,14 +533,25 @@ pub fn convert_from_introspector(
             absorbed.push((parent, elem.clone()));
             continue;
         }
-        // Likewise for a paragraph inside a list, table, code block or
-        // equation: that container is emitted as its own node and renders
-        // this text itself.
-        if ancestry.is_in_emitted_container(loc) {
+        // A list item's marker, a footnote's number, a heading's body…
+        if ancestry.is_absorbed(loc) {
             continue;
         }
-        if should_skip_paragraph(engine, &elem, &skip_ranges) {
-            continue;
+        if is_routed(ancestry, loc) {
+            // A paragraph of a list item or a term's description is a node
+            // of that slot, whatever container is around the list.
+            if should_skip_paragraph(engine, &elem, skip_ranges.headings.iter()) {
+                continue;
+            }
+        } else {
+            // A paragraph inside a table, a quote, a figure or a footnote
+            // entry: that container renders this text itself.
+            if ancestry.is_in_emitted_container(loc) {
+                continue;
+            }
+            if should_skip_paragraph(engine, &elem, skip_ranges.all()) {
+                continue;
+            }
         }
         // A paragraph made only of text that belongs to another node (a
         // heading body re-emitted by a show rule, a boxed block quote) or to
@@ -546,21 +572,133 @@ pub fn convert_from_introspector(
 
     reading_order::sort_by_reading_order(&mut items, introspector, &doc_selector);
 
-    let mut stack: Vec<HeadingFrame> = Vec::new();
-    for (_, content) in items {
-        dispatch(
-            engine,
-            introspector,
-            &content,
-            styles,
-            doc_lang.as_deref(),
-            ctx,
-            &mut stack,
-        )?;
+    let mut nodes = Vec::with_capacity(items.len());
+    for (location, content) in items {
+        if let Some(node) =
+            dispatch(engine, introspector, &content, styles, doc_lang.as_deref(), ctx)?
+        {
+            nodes.push((location, node));
+        }
     }
+    ctx.roots = assemble(nodes, ancestry, ROUTED);
+    forget_dropped_nodes(ctx);
     absorb_covered_paragraphs(ctx, &absorbed);
-    finalize_headings(ctx, &mut stack);
     Ok(())
+}
+
+/// Forget the records of the nodes `assemble` dropped, so that no label,
+/// location or edge resolves to a node the document does not hold.
+fn forget_dropped_nodes(ctx: &mut ConvertContext) {
+    let mut kept = rustc_hash::FxHashSet::default();
+    crate::model::walk(&ctx.roots, &mut |node| {
+        kept.insert(node.id());
+    });
+    ctx.records.retain(|id, _| kept.contains(id));
+    ctx.location_to_id.retain(|_, id| kept.contains(id));
+    ctx.label_to_id.retain(|_, id| kept.contains(id));
+}
+
+/// Place each node into the list that holds it, in reading order.
+///
+/// A node in a slot of a kind in `routed` goes to its slot's owner: a list
+/// item's children, a term's description. Every other node takes the
+/// heading-stack path: it is a child of the heading it follows, or a root.
+/// Each slot's list runs a heading stack of its own, seeded with the path
+/// of the headings around its owner, so that a heading in a list item
+/// gathers the nodes after it in that item only, and its `heading_path`
+/// continues the section it sits in.
+///
+/// A node whose slot's owner yields no node — an artifact's list, a list a
+/// quote carries — is dropped with its slot, never re-parented.
+fn assemble(
+    items: Vec<(Location, CndNode)>,
+    ancestry: &Ancestry,
+    routed: &[SlotKind],
+) -> Vec<CndNode> {
+    let mut flow = Vec::new();
+    let mut slots: rustc_hash::FxHashMap<SlotKey, Vec<(Location, CndNode)>> =
+        rustc_hash::FxHashMap::default();
+    for (location, node) in items {
+        match ancestry.slot_of(location) {
+            Some(slot) if routed.contains(&slot.kind()) => {
+                slots.entry(slot).or_default().push((location, node));
+            }
+            _ => flow.push((location, node)),
+        }
+    }
+    // Whatever is left in `slots` afterwards belongs to an owner that was
+    // never placed: it is dropped.
+    Assembler { ancestry, slots }.nodes(flow, &[])
+}
+
+struct Assembler<'a> {
+    ancestry: &'a Ancestry,
+    slots: rustc_hash::FxHashMap<SlotKey, Vec<(Location, CndNode)>>,
+}
+
+impl Assembler<'_> {
+    /// Nest `items` under their headings, below the section `seed`.
+    fn nodes(
+        &mut self,
+        items: Vec<(Location, CndNode)>,
+        seed: &[String],
+    ) -> Vec<CndNode> {
+        let mut out = Vec::new();
+        let mut stack: Vec<HeadingFrame> = Vec::new();
+        for (location, node) in items {
+            match node {
+                CndNode::Heading(mut heading) => {
+                    while stack.last().is_some_and(|frame| frame.level >= heading.level) {
+                        let finished = stack.pop().unwrap();
+                        attach_heading(finished, &mut stack, &mut out);
+                    }
+                    let segment = heading.heading_path.pop().unwrap_or_default();
+                    let mut path = stack
+                        .last()
+                        .map_or_else(|| seed.to_vec(), |frame| frame.path.clone());
+                    path.push(segment);
+                    heading.heading_path = path.clone();
+                    stack.push(HeadingFrame {
+                        level: heading.level,
+                        path,
+                        node: heading,
+                    });
+                }
+                mut node => {
+                    let path = stack.last().map_or(seed, |frame| frame.path.as_slice());
+                    self.fill(location, &mut node, path);
+                    match stack.last_mut() {
+                        Some(parent) => parent.node.children.push(node),
+                        None => out.push(node),
+                    }
+                }
+            }
+        }
+        while let Some(frame) = stack.pop() {
+            attach_heading(frame, &mut stack, &mut out);
+        }
+        out
+    }
+
+    /// Fill the slots of `node`, laid out at `location` in the section
+    /// `path`, with the nodes routed into them.
+    fn fill(&mut self, location: Location, node: &mut CndNode, path: &[String]) {
+        let keys = self.ancestry.item_slots(location);
+        let slots: Vec<&mut Vec<CndNode>> = match node {
+            CndNode::List(list) => {
+                list.items.iter_mut().map(|item| &mut item.children).collect()
+            }
+            CndNode::Terms(terms) => {
+                terms.items.iter_mut().map(|item| &mut item.children).collect()
+            }
+            _ => return,
+        };
+        for (children, key) in slots.into_iter().zip(keys) {
+            if let Some(items) = self.slots.remove(key) {
+                *children = self.nodes(items, path);
+            }
+        }
+    }
 }
 
 /// Move the footnote and citation edges of a paragraph that was skipped as
@@ -594,6 +732,7 @@ fn absorb_covered_paragraphs(ctx: &mut ConvertContext, absorbed: &[(Location, Co
     }
 }
 
+/// Convert one element into its node, registering the records.
 fn dispatch(
     engine: &mut Engine,
     introspector: &dyn Introspector,
@@ -601,59 +740,61 @@ fn dispatch(
     styles: StyleChain,
     doc_lang: Option<&str>,
     ctx: &mut ConvertContext,
-    stack: &mut Vec<HeadingFrame>,
-) -> typst_library::diag::SourceResult<()> {
-    if let Some(heading) = content.to_packed::<HeadingElem>() {
-        emit_heading(engine, introspector, heading, styles, ctx, stack)?;
+) -> typst_library::diag::SourceResult<Option<CndNode>> {
+    let node = if let Some(heading) = content.to_packed::<HeadingElem>() {
+        let (node, record) = heading::convert(engine, introspector, heading, styles)?;
+        ctx.register(node.base.id, record);
+        CndNode::Heading(node)
     } else if let Some(par) = content.to_packed::<ParElem>() {
         let (node, record) =
             paragraph::convert(engine, introspector, par, styles, doc_lang)?;
         ctx.register(node.base.id, record);
-        push_node(CndNode::Paragraph(node), ctx, stack);
+        CndNode::Paragraph(node)
     } else if let Some(quote) = content.to_packed::<QuoteElem>() {
         let (node, records) =
             quote::convert(engine, introspector, quote, styles, doc_lang)?;
         ctx.register_records(records);
-        push_node(CndNode::Quote(node), ctx, stack);
+        CndNode::Quote(node)
     } else if let Some(list) = content.to_packed::<ListElem>() {
-        let (node, records) = list::from_list(engine, introspector, list, styles)?;
-        ctx.register_records(records);
-        push_node(CndNode::List(node), ctx, stack);
+        let (node, record) = list::from_list(engine, introspector, list)?;
+        ctx.register(node.base.id, record);
+        CndNode::List(node)
     } else if let Some(enum_) = content.to_packed::<EnumElem>() {
-        let (node, records) = list::from_enum(engine, introspector, enum_, styles)?;
-        ctx.register_records(records);
-        push_node(CndNode::List(node), ctx, stack);
+        let (node, record) = list::from_enum(engine, introspector, enum_, styles)?;
+        ctx.register(node.base.id, record);
+        CndNode::List(node)
     } else if let Some(terms) = content.to_packed::<TermsElem>() {
-        let (node, records) = list::from_terms(engine, introspector, terms)?;
-        ctx.register_records(records);
-        push_node(CndNode::Terms(node), ctx, stack);
+        let (node, record) = list::from_terms(engine, introspector, terms)?;
+        ctx.register(node.base.id, record);
+        CndNode::Terms(node)
     } else if let Some(raw) = content.to_packed::<RawElem>() {
         let (node, record) = code::convert(engine, introspector, raw, styles)?;
         ctx.register(node.base.id, record);
-        push_node(CndNode::Code(node), ctx, stack);
+        CndNode::Code(node)
     } else if let Some(equation) = content.to_packed::<EquationElem>() {
         let (node, record) = math::convert(engine, introspector, equation, styles)?;
         ctx.register(node.base.id, record);
-        push_node(CndNode::Math(node), ctx, stack);
+        CndNode::Math(node)
     } else if let Some(image) = content.to_packed::<ImageElem>() {
         let (node, record) =
             figure::bare_image(engine, introspector, content, image, styles)?;
         ctx.register(node.base.id, record);
-        push_node(CndNode::Image(node), ctx, stack);
+        CndNode::Image(node)
     } else if let Some(figure) = content.to_packed::<FigureElem>() {
         if let Some(table_content) = table::table_content_in(content) {
-            if let Some(table_elem) = table_content.to_packed::<TableElem>() {
-                let (node, records) = table::from_figure(
-                    engine,
-                    introspector,
-                    content,
-                    figure,
-                    table_elem,
-                    styles,
-                )?;
-                ctx.register_records(records);
-                push_node(CndNode::Figure(node), ctx, stack);
-            }
+            let Some(table_elem) = table_content.to_packed::<TableElem>() else {
+                return Ok(None);
+            };
+            let (node, records) = table::from_figure(
+                engine,
+                introspector,
+                content,
+                figure,
+                table_elem,
+                styles,
+            )?;
+            ctx.register_records(records);
+            CndNode::Figure(node)
         } else if let Some(grid) = table::grid_in_content(content) {
             let (node, records) = table::from_figure_grid(
                 engine,
@@ -664,67 +805,32 @@ fn dispatch(
                 styles,
             )?;
             ctx.register_records(records);
-            push_node(CndNode::Figure(node), ctx, stack);
+            CndNode::Figure(node)
         } else {
             let (node, records) =
                 figure::from_figure(engine, introspector, content, figure, styles)?;
             ctx.register_records(records);
-            push_node(CndNode::Figure(node), ctx, stack);
+            CndNode::Figure(node)
         }
     } else if let Some(table_elem) = content.to_packed::<TableElem>() {
         let (node, records) = table::convert(engine, introspector, table_elem, styles)?;
         ctx.register_records(records);
-        push_node(CndNode::Table(node), ctx, stack);
-    }
-    Ok(())
-}
-
-fn emit_heading(
-    engine: &mut Engine,
-    introspector: &dyn Introspector,
-    heading: &Packed<HeadingElem>,
-    styles: StyleChain,
-    ctx: &mut ConvertContext,
-    stack: &mut Vec<HeadingFrame>,
-) -> typst_library::diag::SourceResult<()> {
-    let level = heading.resolve_level(styles).get() as i32;
-
-    while stack.last().is_some_and(|frame| frame.level >= level) {
-        let finished = stack.pop().unwrap();
-        attach_heading(finished, ctx, stack);
-    }
-
-    let (node, record) = heading::convert(engine, introspector, heading, styles, stack)?;
-    ctx.register(node.base.id, record);
-    stack.push(HeadingFrame { level, path: node.heading_path.clone(), node });
-
-    Ok(())
+        CndNode::Table(node)
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(node))
 }
 
 fn attach_heading(
     frame: HeadingFrame,
-    ctx: &mut ConvertContext,
     stack: &mut [HeadingFrame],
+    out: &mut Vec<CndNode>,
 ) {
     let node = CndNode::Heading(frame.node);
-    if let Some(parent) = stack.last_mut() {
-        parent.node.children.push(node);
-    } else {
-        ctx.roots.push(node);
-    }
-}
-
-fn push_node(node: CndNode, ctx: &mut ConvertContext, stack: &mut [HeadingFrame]) {
-    if let Some(parent) = stack.last_mut() {
-        parent.node.children.push(node);
-    } else {
-        ctx.roots.push(node);
-    }
-}
-
-pub fn finalize_headings(ctx: &mut ConvertContext, stack: &mut Vec<HeadingFrame>) {
-    while let Some(frame) = stack.pop() {
-        attach_heading(frame, ctx, stack);
+    match stack.last_mut() {
+        Some(parent) => parent.node.children.push(node),
+        None => out.push(node),
     }
 }
 

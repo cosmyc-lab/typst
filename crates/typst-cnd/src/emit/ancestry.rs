@@ -13,6 +13,21 @@
 //! exact ancestry. Only whether a nested paragraph is part of the enclosing
 //! one needs a second signal; [`covering_par`] states it.
 //!
+//! The same walk finds each element's *slot*: the body of the innermost
+//! container it is laid out in (a list item, a term's description, a table
+//! cell, a quote, a figure, a footnote entry), see [`Ancestry::slot_of`].
+//! The tags that open them:
+//!
+//! - a list or enum item's body: `PdfMarkerTag` of kind `ListItemBody`. The
+//!   item elements' own tags are no help: the first item's wraps the whole
+//!   list, the others are empty. For a tight item whose body is a single
+//!   paragraph the nesting is inverted (`par > ListItemBody > text`): that
+//!   paragraph is the item's.
+//! - a term's description: `PdfMarkerTag` of kind `TermsItemBody`, which also
+//!   holds the term (`TermsItemLabel`) and the separator (an artifact);
+//! - a table or grid cell: the `TableCell` / `GridCell` tag;
+//! - a quote, a figure, a footnote entry: the element's own tag.
+//!
 //! [`Feature::CndSemantics`]: typst_library::Feature::CndSemantics
 
 use std::cell::OnceCell;
@@ -25,16 +40,86 @@ use typst_library::foundations::{
     Content, Element, NativeElement, SequenceElem, StyleChain,
 };
 use typst_library::introspection::{Introspector, Location, Tag};
-use typst_library::layout::{Frame, FrameItem, GroupItem, PlaceElem};
+use typst_library::layout::{Frame, FrameItem, GridCell, GroupItem, PlaceElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
     ArtifactElem, BibliographyElem, EnumElem, FigureElem, FootnoteEntry, HeadingElem,
-    ListElem, OutlineElem, ParElem, ParbreakElem, QuoteElem, TableElem, TermsElem,
+    ListElem, OutlineElem, ParElem, ParbreakElem, PdfMarkerTag, PdfMarkerTagKind,
+    QuoteElem, TableCell, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_syntax::{FileId, Span};
 
 use crate::emit::extract;
+
+/// The body of a container, which holds the nodes laid out in it. Each is
+/// keyed by the location of the tag that opens it (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SlotKey {
+    /// A list or enum item's body (`ListItemBody`).
+    Item(Location),
+    /// A term's description (`TermsItemBody`).
+    TermDescription(Location),
+    /// A table or grid cell.
+    Cell(Location),
+    /// A quote's body.
+    QuoteBody(Location),
+    /// A figure's body.
+    FigureBody(Location),
+    /// A footnote's entry, printed at the bottom of the page.
+    FootnoteBody(Location),
+    /// An admonition's body. No tag opens one yet.
+    #[allow(dead_code)]
+    AdmonitionBody(Location),
+}
+
+/// What kind of container a [`SlotKey`] is the body of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SlotKind {
+    Item,
+    TermDescription,
+    Cell,
+    QuoteBody,
+    FigureBody,
+    FootnoteBody,
+    AdmonitionBody,
+}
+
+impl SlotKey {
+    pub fn kind(&self) -> SlotKind {
+        match self {
+            Self::Item(_) => SlotKind::Item,
+            Self::TermDescription(_) => SlotKind::TermDescription,
+            Self::Cell(_) => SlotKind::Cell,
+            Self::QuoteBody(_) => SlotKind::QuoteBody,
+            Self::FigureBody(_) => SlotKind::FigureBody,
+            Self::FootnoteBody(_) => SlotKind::FootnoteBody,
+            Self::AdmonitionBody(_) => SlotKind::AdmonitionBody,
+        }
+    }
+
+    /// The slot that the tag `inner` opens, if any.
+    fn opened_by(inner: &Content, location: Location) -> Option<Self> {
+        let elem = inner.elem();
+        if let Some(marker) = inner.to_packed::<PdfMarkerTag>() {
+            match marker.kind {
+                PdfMarkerTagKind::ListItemBody => Some(Self::Item(location)),
+                PdfMarkerTagKind::TermsItemBody => Some(Self::TermDescription(location)),
+                _ => None,
+            }
+        } else if elem == TableCell::ELEM || elem == GridCell::ELEM {
+            Some(Self::Cell(location))
+        } else if elem == QuoteElem::ELEM {
+            Some(Self::QuoteBody(location))
+        } else if elem == FigureElem::ELEM {
+            Some(Self::FigureBody(location))
+        } else if elem == FootnoteEntry::ELEM {
+            Some(Self::FootnoteBody(location))
+        } else {
+            None
+        }
+    }
+}
 
 /// Which of a laid-out element's ancestors matter to the emit pipeline.
 #[derive(Debug, Default)]
@@ -49,14 +134,18 @@ pub struct Ancestry {
     /// marks as "not document content".
     in_artifact: FxHashSet<Location>,
     /// Elements that sit inside a container the emit pipeline turns into a
-    /// node of its own — a list, a table, a code block, an equation. Such a
+    /// node of its own — a table, a quote, a code block, an equation. Such a
     /// node renders its own children, so a paragraph found inside one is that
     /// container's content seen a second time. Only a container that the
     /// element is written in counts (see [`Open::encloses`]).
     in_container: FxHashSet<Location>,
-    /// Elements whose text is carried by an enclosing node, so that a list
-    /// among them is not a node of its own. See [`list_scope`].
-    list_carried: FxHashSet<Location>,
+    /// Each element's innermost slot, see [`Ancestry::slot_of`].
+    slots: FxHashMap<Location, SlotKey>,
+    /// Each list's, enum's or term list's item slots, in order.
+    item_slots: FxHashMap<Location, Vec<SlotKey>>,
+    /// Elements laid out inside something that already carries their text,
+    /// see [`Ancestry::is_absorbed`].
+    absorbed: FxHashSet<Location>,
 }
 
 impl Ancestry {
@@ -104,24 +193,49 @@ impl Ancestry {
     }
 
     /// Whether `location` sits inside a container that is emitted as its own
-    /// node — a list item's marker and body, a table cell, the lines of a code
-    /// block, an equation's numbering.
+    /// node and renders the text itself — a table cell, a quote, a figure,
+    /// a footnote entry, the lines of a code block, an equation's numbering.
+    /// A list's or a term list's content is not: it is routed into their
+    /// slots (see [`Ancestry::slot_of`]).
     pub fn is_in_emitted_container(&self, location: Location) -> bool {
         self.in_container.contains(&location)
     }
 
-    /// Whether a list at `location` has its text carried by an enclosing
-    /// node — a list, an enum, a definition list, a quote, or the footnote
-    /// pool — and so is not a node of its own.
-    pub fn is_list_carried(&self, location: Location) -> bool {
-        self.list_carried.contains(&location)
+    /// The innermost slot enclosing the element at `location`: the body of
+    /// the container whose node holds it.
+    ///
+    /// Only a container the element is written in counts (see
+    /// [`Open::encloses`]): a float drawn inside a container it is not
+    /// written in does not join it. A float's body drawn before the slot it
+    /// is written in opens — on an earlier page, while the list is open
+    /// around it — takes the slot open where its `place` is written.
+    pub fn slot_of(&self, location: Location) -> Option<SlotKey> {
+        self.slots.get(&location).copied()
+    }
+
+    /// The item slots of the list, enum or term list at `location`, in the
+    /// order its items are laid out.
+    pub fn item_slots(&self, location: Location) -> &[SlotKey] {
+        self.item_slots.get(&location).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether the element at `location` is laid out inside something that
+    /// carries its text already, or that carries none: a list item's marker
+    /// (`ListItemLabel`), a term (`TermsItemLabel`), a footnote's number (a
+    /// `Label` marker), a heading, a code block, an equation, the outline,
+    /// the bibliography, or an artifact. A paragraph found there is never a
+    /// node.
+    pub fn is_absorbed(&self, location: Location) -> bool {
+        self.absorbed.contains(&location) || self.is_artifact(location)
     }
 }
 
 /// Whether a paragraph laid out inside `elem` is a second copy of text the
 /// document already carries elsewhere. Layout-only containers — a bare
 /// `grid`, a `block`, a `place` — are deliberately absent: they produce no
-/// node, so their paragraphs are the only carrier of that text.
+/// node, so their paragraphs are the only carrier of that text. So are
+/// lists and term lists: their items' paragraphs are routed into their
+/// slots.
 ///
 /// Two kinds qualify. Most are emitted as a node that renders its own
 /// content, so a paragraph inside is that content seen twice. The outline is
@@ -130,9 +244,6 @@ impl Ancestry {
 fn is_emitted_container(elem: Element) -> bool {
     elem == HeadingElem::ELEM
         || elem == QuoteElem::ELEM
-        || elem == ListElem::ELEM
-        || elem == EnumElem::ELEM
-        || elem == TermsElem::ELEM
         || elem == RawElem::ELEM
         || elem == EquationElem::ELEM
         || elem == FigureElem::ELEM
@@ -150,41 +261,30 @@ fn is_emitted_container(elem: Element) -> bool {
         || elem == OutlineElem::ELEM
 }
 
-/// What an element does to the text of a list laid out inside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ListScope {
-    /// Nothing: the decision is up to an element further out.
-    Transparent,
-    /// It carries the list's text: a list or an enum (as an item's
-    /// children), a definition list (a description's text), a quote (its
-    /// text), a footnote entry (the `footnotes` pool).
-    Carrier,
-    /// It ends the search, and the list is a node of its own. A figure keeps
-    /// only its caption, so a list inside it is that text's only carrier.
-    Barrier,
+/// Whether a paragraph laid out inside `inner` is absorbed (see
+/// [`Ancestry::is_absorbed`]). Artifacts are left to [`DrawScope`]: what is
+/// open around a float's body has nothing to do with it.
+fn absorbs(inner: &Content) -> bool {
+    if let Some(marker) = inner.to_packed::<PdfMarkerTag>() {
+        return matches!(
+            marker.kind,
+            PdfMarkerTagKind::ListItemLabel
+                | PdfMarkerTagKind::TermsItemLabel
+                | PdfMarkerTagKind::Label
+        );
+    }
+    let elem = inner.elem();
+    elem == HeadingElem::ELEM
+        || elem == RawElem::ELEM
+        || elem == EquationElem::ELEM
+        || elem == OutlineElem::ELEM
+        || elem == BibliographyElem::ELEM
 }
 
-/// The nearest enclosing element that is not transparent decides whether a
-/// list is carried: a list inside a figure inside a list item is the
-/// figure's, not the item's.
-///
-/// Only elements that enclose the list in the source count (see
-/// [`Open::encloses`]): a float's body is drawn away from its tags, possibly
-/// while a list written elsewhere is still open around it.
-fn list_scope(inner: &Content) -> ListScope {
+/// Whether `inner` owns item slots: a list, an enum or a term list.
+fn owns_items(inner: &Content) -> bool {
     let elem = inner.elem();
-    if elem == ListElem::ELEM
-        || elem == EnumElem::ELEM
-        || elem == TermsElem::ELEM
-        || elem == QuoteElem::ELEM
-        || elem == FootnoteEntry::ELEM
-    {
-        ListScope::Carrier
-    } else if elem == FigureElem::ELEM {
-        ListScope::Barrier
-    } else {
-        ListScope::Transparent
-    }
+    elem == ListElem::ELEM || elem == EnumElem::ELEM || elem == TermsElem::ELEM
 }
 
 /// Whether `inner` is a `place` that floats. Materialized, so `float` holds
@@ -212,6 +312,8 @@ struct Float {
     /// The elements open where the `place` is written: what it really sits
     /// in, unlike what is open where its body is drawn.
     ancestors: FxHashSet<Location>,
+    /// The innermost slot open where the `place` is written.
+    slot: Option<SlotKey>,
 }
 
 impl Float {
@@ -252,7 +354,7 @@ impl Float {
 fn floats(
     frame: &Frame,
     engine: &Engine,
-    open: &mut Vec<Location>,
+    open: &mut Vec<(Location, Option<SlotKey>)>,
     out: &mut Vec<Float>,
 ) {
     for (_, item) in frame.items() {
@@ -266,16 +368,17 @@ fn floats(
                         range: float_range(engine, inner),
                         body: body_spans(&place.body),
                         text: paragraphs_text(&place.body),
-                        ancestors: open.iter().copied().collect(),
+                        ancestors: open.iter().map(|(location, _)| *location).collect(),
+                        slot: open.iter().rev().find_map(|(_, slot)| *slot),
                     });
                 }
                 if let Some(location) = inner.location() {
-                    open.push(location);
+                    open.push((location, SlotKey::opened_by(inner, location)));
                 }
             }
             // As in `walk`, pop to the matching start.
             FrameItem::Tag(Tag::End(location, ..)) => {
-                if let Some(index) = open.iter().rposition(|open| open == location) {
+                if let Some(index) = open.iter().rposition(|(open, _)| open == location) {
                     open.truncate(index);
                 }
             }
@@ -474,7 +577,12 @@ struct Open {
     par: Option<OpenPar>,
     is_artifact: bool,
     is_container: bool,
-    list_scope: ListScope,
+    /// The slot this element opens, if any.
+    slot: Option<SlotKey>,
+    /// Whether a paragraph inside it is absorbed (see [`absorbs`]).
+    absorbs: bool,
+    /// Whether it owns item slots (see [`owns_items`]).
+    owns_items: bool,
     /// Glyph runs drawn for this paragraph inside / outside artifact-marked
     /// content. A paragraph all of whose glyphs are drawn inside an artifact
     /// is page furniture, whichever way the two tags happen to nest.
@@ -663,11 +771,11 @@ impl FloatPlaces {
 ///
 /// A float's body is not drawn between its `place` tags but in a group of its
 /// own, at the top or bottom of the page, which layout marks with the float
-/// as its logical parent ([`FrameParent`]). Inside that group, what is open
+/// as its logical parent (`FrameParent`). Inside that group, what is open
 /// on the stack from the page's flow — a long artifact still open across the
 /// page break, say — has nothing to do with the body: the body is decorative
 /// exactly when its `place` was written inside an artifact (see
-/// [`decorative_floats`]), or when an artifact opens inside the body itself.
+/// [`FloatPlaces`]), or when an artifact opens inside the body itself.
 #[derive(Debug, Clone, Copy)]
 struct DrawScope {
     /// Inside the body of a float written inside an artifact.
@@ -717,7 +825,22 @@ fn walk(
             FrameItem::Tag(Tag::Start(inner, _)) => {
                 let Some(location) = inner.location() else { continue };
                 let is_par = inner.elem() == ParElem::ELEM;
-                let in_floats = floats.holding(inner.span()).to_vec();
+                let opens = SlotKey::opened_by(inner, location);
+                let mut in_floats = floats.holding(inner.span()).to_vec();
+                // A marker is made by layout, often with no span of its own:
+                // it sits wherever what made it does. An item's body sits
+                // where its list does, any other marker where its parent does.
+                if inner.is::<PdfMarkerTag>() && in_floats.is_empty() {
+                    let maker = match opens {
+                        Some(SlotKey::Item(_) | SlotKey::TermDescription(_)) => {
+                            stack.iter().rev().find(|open| open.owns_items)
+                        }
+                        _ => stack.last(),
+                    };
+                    if let Some(maker) = maker {
+                        in_floats = maker.floats.clone();
+                    }
+                }
 
                 let par = is_par.then(|| {
                     let mut par = OpenPar {
@@ -766,13 +889,31 @@ fn walk(
                 }
                 if stack
                     .iter()
-                    .rev()
-                    .filter(|open| open.encloses(floats, &in_floats))
-                    .map(|open| open.list_scope)
-                    .find(|scope| *scope != ListScope::Transparent)
-                    == Some(ListScope::Carrier)
+                    .any(|open| open.absorbs && open.encloses(floats, &in_floats))
                 {
-                    ancestry.list_carried.insert(location);
+                    ancestry.absorbed.insert(location);
+                }
+                if let Some(slot) = innermost_slot(stack, floats, &in_floats) {
+                    ancestry.slots.insert(location, slot);
+                }
+
+                let slot = opens;
+                if let Some(slot) = slot
+                    && matches!(slot, SlotKey::Item(_) | SlotKey::TermDescription(_))
+                {
+                    // An item's body belongs to the innermost list around it:
+                    // the list's own layout makes the tag, so no float can be
+                    // drawn in between.
+                    if let Some(owner) = stack.iter().rev().find(|open| open.owns_items) {
+                        ancestry.item_slots.entry(owner.location).or_default().push(slot);
+                    }
+                    // A tight item's single paragraph opens around its body:
+                    // that paragraph is the item's.
+                    if let Some(parent) = stack.last()
+                        && parent.par.is_some()
+                    {
+                        ancestry.slots.insert(parent.location, slot);
+                    }
                 }
 
                 stack.push(Open {
@@ -781,7 +922,9 @@ fn walk(
                     par,
                     is_artifact: inner.elem() == ArtifactElem::ELEM,
                     is_container: is_emitted_container(inner.elem()),
-                    list_scope: list_scope(inner),
+                    slot,
+                    absorbs: absorbs(inner),
+                    owns_items: owns_items(inner),
                     glyphs_in_artifact: 0,
                     glyphs_outside_artifact: 0,
                     is_text_node: is_par || is_text_node(inner),
@@ -817,6 +960,25 @@ fn walk(
             _ => {}
         }
     }
+}
+
+/// The innermost slot enclosing an element held by `held_by` (see
+/// [`Floats::holding`]): the innermost open slot that encloses it (see
+/// [`Open::encloses`]) or, for a float's body, the slot open where the float
+/// is written. A float's body can be drawn before that slot opens — on an
+/// earlier page, while its list is already open — and then only the
+/// float's own record says where it belongs.
+fn innermost_slot(stack: &[Open], floats: &Floats, held_by: &[usize]) -> Option<SlotKey> {
+    let written_in = held_by.iter().find_map(|index| floats.all[*index].slot);
+    for open in stack.iter().rev().filter(|open| open.encloses(floats, held_by)) {
+        let Some(slot) = open.slot else { continue };
+        // A slot inside the float's body is the element's own. One the
+        // float is written in may have a deeper one that is not open yet.
+        let in_body =
+            held_by.is_empty() || held_by.iter().any(|index| open.floats.contains(index));
+        return if in_body { Some(slot) } else { written_in.or(Some(slot)) };
+    }
+    written_in
 }
 
 /// A half-open byte range in one source file.

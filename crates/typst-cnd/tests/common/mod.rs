@@ -461,3 +461,37 @@ pub fn outer_lists(nodes: &[CndNode]) -> Vec<&ListNode> {
         .filter(|list| !nested.contains(&list.base.id))
         .collect()
 }
+
+/// A node's `type`, as the format names it.
+pub fn node_type(node: &CndNode) -> &'static str {
+    match node {
+        CndNode::Heading(_) => "heading",
+        CndNode::Paragraph(_) => "paragraph",
+        CndNode::Quote(_) => "quote",
+        CndNode::Code(_) => "code",
+        CndNode::Math(_) => "math",
+        CndNode::Image(_) => "image",
+        CndNode::Figure(_) => "figure",
+        CndNode::Admonition(_) => "admonition",
+        CndNode::List(_) => "list",
+        CndNode::Terms(_) => "terms",
+        CndNode::Table(_) => "table",
+        CndNode::Layout(_) => "layout",
+    }
+}
+
+/// The types of `nodes`, in order.
+pub fn node_types(nodes: &[CndNode]) -> Vec<&'static str> {
+    nodes.iter().map(node_type).collect()
+}
+
+/// The values of the paragraphs among `nodes` (not nested ones), in order.
+pub fn paragraph_values(nodes: &[CndNode]) -> Vec<&str> {
+    nodes
+        .iter()
+        .filter_map(|node| match node {
+            CndNode::Paragraph(p) => Some(p.text.value.as_str()),
+            _ => None,
+        })
+        .collect()
+}

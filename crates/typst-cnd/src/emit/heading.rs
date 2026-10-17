@@ -4,18 +4,20 @@ use typst_library::foundations::{Packed, StyleChain};
 use typst_library::introspection::Introspector;
 use typst_library::model::HeadingElem;
 
-use crate::emit::convert::{self, HeadingFrame, NodeRecord};
+use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::extract_with_markers;
 use crate::location::placeholder_location;
 use crate::model::{HeadingNode, RichText};
 
 /// Convert a realized heading element into a CND heading node.
+///
+/// Its `heading_path` holds its own segment only: the path of the section
+/// it sits in is prepended where it is placed (`convert::assemble`).
 pub fn convert(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     heading: &Packed<HeadingElem>,
     styles: StyleChain,
-    stack: &[HeadingFrame],
 ) -> typst_library::diag::SourceResult<(HeadingNode, NodeRecord)> {
     let level = heading.resolve_level(styles).get() as i32;
     // Typst yields an empty string for an unnumbered heading; the format has
@@ -28,11 +30,7 @@ pub fn convert(
         ecow::eco_format!("{numbering} {text}")
     };
 
-    let mut heading_path: Vec<String> = stack
-        .iter()
-        .map(|frame| frame.path.last().cloned().unwrap_or_default())
-        .collect();
-    heading_path.push(segment.into());
+    let heading_path = vec![segment.into()];
 
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();

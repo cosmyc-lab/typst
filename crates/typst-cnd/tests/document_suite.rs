@@ -6,8 +6,9 @@ use common::{
     assert_pool_refs_resolve, assert_refs_resolve, assert_tag_sequence,
     assert_unique_ids, cnd_for_example, codepoint_slice, compile_example, example_path,
     find_by_label, find_lists, first_paragraph, footnote_text, heading_texts,
-    incoming_count, item_text, label_exists, nested_items, nested_lists, outer_lists,
-    paragraph_texts_in_order, table_stats, tags_under_heading, walk_nodes,
+    incoming_count, item_text, label_exists, nested_items, nested_lists, node_type,
+    node_types, outer_lists, paragraph_texts_in_order, paragraph_values, table_stats,
+    tags_under_heading, walk_nodes,
 };
 use typst_cnd::{CndNode, ListItem, RichText, cnd_to_json};
 
@@ -825,10 +826,24 @@ fn terms_definition_lists() {
     let mut stats = NodeStats::default();
     walk_nodes(&cnd.nodes, &mut stats);
 
-    // Two definition lists, and the list nested in a term description must
-    // NOT also surface as a standalone list node (proposal 0004 dedup).
+    // Two definition lists. The list nested in a term description is a node
+    // of that description, never also one of the flow.
     assert_eq!(stats.terms, 2);
-    assert_eq!(stats.lists, 0, "nested list must inline into the term, not emit a node");
+    assert_eq!(stats.lists, 1, "the nested list is one node, in the term");
+    let flow_lists = |nodes: &[CndNode]| -> usize {
+        fn count(nodes: &[CndNode]) -> usize {
+            nodes
+                .iter()
+                .map(|node| match node {
+                    CndNode::List(_) => 1,
+                    CndNode::Heading(h) => count(&h.children),
+                    _ => 0,
+                })
+                .sum()
+        }
+        count(nodes)
+    };
+    assert_eq!(flow_lists(&cnd.nodes), 0, "the nested list is not a flow node");
 
     let terms: Vec<&CndNode> = all_nodes(&cnd.nodes)
         .into_iter()
@@ -851,11 +866,16 @@ fn terms_definition_lists() {
     assert_eq!(wide.items.len(), 3);
     let consumer = &wide.items[1];
     assert_eq!(consumer.term.value, "consumer");
-    let description = first_paragraph(&consumer.children);
-    assert!(
-        description.contains("the search indexer")
-            && description.contains("export tooling"),
-        "nested list content is inlined into the term description: {description:?}"
+    assert_eq!(node_types(&consumer.children), ["paragraph", "list"]);
+    assert_eq!(
+        first_paragraph(&consumer.children),
+        "A reader of the manifest. Consumers include:"
+    );
+    let CndNode::List(nested) = &consumer.children[1] else { unreachable!() };
+    assert!(!nested.ordered);
+    assert_eq!(
+        nested.items.iter().map(item_text).collect::<Vec<_>>(),
+        ["the search indexer", "the agent orchestrator", "export tooling"]
     );
 
     assert_refs_resolve(&cnd.nodes);
@@ -1194,8 +1214,9 @@ fn markers_in_non_flat_nodes_do_not_leak_or_span() {
     assert_eq!(cnd.footnotes.len(), 1);
     assert!(footnote_text(&cnd.footnotes[0]).contains("inside a list item"));
 
-    // Leak guard: the footnote body must not bleed into the list item text
-    // (the item body is text-extracted unrealized; ADR 0013 leak fix).
+    // Leak guard: the footnote body must not bleed into the list item text.
+    // The item's paragraph is realized, so it holds the rendered marker, and
+    // the edge sits on it with a span over that marker.
     let lists = find_lists(&cnd.nodes);
     let list = lists.first().expect("a bullet list");
     let carrier = list
@@ -1205,9 +1226,13 @@ fn markers_in_non_flat_nodes_do_not_leak_or_span() {
         .expect("the footnote-carrying item");
     assert_eq!(
         item_text(carrier),
-        "An item carrying a footnote.",
+        "An item carrying a footnote.1",
         "the footnote body must not leak into the list item text"
     );
+    let CndNode::Paragraph(paragraph) = &carrier.children[0] else { unreachable!() };
+    assert_eq!(paragraph.text.footnotes.len(), 1);
+    let span = paragraph.text.footnotes[0].text_span.as_ref().expect("a span");
+    assert_eq!(codepoint_slice(&paragraph.text.value, span), "1");
 
     assert_pool_refs_resolve(&cnd);
 }
@@ -1264,6 +1289,7 @@ fn example_files_exist() {
         "quote_with_list.typ",
         "figure_raw.typ",
         "figure_helper_drawing.typ",
+        "containers_lists.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1293,6 +1319,22 @@ fn heading_show_rules_do_not_duplicate_headings_as_paragraphs() {
             "heading {heading:?} duplicated as a paragraph: {paragraphs:?}"
         );
     }
+    // Each heading holds its own paragraph, and nothing else of text.
+    let shapes: Vec<(String, Vec<&str>)> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Heading(h) => Some((h.text.value.clone(), node_types(&h.children))),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        [
+            ("1. Overview".to_string(), vec!["paragraph", "heading"]),
+            ("1.1 Details".to_string(), vec!["paragraph"]),
+            ("2. Operations".to_string(), vec!["paragraph"]),
+        ]
+    );
 }
 
 /// Paragraphs are deduplicated by element identity: a paragraph that merely
@@ -1632,28 +1674,24 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
         position_link_paragraph.text.refs
     );
 
-    // Non-flat node (a list item): the span fallback rule ("nodes whose
-    // text is not a single flat string emit `text_span: None`") now also
-    // applies to `links` — generalised from the same rule already in force
-    // for `refs` (refs.rs). The list's span-less edges sit on a paragraph of
-    // its items.
+    // A link inside a list item: the item's body is a realized paragraph of
+    // its own (CND 0.5), so the edge sits on that paragraph with a span, like
+    // any other paragraph's.
     let lists = find_lists(&cnd.nodes);
     let list = lists.first().expect("the bullet list");
-    let list_links: Vec<_> = list
-        .items
+    let list_paragraphs: Vec<&RichText> =
+        list.items.iter().flat_map(|item| all_texts(&item.children)).collect();
+    let (list_text, list_link) = list_paragraphs
         .iter()
-        .flat_map(|item| all_texts(&item.children))
-        .flat_map(|text| text.links.iter())
-        .collect();
-    let list_link = list_links
-        .iter()
-        .find(|l| l.href == "https://example.com/list")
-        .unwrap_or_else(|| panic!("expected a links entry in {list_links:?}"));
-    assert!(
-        list_link.text_span.is_none(),
-        "a link inside a non-flat node must carry a null span, got {:?}",
-        list_link.text_span
-    );
+        .find_map(|text| {
+            text.links
+                .iter()
+                .find(|l| l.href == "https://example.com/list")
+                .map(|link| (text, link))
+        })
+        .unwrap_or_else(|| panic!("expected a links entry in {list_paragraphs:?}"));
+    let span = list_link.text_span.as_ref().expect("a link in an item is spanned");
+    assert_eq!(codepoint_slice(&list_text.value, span), "here");
 
     // A paragraph-initial body that splits into two paragraphs (Critical 1's
     // finding): the link opens the block with no leading text before it, so
@@ -1751,6 +1789,9 @@ fn nested_list_items_are_children_of_their_parent() {
         [("NA5 grandchild", None)]
     );
     assert!(nested_lists(nested_items(&a.items[1])[0]).is_empty());
+    assert_eq!(node_types(&a.items[0].children), ["paragraph"]);
+    assert_eq!(node_types(&a.items[1].children), ["paragraph", "list"]);
+    assert_eq!(node_types(&nested_items(&a.items[1])[1].children), ["paragraph", "list"]);
 
     // Bullets under an enum.
     let b = list_starting_with(&lists, "NB1");
@@ -1773,6 +1814,7 @@ fn nested_list_items_are_children_of_their_parent() {
         [("NC2 enum at five", Some(5)), ("NC3 enum at six", Some(6))]
     );
     assert!(nested_lists(&c.items[0]).iter().all(|list| list.ordered));
+    assert_eq!(node_types(&c.items[0].children), ["paragraph", "list"]);
 
     // An enum under a bullet, started at 5 by explicit markup.
     let d = list_starting_with(&lists, "ND1");
@@ -1785,6 +1827,7 @@ fn nested_list_items_are_children_of_their_parent() {
     // An explicit `#list` call inside an item.
     let e = list_starting_with(&lists, "NE1");
     assert_eq!(item_summary(&e.items), [("NE1 explicit list inside", None)]);
+    assert_eq!(node_types(&e.items[0].children), ["paragraph", "list"]);
     assert_eq!(
         item_summary(nested_items(&e.items[0])),
         [("NE2 explicit child", None), ("NE3 explicit child", None)]
@@ -1859,6 +1902,24 @@ fn lists_in_floats_beside_open_lists_are_kept_once() {
             assert!(
                 texts.iter().any(|text| text.contains(token)),
                 "{name}: {token} must be carried by a list node"
+            );
+        }
+        // The open lists' items hold their own paragraph only: the float's
+        // list is not routed into whichever item is open where it is drawn.
+        let open_items: Vec<&ListItem> = find_lists(&cnd.nodes)
+            .into_iter()
+            .flat_map(|list| list.items.iter())
+            .filter(|item| {
+                item_text(item).starts_with("PA") || item_text(item).starts_with("QA")
+            })
+            .collect();
+        assert_eq!(open_items.len(), 2 * (last + 1), "{name}");
+        for item in open_items {
+            assert_eq!(
+                node_types(&item.children),
+                ["paragraph"],
+                "{name}: {}",
+                item_text(item)
             );
         }
     }
@@ -1937,6 +1998,15 @@ fn a_float_written_in_a_list_item_is_kept_once() {
     let cnd = cnd_for_example("float_in_list_item.typ");
     let counts = word_counts(&cnd);
     assert_eq!(counts.get("FIL1").copied().unwrap_or(0), 1, "FIL1 must appear once");
+    // Its paragraph is a child of the item it is written in, drawn on an
+    // earlier page than that item's body.
+    let lists = outer_lists(&cnd.nodes);
+    let list = list_starting_with(&lists, "First item");
+    assert_eq!(list.items.len(), 3);
+    let second = paragraph_values(&list.items[1].children);
+    assert_eq!(second.len(), 2, "{second:?}");
+    assert_eq!(second[0], "FIL1 aside written in an item.");
+    assert!(second[1].starts_with("Second item"), "{second:?}");
 }
 
 #[test]
@@ -2249,6 +2319,9 @@ fn terms_never_swallow_paragraphs_that_start_like_them() {
         })
         .collect();
     assert_eq!(terms, [("Status", "accepted"), ("Owner", "someone")]);
+    for item in find_terms(&cnd.nodes).iter().flat_map(|terms| terms.items.iter()) {
+        assert_eq!(node_types(&item.children), ["paragraph"], "{:?}", item.term.value);
+    }
     let paragraphs = paragraph_texts_in_order(&cnd.nodes);
     assert_eq!(
         paragraphs,
@@ -2659,5 +2732,155 @@ fn defaults_are_omitted() {
                 }
             }
         });
+    }
+}
+
+// Container slots (CND 0.5 §6): a list item's or a term's body is the
+// realized blocks laid out in it, each a node of its own.
+
+/// Every term list of the document, every slot entered.
+fn find_terms(nodes: &[CndNode]) -> Vec<&typst_cnd::TermsNode> {
+    all_nodes(nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Terms(terms) => Some(terms),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The paragraph that is the `index`-th child of `nodes`.
+fn paragraph_at(nodes: &[CndNode], index: usize) -> &typst_cnd::ParagraphNode {
+    match &nodes[index] {
+        CndNode::Paragraph(paragraph) => paragraph,
+        other => panic!("child {index} is a {}, not a paragraph", node_type(other)),
+    }
+}
+
+#[test]
+fn list_item_children_are_realized_blocks() {
+    let cnd = cnd_for_example("containers_lists.typ");
+    let lists = outer_lists(&cnd.nodes);
+    let bullets = list_starting_with(&lists, "First item.");
+    assert!(!bullets.ordered);
+    assert_eq!(
+        item_summary(&bullets.items),
+        [
+            ("First item.", None),
+            ("Second item, first paragraph.", None),
+            ("Third item ends with a note.1", None),
+        ]
+    );
+    assert_eq!(node_types(&bullets.items[0].children), ["paragraph"]);
+    assert_eq!(node_types(&bullets.items[2].children), ["paragraph"]);
+
+    let second = &bullets.items[1];
+    assert_eq!(node_types(&second.children), ["paragraph", "paragraph", "list"]);
+    assert_eq!(
+        paragraph_values(&second.children),
+        ["Second item, first paragraph.", "Second item, second paragraph."]
+    );
+    let CndNode::List(nested) = &second.children[2] else { unreachable!() };
+    assert!(nested.ordered);
+    assert_eq!(
+        item_summary(&nested.items),
+        [("Nested five.", Some(5)), ("Nested six.", Some(6))]
+    );
+    for item in &nested.items {
+        assert_eq!(node_types(&item.children), ["paragraph"]);
+    }
+}
+
+#[test]
+fn nested_list_keeps_its_own_kind() {
+    let cnd = cnd_for_example("containers_lists.typ");
+    let lists = outer_lists(&cnd.nodes);
+    let enumeration = list_starting_with(&lists, "Enum item with bullets:");
+    assert!(enumeration.ordered);
+    assert_eq!(
+        item_summary(&enumeration.items),
+        [("Enum item with bullets:", Some(1)), ("Second enum item.", Some(2))]
+    );
+    let first = &enumeration.items[0];
+    assert_eq!(node_types(&first.children), ["paragraph", "list"]);
+    let sub = nested_lists(first);
+    assert_eq!(sub.len(), 1);
+    assert!(!sub[0].ordered, "the sub-list under the enum item is a bullet list");
+    assert_eq!(
+        item_summary(&sub[0].items),
+        [("Inner bullet one.", None), ("Inner bullet two.", None)]
+    );
+}
+
+#[test]
+fn term_item_splits_term_and_definition() {
+    let cnd = cnd_for_example("containers_lists.typ");
+    let terms = find_terms(&cnd.nodes);
+    assert_eq!(terms.len(), 1);
+    let items = &terms[0].items;
+    assert_eq!(items.len(), 2);
+
+    let latency = &items[0];
+    assert_eq!(latency.term.value, "Latency");
+    assert_eq!(node_types(&latency.children), ["paragraph", "paragraph"]);
+    let values = paragraph_values(&latency.children);
+    assert_eq!(values, ["The time a request waits.", "It is measured end to end [1]."]);
+    for value in values {
+        assert!(
+            !value.contains("Latency") && !value.contains(':'),
+            "the term and its separator stay out of the definition: {value:?}"
+        );
+    }
+
+    assert_eq!(items[1].term.value, "Throughput");
+    assert_eq!(paragraph_values(&items[1].children), ["The work done per second."]);
+}
+
+#[test]
+fn edges_inside_containers_sit_on_the_inner_paragraph() {
+    let cnd = cnd_for_example("containers_lists.typ");
+
+    // The footnote marker ends the third item: its edge is on that item's
+    // paragraph, spanning the rendered marker digit.
+    let lists = outer_lists(&cnd.nodes);
+    let bullets = list_starting_with(&lists, "First item.");
+    let third = paragraph_at(&bullets.items[2].children, 0);
+    assert_eq!(third.text.footnotes.len(), 1);
+    let note = &third.text.footnotes[0];
+    let span = note.text_span.as_ref().expect("the footnote edge has a span");
+    assert_eq!(codepoint_slice(&third.text.value, span), "1");
+    assert_eq!(cnd.footnotes.len(), 1);
+    assert_eq!(cnd.footnotes[0].label, note.label);
+
+    // The citation sits on the definition's second paragraph.
+    let terms = find_terms(&cnd.nodes);
+    let cited = paragraph_at(&terms[0].items[0].children, 1);
+    assert_eq!(cited.text.cites.len(), 1);
+    let cite = &cited.text.cites[0];
+    assert_eq!(cite.label, "smith2024");
+    let span = cite.text_span.as_ref().expect("the citation edge has a span");
+    assert_eq!(codepoint_slice(&cited.text.value, span), "[1]");
+
+    // Each edge exists once in the whole document: no copy is left on a
+    // container.
+    let texts = all_texts(&cnd.nodes);
+    assert_eq!(texts.iter().map(|text| text.footnotes.len()).sum::<usize>(), 1);
+    assert_eq!(texts.iter().map(|text| text.cites.len()).sum::<usize>(), 1);
+    assert_pool_refs_resolve(&cnd);
+}
+
+#[test]
+fn list_markers_are_not_paragraphs() {
+    for name in ["containers_lists.typ", "nested_lists.typ"] {
+        let cnd = cnd_for_example(name);
+        for node in all_nodes_full(&cnd) {
+            if let CndNode::Paragraph(paragraph) = node {
+                let value = paragraph.text.value.as_str();
+                assert!(
+                    !["•", "‣", "–", "1.", "2.", "5.", "6."].contains(&value),
+                    "{name}: a list marker became a paragraph: {value:?}"
+                );
+            }
+        }
     }
 }

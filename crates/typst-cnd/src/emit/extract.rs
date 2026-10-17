@@ -6,8 +6,8 @@ use typst_library::introspection::{Location, Tag, TagElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
     ArtifactElem, CitationForm, CiteElem, Destination, EnumElem, FigureElem,
-    FootnoteElem, HeadingElem, LinkElem, LinkMarker, LinkTarget, ListElem, QuoteElem,
-    RefElem, TableElem, TermsElem,
+    FootnoteElem, HeadingElem, LinkElem, LinkMarker, LinkTarget, ListElem, PdfMarkerTag,
+    PdfMarkerTagKind, QuoteElem, RefElem, TableElem, TermsElem,
 };
 use typst_library::text::{LinebreakElem, RawElem};
 
@@ -39,8 +39,10 @@ pub fn is_emptied_by_exclusion(content: &Content) -> bool {
 /// Whether the text realized between this element's `Tag::Start` and
 /// `Tag::End` belongs somewhere other than the enclosing node's text: to a
 /// node the exporter emits on its own (heading, list, enum, terms, figure,
-/// table, block quote, raw block, block equation), or to no node at all (a
-/// PDF artifact, which Typst's accessibility model defines as decoration).
+/// table, block quote, raw block, block equation), to a text of its own (a
+/// term, which a term's description paragraph opens with), or to no node at
+/// all (a PDF artifact, which Typst's accessibility model defines as
+/// decoration; a term's separator is one).
 ///
 /// Realization can wrap such an element's tags inside a paragraph — a show
 /// rule that boxes a quote, or re-emits a heading's body in fresh markup —
@@ -64,6 +66,9 @@ fn is_excluded_scope(inner: &Content) -> bool {
         || elem == TableElem::ELEM
     {
         return true;
+    }
+    if let Some(marker) = inner.to_packed::<PdfMarkerTag>() {
+        return marker.kind == PdfMarkerTagKind::TermsItemLabel;
     }
     let materialized = StyleChain::default();
     if let Some(quote) = inner.to_packed::<QuoteElem>() {
