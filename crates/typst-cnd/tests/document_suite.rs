@@ -452,11 +452,40 @@ fn newsletter_dashing_dept_news_template() {
         );
     }
 
+    // The template lays the page out in a grid, which is a `layout`: the
+    // articles sit in its cells, each heading once, opening a section in
+    // its cell only.
     fn find_heading<'a>(nodes: &'a [CndNode], needle: &str) -> Option<&'a CndNode> {
-        nodes
-            .iter()
+        all_nodes(nodes)
+            .into_iter()
             .find(|n| matches!(n, CndNode::Heading(h) if h.text.value.contains(needle)))
     }
+    let CndNode::Layout(page) = &cnd.nodes[0] else {
+        panic!("the template's page grid comes first: {:?}", node_type(&cnd.nodes[0]));
+    };
+    let in_cell = |cell: &typst_cnd::Cell| -> Vec<String> {
+        cell.children
+            .iter()
+            .filter_map(|n| match n {
+                CndNode::Heading(h) => Some(h.text.value.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let cell_headings: Vec<Vec<String>> = page.cells.iter().map(in_cell).collect();
+    assert!(
+        cell_headings.contains(&vec!["The Sixtus Award goes to Purview".to_string()]),
+        "the main article is a cell of the page grid: {cell_headings:?}"
+    );
+    assert!(
+        cell_headings.contains(&vec![
+            "Guest lecture from Dr. Elizabeth Lee".to_string(),
+            "Safety first".to_string(),
+            "Tigers win big".to_string(),
+        ]),
+        "the side articles are a cell of the page grid: {cell_headings:?}"
+    );
+    assert_eq!(headings.len(), 5, "each heading once: {headings:?}");
 
     let sixtus = find_heading(&cnd.nodes, "Sixtus Award").expect("sixtus heading");
     let CndNode::Heading(sixtus) = sixtus else { panic!() };
@@ -1329,6 +1358,7 @@ fn example_files_exist() {
         "figure_helper_drawing.typ",
         "containers_lists.typ",
         "containers_grids.typ",
+        "tables_across_pages.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -3203,4 +3233,138 @@ fn an_inline_list_in_a_box_is_kept_once() {
         })
         .expect("the sentence holding the box");
     assert!(sentence.contains("Boxed list entry."), "{sentence:?}");
+    // The boxed list is the sentence's text, not a list of its own: the only
+    // lists are the item holding a table and the list in its cell, and no
+    // item is left empty.
+    let lists = find_lists(&cnd.nodes);
+    assert_eq!(
+        lists.iter().map(|list| item_text(&list.items[0])).collect::<Vec<_>>(),
+        ["Item holding a table:", "Itemized cell entry one."]
+    );
+    for list in lists {
+        for item in &list.items {
+            assert!(!item.children.is_empty(), "an empty item in {list:?}");
+        }
+    }
+}
+
+/// The table of a figure, by the figure's label.
+fn figure_table<'a>(nodes: &'a [CndNode], label: &str) -> &'a typst_cnd::TableNode {
+    let Some(CndNode::Figure(figure)) = find_by_label(nodes, label) else {
+        panic!("no figure {label}");
+    };
+    figure
+        .children
+        .iter()
+        .find_map(|child| match child {
+            CndNode::Table(table) => Some(table),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("figure {label} holds no table"))
+}
+
+/// Ported from the unit test of the removed source-text caption parser: a
+/// table figure's caption is the element's own, exactly.
+#[test]
+fn parse_caption_from_figure_block() {
+    let cnd = cnd_for_example("structured.typ");
+    let Some(CndNode::Figure(figure)) = find_by_label(&cnd.nodes, "tab-params-nominaux")
+    else {
+        panic!("expected the table figure");
+    };
+    assert_eq!(value(&figure.caption), Some("Paramètres nominaux de fonctionnement."));
+    assert!(!figure_table(&cnd.nodes, "tab-params-nominaux").cells.is_empty());
+}
+
+#[test]
+fn a_table_across_pages_keeps_each_cell_once() {
+    let cnd = cnd_for_example("tables_across_pages.typ");
+    // The header and footer repeat on every page the table spans; each is
+    // one cell, once.
+    for text in ["Header key", "Header value", "Footer key", "Footer value"] {
+        assert_eq!(occurrences(&cnd, text), 1, "{text:?} is kept once");
+    }
+    for i in 1..=8 {
+        for text in [format!("Body key {i}"), format!("Body value {i}")] {
+            assert_eq!(occurrences(&cnd, &text), 1, "{text:?} is kept once");
+        }
+    }
+
+    let section = find_heading(&cnd.nodes, "Long table");
+    assert_eq!(node_types(&section.children), ["table"]);
+    let cells = cells_of(&section.children[0]);
+    assert_eq!(cells.len(), 2 * 11);
+    assert_eq!(
+        cells[..2]
+            .iter()
+            .map(|cell| (
+                cell.row,
+                cell.col,
+                cell.is_header,
+                first_paragraph(&cell.children)
+            ))
+            .collect::<Vec<_>>(),
+        [(0, 0, true, "Header key"), (0, 1, true, "Header value")]
+    );
+    assert!(cells[2..].iter().all(|cell| !cell.is_header));
+    let first_page = section.children[0].base().location.page;
+    for cell in &cells[..2] {
+        assert_eq!(cell.children[0].base().location.page, first_page);
+    }
+
+    // The row too tall for one page: each of its cells holds all of its
+    // content, in order, though layout draws it outside the cells' tags and
+    // both columns continue on the next page.
+    let tall = &cells[2 * 9..2 * 10];
+    for (cell, prefix, count, suffix) in [
+        (&tall[0], "Left paragraph", 8, "of the broken row."),
+        (&tall[1], "Tall paragraph", 12, "of the broken cell."),
+    ] {
+        let expected: Vec<String> =
+            (1..=count).map(|i| format!("{prefix} {i} {suffix}")).collect();
+        assert_eq!(paragraph_values(&cell.children), expected);
+        let pages: Vec<i32> =
+            cell.children.iter().map(|node| node.base().location.page).collect();
+        assert!(
+            pages.last() > pages.first() && *pages.first().unwrap() > first_page,
+            "{prefix}: the row breaks across pages: {pages:?}"
+        );
+    }
+    assert_eq!(
+        cells[2 * 10..]
+            .iter()
+            .map(|cell| (cell.row, first_paragraph(&cell.children)))
+            .collect::<Vec<_>>(),
+        [(10, "Footer key"), (10, "Footer value")]
+    );
+}
+
+#[test]
+fn table_cells_carry_spans_and_a_multi_row_header() {
+    let cnd = cnd_for_example("tables_across_pages.typ");
+    let section = find_heading(&cnd.nodes, "Spans");
+    let cells = cells_of(&section.children[0]);
+    assert_eq!(
+        cells
+            .iter()
+            .map(|cell| (
+                cell.row,
+                cell.col,
+                cell.rowspan,
+                cell.colspan,
+                cell.is_header,
+                first_paragraph(&cell.children),
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (0, 0, 1, 3, true, "Top header"),
+            (1, 0, 1, 1, true, "Sub one"),
+            (1, 1, 1, 1, true, "Sub two"),
+            (1, 2, 1, 1, true, "Sub three"),
+            (2, 0, 2, 1, false, "Tall span"),
+            (2, 1, 1, 1, false, "Row one middle"),
+            (2, 2, 1, 1, false, "Row one end"),
+            (3, 1, 1, 2, false, "Wide span"),
+        ]
+    );
 }

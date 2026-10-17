@@ -29,7 +29,10 @@
 //!   the cell's resolved `x` and `y`. A header or footer that repeats on
 //!   each page is tagged again, with new locations: only the first copy of
 //!   each position is the cell's slot, so the repeated copies' content has
-//!   no owner and is dropped;
+//!   no owner and is dropped. A row laid out across several pages (a cell
+//!   too tall for one) is drawn differently: each cell's tags open and close
+//!   with nothing between them, and the cell's content follows them, laid
+//!   out in the table itself. That content belongs to the last such cell;
 //! - a quote, a figure, a footnote entry: the element's own tag.
 //!
 //! [`Feature::CndSemantics`]: typst_library::Feature::CndSemantics
@@ -150,6 +153,13 @@ pub struct Ancestry {
     item_slots: FxHashMap<Location, Vec<SlotKey>>,
     /// Each table's or grid's cell slots, by the cell's `(x, y)` position.
     cell_slots: FxHashMap<Location, FxHashMap<(usize, usize), SlotKey>>,
+    /// While walking: each table's or grid's last row whose cells' tags
+    /// closed with nothing between them — a row laid out across pages —
+    /// with those cells and their locations (see [`innermost_slot`]).
+    fragment_cells: FxHashMap<Location, (usize, Vec<(SlotKey, Location)>)>,
+    /// Elements laid out in such a row, with the row's cells: which one
+    /// holds each is settled by position once the walk is done.
+    pending_fragments: Vec<(Location, Vec<(SlotKey, Location)>)>,
     /// Elements laid out inside something that already carries their text,
     /// see [`Ancestry::is_absorbed`].
     absorbed: FxHashSet<Location>,
@@ -185,7 +195,35 @@ impl Ancestry {
                 &mut ancestry,
             );
         }
+        ancestry.settle_fragments(paged.introspector().as_ref());
         ancestry
+    }
+
+    /// Give each element laid out in a row that spans pages the cell whose
+    /// column it is drawn in: the cell starting furthest right at or before
+    /// the element. A grid, which the introspector does not place, is
+    /// placed by its anchor (see [`Ancestry::grids`]).
+    fn settle_fragments(&mut self, introspector: &dyn Introspector) {
+        let x = |location: Location| {
+            introspector
+                .position(location)
+                .map(|position| position.as_paged_or_default().point.x)
+        };
+        for (location, cells) in std::mem::take(&mut self.pending_fragments) {
+            let Some(own) =
+                x(self.grid_anchors.get(&location).copied().unwrap_or(location))
+            else {
+                continue;
+            };
+            let column = cells
+                .iter()
+                .filter_map(|(slot, cell)| Some((*slot, x(*cell)?)))
+                .filter(|(_, start)| start.to_pt() <= own.to_pt() + 0.01)
+                .max_by(|(_, a), (_, b)| a.to_pt().total_cmp(&b.to_pt()));
+            if let Some((slot, _)) = column {
+                self.slots.insert(location, slot);
+            }
+        }
     }
 
     /// The paragraph this one is part of, if any.
@@ -663,6 +701,11 @@ struct Open {
     owns_cells: bool,
     /// Whether it is a grid, which needs an anchor (see [`Ancestry::grids`]).
     is_grid: bool,
+    /// For a cell, the table or grid it is a cell of, and its position.
+    cell_owner: Option<Location>,
+    cell_position: Option<(usize, usize)>,
+    /// Whether some element opened inside it.
+    had_child: bool,
     /// Glyph runs drawn for this paragraph inside / outside artifact-marked
     /// content. A paragraph all of whose glyphs are drawn inside an artifact
     /// is page furniture, whichever way the two tags happen to nest.
@@ -963,20 +1006,43 @@ fn walk(
                 {
                     ancestry.absorbed.insert(location);
                 }
-                if let Some(slot) = innermost_slot(stack, floats, &in_floats) {
-                    ancestry.slots.insert(location, slot);
+                match innermost_slot(stack, floats, &in_floats) {
+                    Some(Found::Slot(slot)) => {
+                        ancestry.slots.insert(location, slot);
+                    }
+                    Some(Found::InTable(owner)) => {
+                        if let Some((_, cells)) = ancestry.fragment_cells.get(&owner)
+                            && let Some((slot, _)) = cells.last()
+                        {
+                            ancestry.slots.insert(location, *slot);
+                            if cells.len() > 1 {
+                                ancestry
+                                    .pending_fragments
+                                    .push((location, cells.clone()));
+                            }
+                        }
+                    }
+                    None => {}
                 }
 
                 let slot = opens;
-                if let Some(slot @ SlotKey::Cell(_)) = slot
+                let cell_owner = match slot {
+                    Some(SlotKey::Cell(_)) => stack
+                        .iter()
+                        .rev()
+                        .find(|open| open.owns_cells)
+                        .map(|open| open.location),
+                    _ => None,
+                };
+                if let Some(slot) = slot
+                    && let Some(owner) = cell_owner
                     && let Some(position) = cell_position(inner)
-                    && let Some(owner) = stack.iter().rev().find(|open| open.owns_cells)
                 {
                     // The first copy of a position is the cell; a repeated
                     // header's or footer's copies are not.
                     ancestry
                         .cell_slots
-                        .entry(owner.location)
+                        .entry(owner)
                         .or_default()
                         .entry(position)
                         .or_insert(slot);
@@ -999,6 +1065,9 @@ fn walk(
                     }
                 }
 
+                if let Some(parent) = stack.last_mut() {
+                    parent.had_child = true;
+                }
                 stack.push(Open {
                     location,
                     floats: in_floats,
@@ -1010,6 +1079,9 @@ fn walk(
                     owns_items: owns_items(inner),
                     owns_cells: owns_cells(inner),
                     is_grid: inner.elem() == GridElem::ELEM,
+                    cell_owner,
+                    cell_position: cell_position(inner),
+                    had_child: false,
                     glyphs_in_artifact: 0,
                     glyphs_outside_artifact: 0,
                     is_text_node: is_par || is_text_node(inner),
@@ -1023,6 +1095,18 @@ fn walk(
                     stack.iter().rposition(|open| open.location == *location)
                 {
                     for open in stack.drain(index..) {
+                        if let (Some(slot), Some(owner), Some((_, row))) =
+                            (open.slot, open.cell_owner, open.cell_position)
+                            && !open.had_child
+                        {
+                            let (last_row, cells) =
+                                ancestry.fragment_cells.entry(owner).or_default();
+                            if *last_row != row {
+                                *last_row = row;
+                                cells.clear();
+                            }
+                            cells.push((slot, open.location));
+                        }
                         if open.is_text_node
                             && open.glyphs_outside_artifact == 0
                             && open.glyphs_in_artifact > 0
@@ -1053,17 +1137,35 @@ fn walk(
 /// is written. A float's body can be drawn before that slot opens — on an
 /// earlier page, while its list is already open — and then only the
 /// float's own record says where it belongs.
-fn innermost_slot(stack: &[Open], floats: &Floats, held_by: &[usize]) -> Option<SlotKey> {
+///
+/// An element laid out in a table or a grid with no cell open around it is
+/// the content of a row laid out across pages, whose cells' tags closed
+/// before it (see the module docs): `InTable` names that table or grid.
+fn innermost_slot(stack: &[Open], floats: &Floats, held_by: &[usize]) -> Option<Found> {
     let written_in = held_by.iter().find_map(|index| floats.all[*index].slot);
     for open in stack.iter().rev().filter(|open| open.encloses(floats, held_by)) {
+        if open.owns_cells {
+            return Some(Found::InTable(open.location));
+        }
         let Some(slot) = open.slot else { continue };
         // A slot inside the float's body is the element's own. One the
         // float is written in may have a deeper one that is not open yet.
         let in_body =
             held_by.is_empty() || held_by.iter().any(|index| open.floats.contains(index));
-        return if in_body { Some(slot) } else { written_in.or(Some(slot)) };
+        return Some(Found::Slot(if in_body {
+            slot
+        } else {
+            written_in.unwrap_or(slot)
+        }));
     }
-    written_in
+    written_in.map(Found::Slot)
+}
+
+/// What [`innermost_slot`] finds.
+enum Found {
+    Slot(SlotKey),
+    /// Laid out directly in this table or grid, outside any cell.
+    InTable(Location),
 }
 
 /// A half-open byte range in one source file.

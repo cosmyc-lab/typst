@@ -1,0 +1,40 @@
+// A table that breaks across pages repeats its header and footer on each
+// page; each is still one cell. A row too tall for one page keeps each of
+// its cells' paragraphs in that cell, on every page it spans. A second
+// table spans rows and columns, with a two-row header and gutters.
+#set document(title: "Tables across pages", author: "typst-cnd")
+#set page(height: 9cm)
+
+= Long table
+
+#table(
+  columns: 2,
+  table.header([Header key], [Header value]),
+  ..range(1, 9).map(i => ([Body key #i], [Body value #i])).flatten(),
+  [
+    #for i in range(1, 9) [
+      Left paragraph #i of the broken row.
+
+    ]
+  ],
+  [
+    #for i in range(1, 13) [
+      Tall paragraph #i of the broken cell.
+
+    ]
+  ],
+  table.footer([Footer key], [Footer value]),
+)
+
+= Spans
+
+#table(
+  columns: 3,
+  gutter: 4pt,
+  table.header(
+    table.cell(colspan: 3)[Top header],
+    [Sub one], [Sub two], [Sub three],
+  ),
+  table.cell(rowspan: 2)[Tall span], [Row one middle], [Row one end],
+  table.cell(colspan: 2)[Wide span],
+)
