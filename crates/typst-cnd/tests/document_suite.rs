@@ -1425,6 +1425,7 @@ fn markers_in_non_flat_nodes_do_not_leak_or_span() {
 fn example_files_exist() {
     for name in [
         "minimal.typ",
+        "cnd_0_5_elements.typ",
         "structured.typ",
         "comprehensive.typ",
         "complex_multipage.typ",
@@ -5469,4 +5470,80 @@ fn admonition_flows_through_columns_and_pages() {
     assert_eq!(notes, ["Note five."]);
     let CndNode::Paragraph(fifth) = &flowing.children[4] else { unreachable!() };
     assert_eq!(fifth.text.footnotes.len(), 1, "the body paragraph holds its edge");
+}
+
+#[test]
+fn every_05_node_type_and_mark_kind_is_emitted() {
+    use std::collections::BTreeSet;
+
+    let cnd = cnd_for_example("cnd_0_5_elements.typ");
+    let nodes = all_nodes_full(&cnd);
+
+    let types: BTreeSet<&str> = nodes.iter().map(|node| node_type(node)).collect();
+    let expected_types: BTreeSet<&str> = [
+        "heading",
+        "paragraph",
+        "quote",
+        "code",
+        "math",
+        "image",
+        "figure",
+        "admonition",
+        "list",
+        "terms",
+        "table",
+        "layout",
+    ]
+    .into();
+    assert_eq!(types, expected_types);
+
+    let kinds: BTreeSet<&str> = nodes
+        .iter()
+        .flat_map(|node| node.texts())
+        .flat_map(|text| text.marks.iter().map(|mark| mark.kind.as_str()))
+        .collect();
+    let expected_kinds: BTreeSet<&str> = [
+        "strong",
+        "emph",
+        "code",
+        "strike",
+        "sup",
+        "sub",
+        "underline",
+        "highlight",
+        "math",
+    ]
+    .into();
+    assert_eq!(kinds, expected_kinds);
+
+    // Every edge family sits on a paragraph inside an item, a cell and a
+    // footnote. A footnote's own content cannot hold another footnote.
+    type Edges = (bool, bool, bool, bool);
+    fn edges(children: &[CndNode]) -> Edges {
+        let mut out = (false, false, false, false);
+        for node in all_nodes(children) {
+            if let CndNode::Paragraph(p) = node {
+                out.0 |= !p.text.refs.is_empty();
+                out.1 |= !p.text.cites.is_empty();
+                out.2 |= !p.text.footnotes.is_empty();
+                out.3 |= !p.text.links.is_empty();
+            }
+        }
+        out
+    }
+    let mut item = None;
+    let mut cell = None;
+    for node in all_nodes(&cnd.nodes) {
+        match node {
+            CndNode::List(list) => item = Some(edges(&list.items[0].children)),
+            CndNode::Table(table) => {
+                cell = Some(edges(&table.cells.last().unwrap().children))
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(item, Some((true, true, true, true)), "list item");
+    assert_eq!(cell, Some((true, true, true, true)), "table cell");
+    let note = cnd.footnotes.iter().map(|n| edges(&n.children)).collect::<Vec<_>>();
+    assert!(note.contains(&(true, true, false, true)), "footnote: {note:?}");
 }
