@@ -9,7 +9,7 @@
 //!
 //! Text spans (ADR 0013): `FootnoteRef`/`CiteRef` carry the marker's
 //! `[start, end)` codepoint offsets in the node's rendered text, computed
-//! during extraction (see `extract::extract_with_markers`). Spans are
+//! during extraction (see `extract::extract_rich`). Spans are
 //! populated for flat-text nodes (paragraph/heading); on other node
 //! types, and for a suppressed `form: "none"` citation, `text_span` is
 //! `None` (the schema allows null spans).

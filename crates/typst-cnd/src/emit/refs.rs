@@ -76,7 +76,7 @@ pub fn resolve_refs(
                         text.slot,
                         target_id,
                         Some(label.resolve().as_str().into()),
-                        Some(*span),
+                        *span,
                     ));
                 }
             }
@@ -185,7 +185,7 @@ pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) 
                     introspector,
                     source,
                     dest,
-                    Some(*span),
+                    *span,
                     &mut links,
                     &mut ref_edges,
                 );

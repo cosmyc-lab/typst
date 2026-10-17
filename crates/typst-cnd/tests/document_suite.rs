@@ -909,6 +909,10 @@ fn inline_code_not_duplicated_in_paragraphs() {
         }
     }
 
+    // Each inline code run is a `code` mark over its one occurrence.
+    let text = paragraph_text(&cnd, "Call ");
+    assert_eq!(mark_slices(text, typst_cnd::CODE), ["extract_text", "plain_text"]);
+
     let lists = find_lists(&cnd.nodes);
     assert!(!lists.is_empty(), "inline_code.typ should produce at least one list");
     for list in lists {
@@ -1355,6 +1359,17 @@ fn ref_text_spans_are_codepoint_offsets() {
         saw_numbered_heading_ref,
         "expected a ref rendering \"Section\\u{{a0}}11\" (10 code points, 11 bytes): {spans:?}"
     );
+    // Rendering a reference adds no mark of its own.
+    for text in all_texts(&cnd.nodes) {
+        for reference in &text.refs {
+            let Some(span) = &reference.text_span else { continue };
+            assert!(
+                !text.marks.iter().any(|m| m.start < span[1] && m.end > span[0]),
+                "a mark covers the reference {span:?} in {:?}",
+                text.value
+            );
+        }
+    }
 
     assert_refs_resolve(&cnd.nodes);
 }
@@ -1452,6 +1467,7 @@ fn example_files_exist() {
         "footnote_list_across_pages.typ",
         "footnote_reused_content.typ",
         "quote_attribution_reuse.typ",
+        "marks.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -1534,6 +1550,12 @@ fn paragraph_identity_dedupe_and_inline_artifacts() {
         7,
         "exactly the seven authored paragraphs, got: {paragraphs:?}"
     );
+    // The author's `#strong` is a mark; the inline artifact leaves none.
+    assert_eq!(
+        mark_slices(paragraph_text(&cnd, "option 3"), typst_cnd::STRONG),
+        ["Decision"]
+    );
+    assert!(paragraph_text(&cnd, "Before after.").marks.is_empty());
     // The quote a show rule boxes into the paragraph is left out of the
     // paragraph's text, so it is a node of its own, holding its words once.
     let quotes = block_quotes(&cnd.nodes);
@@ -1785,6 +1807,8 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
         link_slice.contains("and more text"),
         "the link's span must cover the whole body, got {link_slice:?}"
     );
+    // The paragraph's inline code is marked, and leaves both spans whole.
+    assert!(!mark_slices(&nested.text, typst_cnd::CODE).is_empty());
 
     // Row 1: a plain URL link — `links` entry, href verbatim, span slicing
     // to the rendered (auto) body text.
@@ -4296,4 +4320,119 @@ fn a_quote_body_of_reused_content_keeps_its_attribution_apart() {
             ("xi", vec!["FC1 custom entry."]),
         ]
     );
+}
+
+/// The text of the first paragraph whose value contains `needle`.
+fn paragraph_text<'a>(cnd: &'a typst_cnd::Cnd, needle: &str) -> &'a RichText {
+    match find_paragraph(&cnd.nodes, needle) {
+        Some(CndNode::Paragraph(p)) => &p.text,
+        _ => panic!("no paragraph containing {needle:?}"),
+    }
+}
+
+/// The text each mark of `kind` in `text` covers.
+fn mark_slices(text: &RichText, kind: &str) -> Vec<String> {
+    text.marks
+        .iter()
+        .filter(|m| m.kind == kind)
+        .map(|m| codepoint_slice(&text.value, &[m.start, m.end]))
+        .collect()
+}
+
+#[test]
+fn strong_emph_overlap_is_kept() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = paragraph_text(&cnd, "Start");
+    assert_eq!(text.value, "Start bold both italic end.");
+    assert_eq!(mark_slices(text, typst_cnd::STRONG), ["bold both"]);
+    assert_eq!(mark_slices(text, typst_cnd::EMPH), ["both italic"]);
+    let strong = text.marks.iter().find(|m| m.kind == typst_cnd::STRONG).unwrap();
+    let emph = text.marks.iter().find(|m| m.kind == typst_cnd::EMPH).unwrap();
+    assert!(
+        strong.start < emph.start && emph.start < strong.end && strong.end < emph.end
+    );
+}
+
+#[test]
+fn inline_code_is_a_code_mark() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = paragraph_text(&cnd, "now");
+    assert_eq!(text.value.matches("x = 1").count(), 1, "{:?}", text.value);
+    assert_eq!(mark_slices(text, typst_cnd::CODE), ["x = 1"]);
+}
+
+#[test]
+fn inline_math_mark_carries_source() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = paragraph_text(&cnd, "Speed");
+    assert_eq!(text.value, "Speed is v = d/t here.");
+    let math: Vec<_> = text.marks.iter().filter(|m| m.kind == typst_cnd::MATH).collect();
+    assert_eq!(math.len(), 1, "{:?}", text.marks);
+    assert_eq!(codepoint_slice(&text.value, &[math[0].start, math[0].end]), "v = d/t");
+    let raw = math[0].raw.as_ref().expect("the math source");
+    assert_eq!(raw.format, "typst");
+    assert_eq!(raw.value, "v = d/t");
+}
+
+#[test]
+fn a_paragraph_of_only_inline_math_is_kept() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Paragraph(p) if p.text.value == "z" => Some(&p.text),
+            _ => None,
+        })
+        .expect("the paragraph holding only `$z$`");
+    assert_eq!(text.marks.len(), 1);
+    assert_eq!(text.marks[0].kind, typst_cnd::MATH);
+    assert_eq!((text.marks[0].start, text.marks[0].end), (0, 1));
+}
+
+#[test]
+fn author_superscript_is_a_sup_mark() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = paragraph_text(&cnd, "The area");
+    assert_eq!(mark_slices(text, typst_cnd::SUP), ["2"]);
+}
+
+#[test]
+fn footnote_marker_has_no_sup_mark() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = paragraph_text(&cnd, "A claim");
+    assert_eq!(text.footnotes.len(), 1);
+    let span = text.footnotes[0].text_span.as_ref().expect("a span");
+    assert_eq!(codepoint_slice(&text.value, span), "1");
+    assert!(
+        !text.marks.iter().any(|m| m.start < span[1] && m.end > span[0]),
+        "no mark may cover the footnote marker: {:?}",
+        text.marks
+    );
+}
+
+#[test]
+fn marks_count_code_points_past_astral_chars() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = paragraph_text(&cnd, "\u{1F600}");
+    assert_eq!(mark_slices(text, typst_cnd::STRONG), ["bold"]);
+    assert_eq!(text.refs.len(), 1, "{:?}", text.refs);
+    let span = text.refs[0].text_span.as_ref().expect("a span");
+    assert_eq!(codepoint_slice(&text.value, span), "Figure\u{a0}1");
+}
+
+#[test]
+fn adjacent_strong_runs_merge() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = paragraph_text(&cnd, "Join");
+    assert_eq!(mark_slices(text, typst_cnd::STRONG), ["ab"]);
+}
+
+#[test]
+fn link_over_whole_code_keeps_span() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = paragraph_text(&cnd, "Read the");
+    let code = text.marks.iter().find(|m| m.kind == typst_cnd::CODE).expect("code");
+    assert_eq!(codepoint_slice(&text.value, &[code.start, code.end]), "api");
+    assert_eq!(text.links.len(), 1);
+    assert_eq!(text.links[0].text_span, Some(vec![code.start, code.end]));
 }

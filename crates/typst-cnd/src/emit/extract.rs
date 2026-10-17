@@ -1,16 +1,26 @@
 use ecow::EcoString;
+use typst_library::World;
+use typst_library::engine::Engine;
 use typst_library::foundations::{
     Content, Label, NativeElement, PlainText, StyleChain, Value,
 };
 use typst_library::introspection::{Location, Tag, TagElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    ArtifactElem, CitationForm, CiteElem, Destination, EnumElem, FigureElem,
+    ArtifactElem, CitationForm, CiteElem, Destination, EmphElem, EnumElem, FigureElem,
     FootnoteElem, HeadingElem, LinkElem, LinkMarker, LinkTarget, ListElem, PdfMarkerTag,
-    PdfMarkerTagKind, QuoteElem, RefElem, TableElem, TermsElem,
+    PdfMarkerTagKind, QuoteElem, RefElem, StrongElem, TableElem, TermsElem,
 };
-use typst_library::text::{LinebreakElem, RawElem};
+use typst_library::text::{
+    HighlightElem, LinebreakElem, RawElem, StrikeElem, SubElem, SuperElem, UnderlineElem,
+};
 use typst_library::visualize::ImageElem;
+use typst_syntax::Span;
+
+use crate::rich_text::{
+    CODE, EMPH, HIGHLIGHT, MATH, Mark, RawSource, STRIKE, STRONG, SUB, SUP, UNDERLINE,
+    canonical_marks,
+};
 
 /// Extract plain text from content without duplicating inline code.
 ///
@@ -19,8 +29,32 @@ use typst_library::visualize::ImageElem;
 /// prevents `RawElem` text from appearing three times (once from `RawElem`,
 /// once from the synthesized `RawLine`, once from the `TextElem` inside
 /// `RawLine.body`).
+///
+/// With no source at hand, an inline equation contributes the text its
+/// realization walks to, which is none.
 pub fn extract_text(content: &Content) -> EcoString {
-    extract_with_markers(content).0
+    extract_rich(content, &no_source).value.into()
+}
+
+/// A source lookup that never finds anything.
+pub fn no_source(_: Span) -> Option<String> {
+    None
+}
+
+/// The Typst source `span` covers, verbatim, read from the engine's world.
+/// `None` for a detached span or a file the world cannot give back.
+pub fn source_text(engine: &Engine, span: Span) -> Option<String> {
+    let id = span.id()?;
+    let source = engine.world.source(id).ok()?;
+    let node = source.find(span)?;
+    source.text().get(node.range()).map(str::to_owned)
+}
+
+/// The source of an inline equation without its `$` delimiters, trimmed.
+/// `None` when `text` is not a `$…$` equation (an equation built in code).
+fn math_source(text: &str) -> Option<String> {
+    let inner = text.strip_prefix('$')?.strip_suffix('$')?;
+    Some(inner.trim().to_owned())
 }
 
 /// Whether the text realized inside `content` was all excluded — every word
@@ -35,6 +69,41 @@ pub fn is_emptied_by_exclusion(content: &Content) -> bool {
     let mut ctx = MarkerCtx::default();
     walk(content, &mut out, &mut ctx);
     ctx.excluded_any && out.trim().is_empty()
+}
+
+/// The mark kind an element's realized text carries (spec §4.1), if any.
+/// An inline raw is `code` and an inline equation `math`; their block forms
+/// are nodes of their own.
+fn mark_kind(inner: &Content) -> Option<&'static str> {
+    let materialized = StyleChain::default();
+    let kind = if inner.is::<StrongElem>() {
+        STRONG
+    } else if inner.is::<EmphElem>() {
+        EMPH
+    } else if inner.is::<UnderlineElem>() {
+        UNDERLINE
+    } else if inner.is::<StrikeElem>() {
+        STRIKE
+    } else if inner.is::<HighlightElem>() {
+        HIGHLIGHT
+    } else if inner.is::<SuperElem>() {
+        SUP
+    } else if inner.is::<SubElem>() {
+        SUB
+    } else if let Some(raw) = inner.to_packed::<RawElem>() {
+        if raw.block.get(materialized) {
+            return None;
+        }
+        CODE
+    } else if let Some(equation) = inner.to_packed::<EquationElem>() {
+        if equation.block.get(materialized) {
+            return None;
+        }
+        MATH
+    } else {
+        return None;
+    };
+    Some(kind)
 }
 
 /// Whether the text realized between this element's `Tag::Start` and
@@ -90,7 +159,7 @@ fn is_excluded_scope(inner: &Content) -> bool {
 /// footnote's own tags, and that number is the edge's span. A custom
 /// `show footnote.entry` rule that drops the number leaves no `Label`
 /// marker, and so nothing is excluded.
-fn is_entry_number(inner: &Content, ctx: &MarkerCtx) -> bool {
+fn is_entry_number(inner: &Content, ctx: &MarkerCtx<'_>) -> bool {
     ctx.footnotes.is_empty()
         && inner
             .to_packed::<PdfMarkerTag>()
@@ -100,11 +169,23 @@ fn is_entry_number(inner: &Content, ctx: &MarkerCtx) -> bool {
 /// A reference/citation/footnote marker located within a node's rendered
 /// text: its kind (carrying the resolution payload) and the `[start, end)`
 /// Unicode code-point offsets of its rendered marker in that text.
+///
+/// The span is `None` when it reaches partway into a `code` or `math` mark
+/// (spec §4.1 rule 4): such a span cannot be expressed on the text.
 #[derive(Debug, Clone)]
 pub struct ExtractedMarker {
     pub kind: MarkerKind,
-    pub start: i64,
-    pub end: i64,
+    pub span: Option<(i64, i64)>,
+}
+
+/// A node's text as realized: the plain value, its canonical marks
+/// (spec §4.1) and the reference/citation/footnote/link markers in it, every
+/// offset in Unicode code points of `value`.
+#[derive(Debug, Clone, Default)]
+pub struct Extracted {
+    pub value: String,
+    pub marks: Vec<Mark>,
+    pub markers: Vec<ExtractedMarker>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,8 +237,9 @@ pub(crate) fn link_dest(target: &LinkTarget) -> Option<LinkDest> {
     }
 }
 
-/// Extract plain text and, in the same walk, the code-point spans of any
-/// reference/citation/footnote markers it contains.
+/// Extract plain text and, in the same walk, its inline marks and the
+/// code-point spans of any reference/citation/footnote/link markers it
+/// contains.
 ///
 /// The realized flow no longer carries the `RefElem`/`CiteElem`/
 /// `FootnoteElem` itself, but leaves an introspection `TagElem` pair
@@ -167,9 +249,18 @@ pub(crate) fn link_dest(target: &LinkTarget) -> Option<LinkDest> {
 /// is built* — no substring search, correct by construction. Spans are
 /// therefore offsets into the returned text, which is the value a flat
 /// node uses verbatim for its `text` field.
-pub fn extract_with_markers(content: &Content) -> (EcoString, Vec<ExtractedMarker>) {
+///
+/// Marks come from the same tags: the elements [`mark_kind`] names open a
+/// mark at their `Tag::Start` and close it at their `Tag::End`. An inline
+/// equation's text is its Typst source, read through `source`, with the
+/// realized formula suppressed; its mark carries that source as `raw`
+/// (spec §4.1). Marks and spans come back canonical.
+pub fn extract_rich(
+    content: &Content,
+    source: &dyn Fn(Span) -> Option<String>,
+) -> Extracted {
     let mut out = EcoString::new();
-    let mut ctx = MarkerCtx::default();
+    let mut ctx = MarkerCtx { source: Some(source), ..MarkerCtx::default() };
     walk(content, &mut out, &mut ctx);
 
     // A `LinkElem` whose `Tag::Start` opens within this walk but whose
@@ -205,23 +296,44 @@ pub fn extract_with_markers(content: &Content) -> (EcoString, Vec<ExtractedMarke
     // `Interrupt` for `PAR`, so no paragraph group forms around the link at
     // the flow level in the first place, and the block's own inner
     // paragraph is realized without ever seeing the link's tags.
-    let MarkerCtx { open, mut done, .. } = ctx;
+    let MarkerCtx { open, mut done, open_marks, mut marks, pos, .. } = ctx;
     for frame in open {
         if matches!(frame.kind, MarkerKind::Link(_)) {
             done.push(ExtractedMarker {
                 kind: frame.kind,
-                start: frame.start,
-                end: frame.start,
+                span: Some((frame.start, frame.start)),
             });
         }
     }
-    (out, done)
+    // A mark whose element does not end inside this text covers the rest of
+    // it.
+    for frame in open_marks {
+        marks.push(Mark {
+            start: frame.start,
+            end: pos,
+            kind: frame.kind.into(),
+            raw: frame.raw,
+        });
+    }
+    let mut spans: Vec<&mut Option<(i64, i64)>> =
+        done.iter_mut().map(|marker| &mut marker.span).collect();
+    let marks = canonical_marks(pos, marks, &mut spans);
+    Extracted { value: out.into(), marks, markers: done }
 }
 
 #[derive(Default)]
-struct MarkerCtx {
+struct MarkerCtx<'a> {
+    /// Where an inline equation's source is read from.
+    source: Option<&'a dyn Fn(Span) -> Option<String>>,
     /// Code-point position in `out` so far.
     pos: i64,
+    /// Open mark frames, by their element's location.
+    open_marks: Vec<MarkFrame>,
+    /// Closed marks, in closing order.
+    marks: Vec<Mark>,
+    /// Open inline equations whose source stands in for their realized
+    /// text, which is suppressed.
+    math: Vec<Location>,
     /// Open cite/footnote frames — those tags bracket their own rendered
     /// marker text — keyed by the marker element's own location.
     open: Vec<OpenFrame>,
@@ -253,6 +365,13 @@ struct MarkerCtx {
     collapse_space: bool,
 }
 
+struct MarkFrame {
+    loc: Location,
+    kind: &'static str,
+    start: i64,
+    raw: Option<RawSource>,
+}
+
 struct OpenFrame {
     marker_loc: Location,
     kind: MarkerKind,
@@ -270,7 +389,7 @@ struct LinkFrame {
     start: i64,
 }
 
-fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
+fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
     // A `TagElem`'s `tag` is `#[internal]`, so `fields()` never enters it —
     // match the tag element itself and unpack it here.
     if let Some(tag) = content.to_packed::<TagElem>() {
@@ -293,9 +412,22 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
                     ctx.footnotes.push(loc);
                 }
                 open_tag(inner, ctx);
+                open_mark(inner, out, ctx);
             }
             Tag::End(..) => {
                 let loc = tag.tag.location();
+                if let Some(index) = ctx.math.iter().rposition(|open| *open == loc) {
+                    ctx.math.remove(index);
+                }
+                if let Some(index) = ctx.open_marks.iter().rposition(|f| f.loc == loc) {
+                    let frame = ctx.open_marks.remove(index);
+                    ctx.marks.push(Mark {
+                        start: frame.start,
+                        end: ctx.pos,
+                        kind: frame.kind.into(),
+                        raw: frame.raw,
+                    });
+                }
                 if let Some(index) = ctx.artifacts.iter().rposition(|open| *open == loc) {
                     ctx.artifacts.remove(index);
                 }
@@ -330,9 +462,10 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
         return;
     }
 
-    // Inside an excluded scope: emit no text, but keep walking so that the
-    // tags nested in it still balance.
-    if !ctx.excluded.is_empty() {
+    // Inside an excluded scope, or an inline equation whose source stands in
+    // for it: emit no text, but keep walking so that the tags nested in it
+    // still balance.
+    if !ctx.excluded.is_empty() || !ctx.math.is_empty() {
         if content.with::<dyn PlainText>().is_some()
             || content.to_packed::<LinebreakElem>().is_some()
         {
@@ -389,7 +522,43 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx) {
     }
 }
 
-fn open_tag(inner: &Content, ctx: &mut MarkerCtx) {
+/// Open a mark frame for an element that carries one ([`mark_kind`]).
+///
+/// No frame opens inside an excluded scope, nor while a reference,
+/// citation or footnote marker is open: the superscript Typst puts on a
+/// footnote number is presentation, not the author's (a link's body is the
+/// author's, and keeps its marks). An inline equation also writes its
+/// source here, and suppresses its realized text until it closes.
+fn open_mark(inner: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
+    let Some(kind) = mark_kind(inner) else { return };
+    let Some(loc) = inner.location() else { return };
+    if !ctx.excluded.is_empty() || !ctx.math.is_empty() {
+        return;
+    }
+    let in_marker = !ctx.link_for_ref.is_empty()
+        || ctx.open.iter().any(|frame| {
+            matches!(frame.kind, MarkerKind::Cite(_) | MarkerKind::Footnote(_))
+        });
+    let start = ctx.pos;
+    let mut raw = None;
+    if kind == MATH
+        && let Some(source) = ctx.source
+        && let Some(text) = source(inner.span()).as_deref().and_then(math_source)
+    {
+        out.push_str(&text);
+        ctx.pos += text.chars().count() as i64;
+        if !text.is_empty() {
+            ctx.collapse_space = false;
+        }
+        ctx.math.push(loc);
+        raw = Some(RawSource::typst(text));
+    }
+    if !in_marker {
+        ctx.open_marks.push(MarkFrame { loc, kind, start, raw });
+    }
+}
+
+fn open_tag(inner: &Content, ctx: &mut MarkerCtx<'_>) {
     let Some(marker_loc) = inner.location() else { return };
     // Decorative content yields no edge (cnd-sdk spec §2): no marker for a
     // reference, link, footnote or citation written inside an artifact.
@@ -421,14 +590,13 @@ fn open_tag(inner: &Content, ctx: &mut MarkerCtx) {
     }
 }
 
-fn close_tag(ctx: &mut MarkerCtx, loc: Location) {
+fn close_tag(ctx: &mut MarkerCtx<'_>, loc: Location) {
     // A cite/footnote tag closes its own bracketed span.
     if let Some(index) = ctx.open.iter().position(|frame| frame.marker_loc == loc) {
         let frame = ctx.open.remove(index);
         ctx.done.push(ExtractedMarker {
             kind: frame.kind,
-            start: frame.start,
-            end: ctx.pos,
+            span: Some((frame.start, ctx.pos)),
         });
         return;
     }
@@ -438,8 +606,7 @@ fn close_tag(ctx: &mut MarkerCtx, loc: Location) {
         let frame = ctx.link_for_ref.remove(index);
         ctx.done.push(ExtractedMarker {
             kind: MarkerKind::Ref(frame.label),
-            start: frame.start,
-            end: ctx.pos,
+            span: Some((frame.start, ctx.pos)),
         });
     }
 }
@@ -449,7 +616,7 @@ fn close_tag(ctx: &mut MarkerCtx, loc: Location) {
 /// reference or link. For content met unrealized — a list item's or a table
 /// cell's body, an absorbed paragraph, the document's own content — where an
 /// artifact still nests its body. (Realized content brackets an artifact
-/// with tags instead; [`extract_with_markers`] handles that.)
+/// with tags instead; [`extract_rich`] handles that.)
 pub fn traverse_kept(content: &Content, f: &mut impl FnMut(&Content)) {
     if content.elem() == ArtifactElem::ELEM {
         return;
@@ -472,7 +639,7 @@ fn traverse_kept_value(value: Value, f: &mut impl FnMut(&Content)) {
     }
 }
 
-fn walk_value(value: Value, out: &mut EcoString, ctx: &mut MarkerCtx) {
+fn walk_value(value: Value, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
     match value {
         Value::Content(c) => walk(&c, out, ctx),
         Value::Array(arr) => {

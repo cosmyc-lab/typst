@@ -5,7 +5,7 @@ use typst_library::introspection::Introspector;
 use typst_library::model::HeadingElem;
 
 use crate::emit::convert::{self, NodeRecord};
-use crate::emit::extract::extract_with_markers;
+use crate::emit::extract::{extract_rich, no_source};
 use crate::location::placeholder_location;
 use crate::model::{HeadingNode, RichText};
 
@@ -23,7 +23,11 @@ pub fn convert(
     // Typst yields an empty string for an unnumbered heading; the format has
     // no such third state — `numbering` is a resolved value or absent.
     let numbering: EcoString = heading.numbers.clone().unwrap_or_default();
-    let (text, markers) = extract_with_markers(&heading.body);
+    // A heading's body is met as authored, not realized: it carries no
+    // tags, so no marks.
+    let extracted = extract_rich(&heading.body, &no_source);
+    let text = EcoString::from(extracted.value);
+    let markers = extracted.markers;
     let segment = if numbering.is_empty() {
         text.clone()
     } else {

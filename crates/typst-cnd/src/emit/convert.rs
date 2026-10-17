@@ -59,7 +59,9 @@ pub struct TextRecord {
     /// Cross-reference markers with their text spans — only from flat-text
     /// nodes. Consulted in `refs::resolve_refs` to attach a span to the
     /// edge already created from `ref_targets` (never a separate edge).
-    pub ref_markers: Vec<(Label, (i64, i64))>,
+    /// The span is `None` when it reached partway into a `code` or `math`
+    /// mark.
+    pub ref_markers: Vec<(Label, Option<(i64, i64)>)>,
     /// `LinkElem` destinations found universally (any node, via a bare
     /// content traverse — mirrors `ref_targets`): always `text_span: None`,
     /// since it never sees the flat-text walk's spans (ADR 0013's rule,
@@ -69,7 +71,7 @@ pub struct TextRecord {
     /// nodes (mirrors `ref_markers`). Resolved in `refs::resolve_links` and
     /// `refs::resolve_refs` (a label/location destination is a
     /// cross-reference with a custom body).
-    pub link_markers: Vec<(LinkDest, (i64, i64))>,
+    pub link_markers: Vec<(LinkDest, Option<(i64, i64)>)>,
 }
 
 impl TextRecord {
@@ -647,7 +649,10 @@ pub fn convert_from_introspector(
         }
         // A paragraph with no text at all — a `box` holding a shape, say —
         // says nothing.
-        if extract::extract_text(&par.body).trim().is_empty() {
+        // An inline equation's text is its source, so a paragraph holding
+        // only `$z$` is kept.
+        let source = |span| extract::source_text(engine, span);
+        if extract::extract_rich(&par.body, &source).value.trim().is_empty() {
             continue;
         }
         items.push((loc, elem));
@@ -724,7 +729,7 @@ fn realized_edges(content: &Content) -> TextRecord {
         .map(|loc| (loc, None))
         .collect();
     text.cite_markers = collect_cite_markers(content);
-    let (_, markers) = extract::extract_with_markers(content);
+    let markers = extract::extract_rich(content, &extract::no_source).markers;
     for marker in markers {
         match marker.kind {
             MarkerKind::Ref(label) if !text.ref_targets.contains(&label) => {
@@ -1149,21 +1154,25 @@ pub fn make_record(
         rustc_hash::FxHashMap::default();
     let mut footnote_span: rustc_hash::FxHashMap<Location, (i64, i64)> =
         rustc_hash::FxHashMap::default();
-    let mut ref_markers: Vec<(Label, (i64, i64))> = Vec::new();
-    let mut link_markers: Vec<(LinkDest, (i64, i64))> = Vec::new();
+    let mut ref_markers: Vec<(Label, Option<(i64, i64)>)> = Vec::new();
+    let mut link_markers: Vec<(LinkDest, Option<(i64, i64)>)> = Vec::new();
     for marker in markers {
         match &marker.kind {
             MarkerKind::Cite(loc) => {
-                cite_span.entry(*loc).or_insert((marker.start, marker.end));
+                if let Some(span) = marker.span {
+                    cite_span.entry(*loc).or_insert(span);
+                }
             }
             MarkerKind::Footnote(loc) => {
-                footnote_span.entry(*loc).or_insert((marker.start, marker.end));
+                if let Some(span) = marker.span {
+                    footnote_span.entry(*loc).or_insert(span);
+                }
             }
             MarkerKind::Ref(label) => {
-                ref_markers.push((*label, (marker.start, marker.end)));
+                ref_markers.push((*label, marker.span));
             }
             MarkerKind::Link(dest) => {
-                link_markers.push((dest.clone(), (marker.start, marker.end)));
+                link_markers.push((dest.clone(), marker.span));
             }
         }
     }
