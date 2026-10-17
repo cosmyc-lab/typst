@@ -769,12 +769,20 @@ fn push_plain(textable: &dyn PlainText, out: &mut EcoString, ctx: &mut MarkerCtx
 /// - An element of the mark table ([`mark_kind`]) is a mark over its body;
 ///   an inline equation's text is its source, as in realized text.
 fn walk_bare(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) -> bool {
+    // What is dropped leaves the spaces around it: the next text drops its
+    // leading one, so `Intro @a and` reads "Intro and".
     if let Some(reference) = content.to_packed::<RefElem>() {
         ctx.bare_refs.push(reference.clone());
+        ctx.collapse_space = true;
         return true;
     }
     if let Some(cite) = content.to_packed::<CiteElem>() {
         ctx.bare_cites.push(cite.clone());
+        ctx.collapse_space = true;
+        return true;
+    }
+    if content.elem() == FootnoteElem::ELEM {
+        ctx.collapse_space = true;
         return true;
     }
     if let Some(link) = content.to_packed::<LinkElem>() {
@@ -876,10 +884,7 @@ pub fn label_text(
             key: cite.key,
             loc: None,
             form: citation_form_str(cite.form.get(materialized)),
-            supplement: cite
-                .supplement
-                .get_cloned(materialized)
-                .map(|content| extract_text(&content).into()),
+            supplement: cite_supplement(cite),
             span: None,
         });
     }
@@ -1027,6 +1032,13 @@ fn open_frame(inner: &Content, start: i64) -> Option<OpenFrame> {
         return Some(OpenFrame { marker_loc, kind: MarkerKind::Link(dest), start });
     }
     None
+}
+
+/// A citation's supplement (`p. 104`) as plain text, if it has one.
+pub fn cite_supplement(cite: &Packed<CiteElem>) -> Option<String> {
+    cite.supplement
+        .get_cloned(StyleChain::default())
+        .map(|content| extract_text(&content).into())
 }
 
 /// Map a Typst citation form to its lowercase schema string. A suppressed

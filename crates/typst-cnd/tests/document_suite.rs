@@ -1469,6 +1469,7 @@ fn example_files_exist() {
         "quote_attribution_reuse.typ",
         "marks.typ",
         "bib_rich.typ",
+        "lang.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -4642,4 +4643,44 @@ fn default_lang_goes_on_doc_not_texts() {
     for text in texts {
         assert_eq!(text.lang, None, "{:?}", text.value);
     }
+}
+
+#[test]
+fn label_texts_take_their_own_lang() {
+    let cnd = cnd_for_example("lang.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("en"));
+    let mut langs: Vec<(&str, Option<&str>)> = all_nodes_full(&cnd)
+        .into_iter()
+        .flat_map(|node| node.texts())
+        .map(|text| (text.value.as_str(), text.lang.as_deref()))
+        .collect();
+    langs.sort();
+    assert_eq!(
+        langs,
+        [
+            ("Languages", None),
+            ("Mostly English words with un mot inside.", None),
+            ("Terme", Some("fr")),
+            ("Un auteur", Some("fr")),
+            ("Une citation.", Some("fr")),
+            ("Une définition.", Some("fr")),
+            ("Une légende", Some("fr")),
+            ("abcd abcd", Some("fr")),
+        ]
+    );
+}
+
+#[test]
+fn a_dropped_citation_leaves_one_space_in_a_label() {
+    let cnd = cnd_for_example("bib_rich.typ");
+    let caption = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Figure(figure) => figure.caption.as_ref(),
+            _ => None,
+        })
+        .expect("a caption");
+    assert_eq!(caption.value, "Shown in and later.");
+    let cites: Vec<_> = caption.cites.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(cites, ["knuth"]);
 }

@@ -9,4 +9,6 @@ The pipeline design follows earlier work @smith2024.
 
 / Prior art @jones2022: A book on the subject.
 
+#figure(rect(width: 1cm, height: 1cm), caption: [Shown in @knuth and later.])
+
 #bibliography("refs.yml", style: "apa")

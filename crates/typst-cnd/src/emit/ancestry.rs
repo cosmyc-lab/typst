@@ -215,6 +215,10 @@ pub struct Ancestry {
     /// For each element made of text (see [`is_text_node`]), the locales
     /// its glyphs are set in, with how many glyphs each, in the order met.
     locales: FxHashMap<Location, Vec<(Locale, usize)>>,
+    /// The scope a label text is laid out in, by the container that owns
+    /// it: a figure's caption by the figure, a term by its description's
+    /// slot (see [`Ancestry::label_lang_of`]).
+    label_scopes: FxHashMap<Location, Location>,
 }
 
 impl Ancestry {
@@ -365,6 +369,14 @@ impl Ancestry {
     ///
     /// Realization keeps no style chain with a paragraph, so the locale is
     /// read where layout recorded it, on each run of glyphs.
+    ///
+    /// This differs on purpose from the PDF export's tagging, where a
+    /// group takes the language of its first child. A CND text has one
+    /// `lang` for the whole of it, and a foreign phrase inside it is not
+    /// modeled (spec §4.1): the language most of the text is in describes
+    /// it, where the first run would let a paragraph opening on a quoted
+    /// foreign word take that word's language. The tie-break keeps the
+    /// result deterministic.
     pub fn lang_of(&self, location: Location) -> Option<EcoString> {
         let mut best: Option<(Locale, usize)> = None;
         for &(locale, count) in self.locales.get(&location)? {
@@ -373,6 +385,13 @@ impl Ancestry {
             }
         }
         best.map(|(locale, _)| locale.rfc_3066())
+    }
+
+    /// The language of the label text owned by `owner` (see
+    /// [`Ancestry::lang_of`]): the caption of the figure at `owner`, or the
+    /// term of the description slot at `owner`.
+    pub fn label_lang_of(&self, owner: Location) -> Option<EcoString> {
+        self.lang_of(*self.label_scopes.get(&owner)?)
     }
 
     /// Whether the figure at `figure` is a drawing (cnd-sdk spec §6.7): its
@@ -868,6 +887,10 @@ struct Open {
     /// a heading, a list, a term list, a quote — so that drawing all of its
     /// text inside artifacts makes it decorative (see [`is_text_node`]).
     is_text_node: bool,
+    /// Whether the locales of the glyphs laid out in it are counted (see
+    /// [`Ancestry::lang_of`]): an element made of text, or a label text's
+    /// scope (see [`label_owner`]).
+    counts_locale: bool,
 }
 
 /// An open paragraph, as [`covering_par`] needs it.
@@ -931,6 +954,26 @@ impl OpenPar {
     fn text(&self) -> &str {
         self.text.get_or_init(|| normalized_text(&self.content))
     }
+}
+
+/// The container owning the label text `inner` opens, if it opens one: a
+/// figure's caption is owned by the figure, a term by its description's
+/// slot, which also holds it.
+fn label_owner(inner: &Content, stack: &[Open]) -> Option<Location> {
+    let owner = |kind: SlotKind| {
+        stack
+            .iter()
+            .rev()
+            .find(|open| open.slot.is_some_and(|slot| slot.kind() == kind))
+            .map(|open| open.location)
+    };
+    if inner.elem() == FigureCaption::ELEM {
+        return owner(SlotKind::FigureBody);
+    }
+    let marker = inner.to_packed::<PdfMarkerTag>()?;
+    (marker.kind == PdfMarkerTagKind::TermsItemLabel)
+        .then(|| owner(SlotKind::TermDescription))
+        .flatten()
 }
 
 /// Whether `inner` becomes a node made of text alone. When every glyph such
@@ -1303,6 +1346,10 @@ fn walk(
                 if let Some(parent) = stack.last_mut() {
                     parent.had_child = true;
                 }
+                let label_owner = label_owner(inner, stack);
+                if let Some(owner) = label_owner {
+                    ancestry.label_scopes.entry(owner).or_insert(location);
+                }
                 stack.push(Open {
                     location,
                     floats: in_floats,
@@ -1329,6 +1376,7 @@ fn walk(
                     glyphs_in_artifact: 0,
                     glyphs_outside_artifact: 0,
                     is_text_node: is_par || is_text_node(inner),
+                    counts_locale: is_par || is_text_node(inner) || label_owner.is_some(),
                 });
             }
             FrameItem::Tag(Tag::End(location, ..)) => {
@@ -1374,12 +1422,17 @@ fn walk(
             FrameItem::Text(text) => {
                 let in_artifact = scope.in_artifact(stack);
                 let locale = Locale::new(text.lang, text.region);
-                for open in stack.iter_mut().filter(|open| open.is_text_node) {
-                    if in_artifact {
-                        open.glyphs_in_artifact += 1;
+                for open in stack.iter_mut() {
+                    if open.is_text_node {
+                        if in_artifact {
+                            open.glyphs_in_artifact += 1;
+                        } else {
+                            open.glyphs_outside_artifact += 1;
+                        }
+                    }
+                    if in_artifact || !open.counts_locale {
                         continue;
                     }
-                    open.glyphs_outside_artifact += 1;
                     let counts = ancestry.locales.entry(open.location).or_default();
                     match counts.iter_mut().find(|(known, _)| *known == locale) {
                         Some((_, count)) => *count += text.glyphs.len(),

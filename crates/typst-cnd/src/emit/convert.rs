@@ -706,7 +706,50 @@ pub fn convert_from_introspector(
     forget_dropped_nodes(ctx);
     absorb_covered_paragraphs(ctx, &absorbed);
     attach_attributions(ctx, &attributions);
+    apply_label_langs(ctx, ancestry, &attributions, &doc_lang);
     Ok(())
+}
+
+/// Give each caption, term and attribution its language where it differs
+/// from the document's, read from the glyphs laid out in its own scope (see
+/// `Ancestry::lang_of`): a caption's, a term's label, or the paragraph an
+/// attribution is laid out in. Their text is walked as authored, which
+/// carries no styles.
+fn apply_label_langs(
+    ctx: &mut ConvertContext,
+    ancestry: &Ancestry,
+    attributions: &[(Location, Content)],
+    doc_lang: &str,
+) {
+    let differs = |lang: Option<EcoString>| lang.filter(|lang| lang != doc_lang);
+    let mut langs: Vec<(Uuid, TextSlot, EcoString)> = Vec::new();
+    let mut located: Vec<(Location, Uuid)> =
+        ctx.location_to_id.iter().map(|(loc, id)| (*loc, *id)).collect();
+    located.sort_unstable_by_key(|(_, id)| *id);
+    for (location, id) in located {
+        if let Some(lang) = differs(ancestry.label_lang_of(location)) {
+            langs.push((id, TextSlot::Caption, lang));
+        }
+        for (index, slot) in ancestry.item_slots(location).iter().enumerate() {
+            if slot.kind() == SlotKind::TermDescription
+                && let Some(lang) = differs(ancestry.label_lang_of(slot.location()))
+            {
+                langs.push((id, TextSlot::Term(index), lang));
+            }
+        }
+    }
+    for (quote, par) in attributions {
+        let Some(id) = ctx.location_to_id.get(quote).copied() else { continue };
+        if let Some(lang) = differs(par.location().and_then(|loc| ancestry.lang_of(loc)))
+        {
+            langs.push((id, TextSlot::Attribution, lang));
+        }
+    }
+    for (id, slot, lang) in langs {
+        if let Some(text) = ctx.node_mut(id).and_then(|node| node.text_mut(slot)) {
+            text.lang = Some(lang.into());
+        }
+    }
 }
 
 /// Give each block quote's attribution the citations and footnotes of the
@@ -1230,10 +1273,7 @@ fn collect_cite_markers(content: &Content) -> Vec<CiteMarker> {
             && let Some(loc) = inner.location()
         {
             let form = extract::citation_form_str(cite.form.get(StyleChain::default()));
-            let supplement = cite
-                .supplement
-                .get_cloned(StyleChain::default())
-                .map(|c| extract::extract_text(&c).into());
+            let supplement = extract::cite_supplement(cite);
             markers.push(CiteMarker {
                 key: cite.key,
                 loc: Some(loc),
