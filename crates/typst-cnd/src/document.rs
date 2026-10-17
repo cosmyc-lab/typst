@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ecow::{EcoString, eco_vec};
@@ -5,11 +6,14 @@ use typst_layout::{PagedDocument, PagedIntrospector, layout_document};
 use typst_library::diag::{SourceResult, error};
 use typst_library::engine::Engine;
 use typst_library::format::DocumentFormatOptions;
-use typst_library::foundations::{Content, Datetime, Output, Smart, StyleChain, Target};
+use typst_library::foundations::{
+    Content, Datetime, Label, Output, Selector, Smart, StyleChain, Target, Value,
+};
 use typst_library::introspection::Introspector;
 use typst_library::model::{Document, DocumentInfo};
 use typst_library::text::Locale;
 use typst_syntax::Span;
+use typst_utils::PicoStr;
 
 use crate::emit::ancestry::Ancestry;
 use crate::emit::convert::{self, ConvertContext};
@@ -206,14 +210,74 @@ pub fn cnd_from_document(
         cnd_version: CND_VERSION.into(),
         built_at,
         source: Some(source),
-        doc: doc_metadata_from_info(document.info(), document.lang()),
+        doc: doc_metadata_from_info(
+            document.info(),
+            document.lang(),
+            doc_markers(document.introspector().as_ref()),
+        ),
         nodes: document.nodes().to_vec(),
         bibliography: document.bibliography().to_vec(),
         footnotes: document.footnotes().to_vec(),
     }
 }
 
-fn doc_metadata_from_info(info: &DocumentInfo, lang: &str) -> DocMetadata {
+/// The label of the marker `cnd.document` writes.
+const DOCUMENT_MARKER: &str = "cnd-document";
+
+/// The `DocMetadata` fields an `extra` key may not repeat (spec §3).
+const RESERVED_KEYS: [&str; 9] = [
+    "title",
+    "authors",
+    "date",
+    "keywords",
+    "description",
+    "lang",
+    "status",
+    "version",
+    "extra",
+];
+
+/// What the author declared with `cnd.document`: `status`, `version` and
+/// `extra`, read off the `<cnd-document>` markers in document order.
+///
+/// A later marker overrides an earlier one key by key. A non-string
+/// `extra` value is dropped, and so is a key naming a `DocMetadata` field
+/// (spec §3: the field, not `extra`, holds it).
+pub fn doc_markers(
+    introspector: &dyn Introspector,
+) -> (Option<String>, Option<String>, BTreeMap<String, String>) {
+    let mut status = None;
+    let mut version = None;
+    let mut extra = BTreeMap::new();
+    let Some(label) = Label::new(PicoStr::intern(DOCUMENT_MARKER)) else {
+        return (status, version, extra);
+    };
+    for elem in introspector.query(&Selector::Label(label)) {
+        let Ok(Value::Dict(marker)) = elem.get_by_name("value") else { continue };
+        if let Some(Value::Str(value)) = marker.get("status").ok().cloned() {
+            status = Some(value.to_string());
+        }
+        if let Some(Value::Str(value)) = marker.get("version").ok().cloned() {
+            version = Some(value.to_string());
+        }
+        if let Some(Value::Dict(pairs)) = marker.get("extra").ok().cloned() {
+            for (key, value) in &pairs {
+                if let Value::Str(value) = value
+                    && !RESERVED_KEYS.contains(&key.as_str())
+                {
+                    extra.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+    }
+    (status, version, extra)
+}
+
+fn doc_metadata_from_info(
+    info: &DocumentInfo,
+    lang: &str,
+    (status, version, extra): (Option<String>, Option<String>, BTreeMap<String, String>),
+) -> DocMetadata {
     DocMetadata {
         title: info
             .title
@@ -225,9 +289,9 @@ fn doc_metadata_from_info(info: &DocumentInfo, lang: &str) -> DocMetadata {
         keywords: info.keywords.iter().map(|k| k.clone().into()).collect(),
         description: info.description.clone().map(Into::into),
         lang: Some(lang.into()),
-        status: None,
-        version: None,
-        extra: std::collections::BTreeMap::default(),
+        status,
+        version,
+        extra,
     }
 }
 

@@ -1354,6 +1354,10 @@ pub fn apply_metadata(ctx: &mut ConvertContext) {
 /// author's table kind, around the table it wraps.
 const TABLE_KIND_HINT: &str = "table-kind";
 
+/// The state key under which `cnd.code` holds a listing's title, around the
+/// code it wraps. A string on a code node becomes its `title` (spec §6.5).
+const CODE_TITLE_HINT: &str = "code-title";
+
 /// Turn the authoring hints a node's metadata holds into the fields they
 /// stand for, and take them out of the metadata.
 ///
@@ -1363,13 +1367,20 @@ const TABLE_KIND_HINT: &str = "table-kind";
 /// table sees the hint too (its cells' paragraphs, a figure around it), so
 /// the key leaves every node's metadata.
 fn promote_hints(node: &mut CndNode) {
-    let Some(hint) = node.base_mut().state_metadata.remove(TABLE_KIND_HINT) else {
-        return;
-    };
-    if let CndNode::Table(table) = node
-        && let serde_json::Value::String(kind) = hint
-    {
-        table.kind = Some(kind);
+    let table_kind = node.base_mut().state_metadata.remove(TABLE_KIND_HINT);
+    let code_title = node.base_mut().state_metadata.remove(CODE_TITLE_HINT);
+    match node {
+        CndNode::Table(table) => {
+            if let Some(serde_json::Value::String(kind)) = table_kind {
+                table.kind = Some(kind);
+            }
+        }
+        CndNode::Code(code) => {
+            if let Some(serde_json::Value::String(title)) = code_title {
+                code.title = Some(title);
+            }
+        }
+        _ => {}
     }
 }
 

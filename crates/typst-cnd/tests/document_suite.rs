@@ -1490,6 +1490,8 @@ fn example_files_exist() {
         "figure_description.typ",
         "ref_exact_targets.typ",
         "math_refs.typ",
+        "doc_metadata.typ",
+        "doc_metadata_markers.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -4966,4 +4968,55 @@ fn refs_written_in_a_heading_or_caption_sit_there() {
         .filter(|r| r.label == "fig-math")
         .count();
     assert_eq!(count, 1);
+}
+
+#[test]
+fn doc_status_version_extra() {
+    let cnd = cnd_for_example("doc_metadata.typ");
+    assert_eq!(cnd.doc.status.as_deref(), Some("Approved"));
+    assert_eq!(cnd.doc.version.as_deref(), Some("1.2"));
+    let extra: Vec<_> = cnd.doc.extra.iter().collect();
+    assert_eq!(extra, [(&"client".to_string(), &"ACME".to_string())]);
+}
+
+#[test]
+fn doc_markers_are_not_nodes() {
+    let cnd = cnd_for_example("doc_metadata.typ");
+    for node in all_nodes_full(&cnd) {
+        let json = serde_json::to_string(node).expect("node json");
+        assert!(!json.contains("Approved"), "a node holds the marker: {json}");
+        assert!(!json.contains("ACME"), "a node holds the marker: {json}");
+    }
+}
+
+#[test]
+fn code_title_from_helper() {
+    let cnd = cnd_for_example("doc_metadata.typ");
+    let codes: Vec<_> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Code(code) => Some(code),
+            _ => None,
+        })
+        .collect();
+    let titles: Vec<_> = codes.iter().map(|c| c.title.as_deref()).collect();
+    assert_eq!(titles, [Some("main.py"), None]);
+    for node in all_nodes_full(&cnd) {
+        assert!(
+            !node.base().state_metadata.contains_key("code-title"),
+            "a {} keeps the hint",
+            node_type(node)
+        );
+    }
+}
+
+#[test]
+fn doc_markers_override_and_drop() {
+    let cnd = cnd_for_example("doc_metadata_markers.typ");
+    assert_eq!(cnd.doc.status.as_deref(), Some("Final"));
+    assert_eq!(cnd.doc.version.as_deref(), Some("0.1"));
+    let extra: Vec<_> =
+        cnd.doc.extra.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    assert_eq!(extra, [("client", "Globex"), ("team", "Docs")]);
+    assert_eq!(cnd.doc.title, "Marker rules");
 }
