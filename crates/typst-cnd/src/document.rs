@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ecow::eco_vec;
+use ecow::{EcoString, eco_vec};
 use typst_layout::{PagedDocument, PagedIntrospector, layout_document};
 use typst_library::diag::{SourceResult, error};
 use typst_library::engine::Engine;
@@ -8,6 +8,7 @@ use typst_library::format::DocumentFormatOptions;
 use typst_library::foundations::{Content, Datetime, Output, Smart, StyleChain, Target};
 use typst_library::introspection::Introspector;
 use typst_library::model::{Document, DocumentInfo};
+use typst_library::text::Locale;
 use typst_syntax::Span;
 
 use crate::emit::ancestry::Ancestry;
@@ -22,6 +23,8 @@ use crate::model::{
 #[derive(Debug, Clone)]
 pub struct CndDocument {
     info: DocumentInfo,
+    /// The document's language (see [`doc_lang`]).
+    lang: EcoString,
     nodes: Vec<crate::model::CndNode>,
     bibliography: Vec<BibEntry>,
     footnotes: Vec<Footnote>,
@@ -38,6 +41,11 @@ pub struct CndDocument {
 impl CndDocument {
     pub fn info(&self) -> &DocumentInfo {
         &self.info
+    }
+
+    /// The document's language, as an RFC 3066 tag (`doc.lang`).
+    pub fn lang(&self) -> &str {
+        &self.lang
     }
 
     pub fn nodes(&self) -> &[crate::model::CndNode] {
@@ -87,6 +95,7 @@ impl Output for CndDocument {
         let paged = layout_document(engine, content, styles)?;
         let introspector = paged.introspector().clone();
         let info = paged.info().clone();
+        let lang = doc_lang(&info, styles);
         let options = paged.options().clone();
 
         // Containment is read off the laid-out frames: `Introspector::query`
@@ -99,7 +108,7 @@ impl Output for CndDocument {
             introspector.as_ref(),
             content,
             styles,
-            &info,
+            lang.clone(),
             &ancestry,
         )?;
         ctx.artifact_locations = ancestry.artifact_locations().clone();
@@ -131,6 +140,7 @@ impl Output for CndDocument {
 
         Ok(Self {
             info,
+            lang,
             nodes,
             bibliography,
             footnotes,
@@ -150,7 +160,7 @@ fn realize_and_convert(
     introspector: &dyn Introspector,
     _content: &Content,
     styles: StyleChain,
-    info: &DocumentInfo,
+    doc_lang: EcoString,
     ancestry: &Ancestry,
 ) -> SourceResult<ConvertContext> {
     let mut ctx = ConvertContext::default();
@@ -158,17 +168,21 @@ fn realize_and_convert(
         engine,
         introspector,
         styles,
-        doc_lang_from_info(info),
+        doc_lang,
         ancestry,
         &mut ctx,
     )?;
     Ok(ctx)
 }
 
-fn doc_lang_from_info(info: &DocumentInfo) -> Option<ecow::EcoString> {
+/// The document's language: the locale the author set for it (Typst reads
+/// it from the text language set before any content), or else the text
+/// locale at the document's root, which is Typst's default (`en`) when
+/// nothing sets one. Every text inherits it (spec §4.1).
+fn doc_lang(info: &DocumentInfo, styles: StyleChain) -> EcoString {
     match info.locale {
-        Smart::Custom(locale) => Some(locale.rfc_3066()),
-        Smart::Auto => None,
+        Smart::Custom(locale) => locale.rfc_3066(),
+        Smart::Auto => Locale::get_in(styles).rfc_3066(),
     }
 }
 
@@ -192,15 +206,14 @@ pub fn cnd_from_document(
         cnd_version: CND_VERSION.into(),
         built_at,
         source: Some(source),
-        doc: doc_metadata_from_info(document.info()),
+        doc: doc_metadata_from_info(document.info(), document.lang()),
         nodes: document.nodes().to_vec(),
         bibliography: document.bibliography().to_vec(),
         footnotes: document.footnotes().to_vec(),
     }
 }
 
-fn doc_metadata_from_info(info: &DocumentInfo) -> DocMetadata {
-    use ecow::EcoString;
+fn doc_metadata_from_info(info: &DocumentInfo, lang: &str) -> DocMetadata {
     DocMetadata {
         title: info
             .title
@@ -211,10 +224,7 @@ fn doc_metadata_from_info(info: &DocumentInfo) -> DocMetadata {
         date: doc_date_from_info(info),
         keywords: info.keywords.iter().map(|k| k.clone().into()).collect(),
         description: info.description.clone().map(Into::into),
-        lang: match info.locale {
-            Smart::Custom(locale) => Some(locale.rfc_3066().into()),
-            Smart::Auto => None,
-        },
+        lang: Some(lang.into()),
         status: None,
         version: None,
         extra: std::collections::BTreeMap::default(),

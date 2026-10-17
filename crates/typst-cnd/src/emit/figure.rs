@@ -7,8 +7,9 @@ use typst_library::visualize::ImageElem;
 use uuid::Uuid;
 
 use crate::emit::convert::{self, NodeRecord};
+use crate::emit::extract::{label_text, source_text};
 use crate::location::placeholder_location;
-use crate::model::{FigureNode, ImageNode, RawSource, RichText};
+use crate::model::{FigureNode, ImageNode, RawSource};
 
 /// Convert a figure into its wrapper node: kind, caption and numbering. Its
 /// `children` are left empty: `convert::assemble` fills them with the
@@ -30,33 +31,32 @@ pub fn from_figure(
     let mut figure = figure.clone();
     figure.synthesize(engine, styles)?;
 
-    let caption = figure.caption.get_cloned(styles);
+    // The caption is its body, without the supplement or the number: a
+    // label text, walked as authored.
+    let caption = figure
+        .caption
+        .get_cloned(styles)
+        .map(|caption| label_text(&caption.body, &|span| source_text(engine, span)));
     let fig_number = convert::figure_number(engine, &figure, styles);
-    let (mut record, all_edges) =
-        convert::make_record(engine, introspector, content, &[])?;
+    let (mut record, _) = convert::make_record(engine, introspector, content, &[])?;
 
     let mut node = FigureNode::new(Uuid::new_v4(), placeholder_location());
-    node.caption = caption.as_ref().map(convert::caption_text).map(RichText::plain);
     node.numbering =
         convert::numbering(fig_number, convert::figure_counter_label(&figure, styles));
     node.kind = figure_kind(&figure, styles);
-
-    let edges = if drawing {
+    if drawing {
         node.raw = convert::source_text(engine, figure.body.span()).map(RawSource::typst);
-        Some(all_edges)
-    } else {
-        match &caption {
-            Some(caption) => {
-                Some(convert::make_record(engine, introspector, &caption.body, &[])?.1)
-            }
-            None => None,
+    }
+
+    if let Some((text, mut edges)) = caption {
+        // A drawing has no texts in its body: what is written there is the
+        // caption's.
+        if drawing {
+            edges.merge(convert::unrealized_edges(&figure.body));
         }
-    };
-    if node.caption.is_some()
-        && let Some(mut edges) = edges
-    {
         edges.slot = crate::model::TextSlot::Caption;
         record.add_text(edges);
+        node.caption = Some(text);
     }
     Ok((node, record))
 }

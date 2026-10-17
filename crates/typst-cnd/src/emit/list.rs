@@ -7,7 +7,9 @@
 //! say: an enum item's number and a term.
 //!
 //! A list has no text of its own, so it captures no edge: a footnote or a
-//! citation written in an item is an edge of the paragraph it sits in.
+//! citation written in an item is an edge of the paragraph it sits in. A
+//! term is a text of its own, walked as authored (`extract::label_text`):
+//! what is written in it is its edges.
 
 use typst_library::engine::Engine;
 use typst_library::foundations::{Packed, Smart, StyleChain};
@@ -15,10 +17,10 @@ use typst_library::introspection::Introspector;
 use typst_library::model::{EnumElem, EnumItem, ListElem, TermsElem};
 
 use crate::emit::convert::{self, NodeRecord};
-use crate::emit::extract::extract_text;
+use crate::emit::extract::{label_text, source_text};
 use crate::location::placeholder_location;
 use crate::model::{
-    ListItem as CndListItem, ListNode, RichText, TermItem as CndTermItem, TermsNode,
+    ListItem as CndListItem, ListNode, TermItem as CndTermItem, TermsNode, TextSlot,
 };
 
 pub fn from_list(
@@ -57,22 +59,23 @@ pub fn from_enum(
 
 /// Convert a Typst definition list (`/ term: description`) into a
 /// `TermsNode`. Each description's blocks are routed into its item.
+///
+/// A term is read from what the author wrote, not from its realization,
+/// so the `strong` the terms rule lays it out in is no mark of it.
 pub fn from_terms(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     terms: &Packed<TermsElem>,
 ) -> typst_library::diag::SourceResult<(TermsNode, NodeRecord)> {
-    let (record, _) =
+    let (mut record, _) =
         convert::make_record(engine, introspector, &terms.clone().pack(), &[])?;
     let mut node = TermsNode::new(uuid::Uuid::new_v4(), placeholder_location());
-    node.items = terms
-        .children
-        .iter()
-        .map(|item| CndTermItem {
-            term: RichText::plain(extract_text(&item.term)),
-            children: Vec::new(),
-        })
-        .collect();
+    for (index, item) in terms.children.iter().enumerate() {
+        let (term, mut edges) = label_text(&item.term, &|span| source_text(engine, span));
+        edges.slot = TextSlot::Term(index);
+        record.add_text(edges);
+        node.items.push(CndTermItem { term, children: Vec::new() });
+    }
     Ok((node, record))
 }
 

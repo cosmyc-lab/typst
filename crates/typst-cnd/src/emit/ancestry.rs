@@ -52,6 +52,7 @@
 use std::cell::OnceCell;
 use std::ops::ControlFlow;
 
+use ecow::EcoString;
 use rustc_hash::{FxHashMap, FxHashSet};
 use typst_library::WorldExt;
 use typst_library::engine::Engine;
@@ -66,7 +67,7 @@ use typst_library::model::{
     HeadingElem, ListElem, OutlineElem, ParElem, ParbreakElem, PdfMarkerTag,
     PdfMarkerTagKind, QuoteElem, TableCell, TableCellKind, TableElem, TermsElem,
 };
-use typst_library::text::RawElem;
+use typst_library::text::{Locale, RawElem};
 use typst_library::visualize::ImageElem;
 use typst_syntax::{FileId, Span};
 
@@ -211,6 +212,9 @@ pub struct Ancestry {
     printed_notes: FxHashSet<Location>,
     /// What is open in each note's frames (see [`NoteStacks`]).
     note_stacks: NoteStacks,
+    /// For each element made of text (see [`is_text_node`]), the locales
+    /// its glyphs are set in, with how many glyphs each, in the order met.
+    locales: FxHashMap<Location, Vec<(Locale, usize)>>,
 }
 
 impl Ancestry {
@@ -353,6 +357,22 @@ impl Ancestry {
         if placed {
             self.figures_with_placed_nodes.insert(figure);
         }
+    }
+
+    /// The language of the text the element at `location` lays out: the
+    /// locale most of its glyphs are set in, the first met on a tie. `None`
+    /// for an element that lays out no glyph, or that is not made of text.
+    ///
+    /// Realization keeps no style chain with a paragraph, so the locale is
+    /// read where layout recorded it, on each run of glyphs.
+    pub fn lang_of(&self, location: Location) -> Option<EcoString> {
+        let mut best: Option<(Locale, usize)> = None;
+        for &(locale, count) in self.locales.get(&location)? {
+            if best.is_none_or(|(_, most)| count > most) {
+                best = Some((locale, count));
+            }
+        }
+        best.map(|(locale, _)| locale.rfc_3066())
     }
 
     /// Whether the figure at `figure` is a drawing (cnd-sdk spec §6.7): its
@@ -1351,13 +1371,19 @@ fn walk(
                     }
                 }
             }
-            FrameItem::Text(_) => {
+            FrameItem::Text(text) => {
                 let in_artifact = scope.in_artifact(stack);
+                let locale = Locale::new(text.lang, text.region);
                 for open in stack.iter_mut().filter(|open| open.is_text_node) {
                     if in_artifact {
                         open.glyphs_in_artifact += 1;
-                    } else {
-                        open.glyphs_outside_artifact += 1;
+                        continue;
+                    }
+                    open.glyphs_outside_artifact += 1;
+                    let counts = ancestry.locales.entry(open.location).or_default();
+                    match counts.iter_mut().find(|(known, _)| *known == locale) {
+                        Some((_, count)) => *count += text.glyphs.len(),
+                        None => counts.push((locale, text.glyphs.len())),
                     }
                 }
             }

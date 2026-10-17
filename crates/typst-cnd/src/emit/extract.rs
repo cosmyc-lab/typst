@@ -4,14 +4,14 @@ use ecow::EcoString;
 use typst_library::World;
 use typst_library::engine::Engine;
 use typst_library::foundations::{
-    Content, Label, NativeElement, PlainText, StyleChain, Value,
+    Content, Label, NativeElement, Packed, PlainText, Smart, StyleChain, Value,
 };
 use typst_library::introspection::{Location, Tag, TagElem};
 use typst_library::math::{AttachElem, EquationElem, FracElem, RootElem};
 use typst_library::model::{
     ArtifactElem, CitationForm, CiteElem, Destination, EmphElem, EnumElem, FigureElem,
     FootnoteElem, HeadingElem, LinkElem, LinkMarker, LinkTarget, ListElem, PdfMarkerTag,
-    PdfMarkerTagKind, QuoteElem, RefElem, StrongElem, TableElem, TermsElem,
+    PdfMarkerTagKind, QuoteElem, RefElem, StrongElem, Supplement, TableElem, TermsElem,
 };
 use typst_library::text::{
     HighlightElem, LinebreakElem, RawElem, StrikeElem, SubElem, SuperElem, UnderlineElem,
@@ -21,7 +21,7 @@ use typst_syntax::{FileId, Span};
 
 use crate::rich_text::{
     CODE, EMPH, HIGHLIGHT, MATH, Mark, RawSource, STRIKE, STRONG, SUB, SUP, UNDERLINE,
-    canonical_marks,
+    canonical_marks, trim_rebase,
 };
 
 /// Extract plain text from content without duplicating inline code.
@@ -97,6 +97,21 @@ fn instance_source(
         }
     });
     foreign.is_continue().then_some(inner)
+}
+
+/// The text an inline equation contributes to a text and the `raw` of its
+/// `math` mark: its source when that source is this instance's
+/// ([`instance_source`]), its linear form ([`math_linear`]) with no `raw`
+/// otherwise. The formula never vanishes.
+fn equation_text(
+    equation: &Content,
+    body: &Content,
+    lookup: Option<SourceLookup<'_>>,
+) -> (String, Option<RawSource>) {
+    match lookup.and_then(|lookup| instance_source(equation, body, lookup)) {
+        Some(text) => (text.clone(), Some(RawSource::typst(text))),
+        None => (math_linear(body), None),
+    }
 }
 
 /// A linear, readable form of an unrealized equation body, for an equation
@@ -314,6 +329,11 @@ pub struct Extracted {
     pub value: String,
     pub marks: Vec<Mark>,
     pub markers: Vec<ExtractedMarker>,
+    /// The citation and footnote markers written in a term, which a term's
+    /// description paragraph opens with: they are edges of the term
+    /// (`label_text`), never of the paragraph, which must leave them out of
+    /// the edges it collects by location.
+    pub suppressed: Vec<Location>,
 }
 
 #[derive(Debug, Clone)]
@@ -421,7 +441,15 @@ pub fn extract_rich(content: &Content, source: SourceLookup<'_>) -> Extracted {
     // `Interrupt` for `PAR`, so no paragraph group forms around the link at
     // the flow level in the first place, and the block's own inner
     // paragraph is realized without ever seeing the link's tags.
-    let MarkerCtx { open, mut done, open_marks, mut marks, pos, .. } = ctx;
+    let MarkerCtx {
+        open,
+        mut done,
+        open_marks,
+        mut marks,
+        pos,
+        suppressed,
+        ..
+    } = ctx;
     for frame in open {
         if matches!(frame.kind, MarkerKind::Link(_)) {
             done.push(ExtractedMarker {
@@ -443,7 +471,12 @@ pub fn extract_rich(content: &Content, source: SourceLookup<'_>) -> Extracted {
     let mut spans: Vec<&mut Option<(i64, i64)>> =
         done.iter_mut().map(|marker| &mut marker.span).collect();
     let marks = canonical_marks(pos, marks, &mut spans);
-    Extracted { value: out.into(), marks, markers: done }
+    Extracted {
+        value: out.into(),
+        marks,
+        markers: done,
+        suppressed,
+    }
 }
 
 #[derive(Default)]
@@ -482,6 +515,19 @@ struct MarkerCtx<'a> {
     /// a `Label` marker with no footnote open is the number a printed
     /// footnote entry starts with, which is not part of the note's text.
     footnotes: Vec<Location>,
+    /// Open terms (by location), realized at the start of their
+    /// description's first paragraph.
+    term_labels: Vec<Location>,
+    /// The marker elements met inside an open term (see
+    /// [`Extracted::suppressed`]).
+    suppressed: Vec<Location>,
+    /// Whether the content walked is as authored ([`label_text`]): its
+    /// marks, references, citations and links are bare elements.
+    bare: bool,
+    /// The references met as authored, in order.
+    bare_refs: Vec<Packed<RefElem>>,
+    /// The citations met as authored, in order.
+    bare_cites: Vec<Packed<CiteElem>>,
     /// Whether any text scope was excluded during this walk.
     excluded_any: bool,
     /// An excluded scope just closed: the next text drops its leading
@@ -536,6 +582,13 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
                 {
                     ctx.footnotes.push(loc);
                 }
+                if inner
+                    .to_packed::<PdfMarkerTag>()
+                    .is_some_and(|marker| marker.kind == PdfMarkerTagKind::TermsItemLabel)
+                    && let Some(loc) = inner.location()
+                {
+                    ctx.term_labels.push(loc);
+                }
                 open_tag(inner, ctx);
                 open_mark(inner, out, ctx);
             }
@@ -558,6 +611,10 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
                 }
                 if let Some(index) = ctx.footnotes.iter().rposition(|open| *open == loc) {
                     ctx.footnotes.remove(index);
+                }
+                if let Some(index) = ctx.term_labels.iter().rposition(|open| *open == loc)
+                {
+                    ctx.term_labels.remove(index);
                 }
                 if let Some(index) = ctx.excluded.iter().rposition(|open| *open == loc) {
                     ctx.excluded.remove(index);
@@ -602,6 +659,10 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
         return;
     }
 
+    if ctx.bare && walk_bare(content, out, ctx) {
+        return;
+    }
+
     // A bare (unrealized) footnote or citation — as found inside content
     // that is text-extracted without realization, e.g. list-item or
     // table-cell bodies — must not leak its note body / supplement into the
@@ -626,19 +687,7 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
     }
 
     if let Some(textable) = content.with::<dyn PlainText>() {
-        let before = out.len();
-        textable.plain_text(out);
-        if ctx.collapse_space && out.len() > before {
-            if out[..before].chars().next_back().is_none_or(char::is_whitespace) {
-                let added = out[before..].trim_start().to_string();
-                out.truncate(before);
-                out.push_str(&added);
-            }
-            if out.len() > before {
-                ctx.collapse_space = false;
-            }
-        }
-        ctx.pos += out[before..].chars().count() as i64;
+        push_plain(textable, out, ctx);
         return;
     }
 
@@ -666,24 +715,8 @@ fn open_mark(inner: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
         });
     let start = ctx.pos;
     let mut raw = None;
-    // An inline equation's text is its source when that source is this
-    // instance's, its linear form otherwise: the formula never vanishes.
     if let Some(equation) = inner.to_packed::<EquationElem>() {
-        let source = ctx
-            .source
-            .and_then(|lookup| instance_source(inner, &equation.body, lookup));
-        let text = match source {
-            Some(text) => {
-                raw = Some(RawSource::typst(text.clone()));
-                text
-            }
-            None => math_linear(&equation.body),
-        };
-        out.push_str(&text);
-        ctx.pos += text.chars().count() as i64;
-        if !text.is_empty() {
-            ctx.collapse_space = false;
-        }
+        raw = push_equation(inner, &equation.body, out, ctx);
         ctx.math.push(loc);
     }
     if !in_marker {
@@ -691,11 +724,184 @@ fn open_mark(inner: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
     }
 }
 
+/// Append an inline equation's text ([`equation_text`]) and return the
+/// `raw` of its mark.
+fn push_equation(
+    equation: &Content,
+    body: &Content,
+    out: &mut EcoString,
+    ctx: &mut MarkerCtx<'_>,
+) -> Option<RawSource> {
+    let (text, raw) = equation_text(equation, body, ctx.source);
+    out.push_str(&text);
+    ctx.pos += text.chars().count() as i64;
+    if !text.is_empty() {
+        ctx.collapse_space = false;
+    }
+    raw
+}
+
+/// Append an element's plain text, dropping its leading whitespace after an
+/// excluded scope (see [`MarkerCtx::collapse_space`]).
+fn push_plain(textable: &dyn PlainText, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
+    let before = out.len();
+    textable.plain_text(out);
+    if ctx.collapse_space && out.len() > before {
+        if out[..before].chars().next_back().is_none_or(char::is_whitespace) {
+            let added = out[before..].trim_start().to_string();
+            out.truncate(before);
+            out.push_str(&added);
+        }
+        if out.len() > before {
+            ctx.collapse_space = false;
+        }
+    }
+    ctx.pos += out[before..].chars().count() as i64;
+}
+
+/// Walk an element met as authored, in a label text ([`label_text`]):
+/// whether it was handled here.
+///
+/// - A reference or a citation renders text the authored content does not
+///   hold: it adds nothing to the value, and is kept for an edge with no
+///   span.
+/// - A link is an edge whose span covers its body.
+/// - An element of the mark table ([`mark_kind`]) is a mark over its body;
+///   an inline equation's text is its source, as in realized text.
+fn walk_bare(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) -> bool {
+    if let Some(reference) = content.to_packed::<RefElem>() {
+        ctx.bare_refs.push(reference.clone());
+        return true;
+    }
+    if let Some(cite) = content.to_packed::<CiteElem>() {
+        ctx.bare_cites.push(cite.clone());
+        return true;
+    }
+    if let Some(link) = content.to_packed::<LinkElem>() {
+        let start = ctx.pos;
+        walk(&link.body, out, ctx);
+        if let Some(dest) = link_dest(&link.dest) {
+            ctx.done.push(ExtractedMarker {
+                kind: MarkerKind::Link(dest),
+                span: Some((start, ctx.pos)),
+            });
+        }
+        return true;
+    }
+    let Some(kind) = mark_kind(content) else { return false };
+    let start = ctx.pos;
+    let mut raw = None;
+    if let Some(equation) = content.to_packed::<EquationElem>() {
+        raw = push_equation(content, &equation.body, out, ctx);
+    } else if let Some(textable) = content.with::<dyn PlainText>() {
+        push_plain(textable, out, ctx);
+    } else {
+        for (_, value) in content.fields() {
+            walk_value(value, out, ctx);
+        }
+    }
+    ctx.marks.push(Mark { start, end: ctx.pos, kind: kind.into(), raw });
+    true
+}
+
+/// The rich text of a label slot — a heading, a caption, a term, a quote's
+/// attribution, a bibliography entry — walked from the content the author
+/// wrote, which realization has not touched.
+///
+/// Its marks come from the elements of the mark table ([`mark_kind`]),
+/// inline math as its source. Its edges come back in a `TextRecord` (slot
+/// `Text`, for the caller to set):
+///
+/// - a link gives a `links` or `refs` edge whose span covers its body;
+/// - a reference gives a `refs` edge, and a citation a `cites` edge, both
+///   with no span: their rendered text is not in the authored content. A
+///   `@key` is a reference as authored; resolution sends it to `refs` or
+///   `cites` by whether the key is a bibliography entry;
+/// - a footnote gives no edge: it has no location to resolve.
+///
+/// The value is trimmed, its marks and spans re-based on it. Presentation a
+/// show rule adds at realization (the `strong` of the terms rule) is not
+/// authored, and never becomes a mark.
+pub fn label_text(
+    content: &Content,
+    source: SourceLookup<'_>,
+) -> (crate::model::RichText, crate::emit::convert::TextRecord) {
+    use crate::emit::convert::{CiteMarker, TextRecord};
+    use crate::model::TextSlot;
+
+    let mut out = EcoString::new();
+    let mut ctx = MarkerCtx {
+        source: Some(source),
+        bare: true,
+        ..MarkerCtx::default()
+    };
+    walk(content, &mut out, &mut ctx);
+
+    let MarkerCtx { mut done, marks, bare_refs, bare_cites, .. } = ctx;
+    let (value, marks) = {
+        let mut spans: Vec<&mut Option<(i64, i64)>> =
+            done.iter_mut().map(|marker| &mut marker.span).collect();
+        let (value, marks) = trim_rebase(&out, marks, &mut spans);
+        let len = value.chars().count() as i64;
+        (value, canonical_marks(len, marks, &mut spans))
+    };
+
+    let mut record = TextRecord::new(TextSlot::Text);
+    for marker in done {
+        if let MarkerKind::Link(dest) = marker.kind {
+            record.link_markers.push((dest, marker.span));
+        }
+    }
+    let materialized = StyleChain::default();
+    for reference in &bare_refs {
+        if !record.ref_targets.contains(&reference.target) {
+            record.ref_targets.push(reference.target);
+        }
+        let supplement = match reference.supplement.get_ref(materialized) {
+            Smart::Custom(Some(Supplement::Content(content))) => {
+                Some(extract_text(content).into())
+            }
+            _ => None,
+        };
+        record.cite_markers.push(CiteMarker {
+            key: reference.target,
+            loc: None,
+            form: citation_form_str(Some(CitationForm::Normal)),
+            supplement,
+            span: None,
+        });
+    }
+    for cite in &bare_cites {
+        record.cite_markers.push(CiteMarker {
+            key: cite.key,
+            loc: None,
+            form: citation_form_str(cite.form.get(materialized)),
+            supplement: cite
+                .supplement
+                .get_cloned(materialized)
+                .map(|content| extract_text(&content).into()),
+            span: None,
+        });
+    }
+
+    let mut text = crate::model::RichText::plain(value);
+    text.marks = marks;
+    (text, record)
+}
+
 fn open_tag(inner: &Content, ctx: &mut MarkerCtx<'_>) {
     let Some(marker_loc) = inner.location() else { return };
     // Decorative content yields no edge (cnd-sdk spec §2): no marker for a
     // reference, link, footnote or citation written inside an artifact.
     if !ctx.artifacts.is_empty() {
+        return;
+    }
+    // A marker written in a term is an edge of the term, not of the
+    // description paragraph the term is realized in.
+    if !ctx.term_labels.is_empty() {
+        if inner.elem() == CiteElem::ELEM || inner.elem() == FootnoteElem::ELEM {
+            ctx.suppressed.push(marker_loc);
+        }
         return;
     }
     let pos = ctx.pos;

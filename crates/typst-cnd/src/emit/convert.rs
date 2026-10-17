@@ -9,9 +9,8 @@ use typst_library::introspection::{Introspector, Location, Tag, TagElem};
 use typst_library::layout::GridElem;
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    Attribution, CiteElem, EnumElem, FigureCaption, FigureElem, FootnoteElem,
-    HeadingElem, LinkElem, ListElem, ParElem, QuoteElem, RefElem, Supplement, TableElem,
-    TermsElem,
+    Attribution, CiteElem, EnumElem, FigureElem, FootnoteElem, HeadingElem, LinkElem,
+    ListElem, ParElem, QuoteElem, RefElem, Supplement, TableElem, TermsElem,
 };
 use typst_library::text::RawElem;
 use typst_library::visualize::ImageElem;
@@ -37,7 +36,9 @@ use crate::model::{
 #[derive(Debug, Clone)]
 pub struct CiteMarker {
     pub key: Label,
-    pub loc: Location,
+    /// The marker's own location; `None` for a citation met as authored (a
+    /// label text, see `extract::label_text`), which has none.
+    pub loc: Option<Location>,
     pub form: Option<String>,
     pub supplement: Option<String>,
     pub span: Option<(i64, i64)>,
@@ -96,7 +97,15 @@ impl TextRecord {
             }
         }
         for marker in other.cite_markers {
-            if self.cite_markers.iter().all(|known| known.loc != marker.loc) {
+            let known = |known: &CiteMarker| match (known.loc, marker.loc) {
+                (Some(a), Some(b)) => a == b,
+                _ => {
+                    known.key == marker.key
+                        && known.form == marker.form
+                        && known.supplement == marker.supplement
+                }
+            };
+            if !self.cite_markers.iter().any(known) {
                 self.cite_markers.push(marker);
             }
         }
@@ -489,7 +498,7 @@ pub fn convert_from_introspector(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     styles: StyleChain,
-    doc_lang: Option<EcoString>,
+    doc_lang: EcoString,
     ancestry: &Ancestry,
     ctx: &mut ConvertContext,
 ) -> typst_library::diag::SourceResult<()> {
@@ -677,16 +686,11 @@ pub fn convert_from_introspector(
         let site = Site {
             anchor: anchors.get(&location).copied(),
             drawing: content.is::<FigureElem>() && ancestry.is_drawing(location),
+            // A text's language is written only where it differs from the
+            // document's, which every text inherits (spec §4.1).
+            lang: ancestry.lang_of(location).filter(|lang| *lang != doc_lang),
         };
-        if let Some(node) = dispatch(
-            engine,
-            introspector,
-            &content,
-            site,
-            styles,
-            doc_lang.as_deref(),
-            ctx,
-        )? {
+        if let Some(node) = dispatch(engine, introspector, &content, site, styles, ctx)? {
             nodes.push((location, node));
         }
     }
@@ -705,9 +709,9 @@ pub fn convert_from_introspector(
     Ok(())
 }
 
-/// Give each block quote's attribution the edges of the paragraph it is
-/// laid out in: that paragraph is the only one realized with its citation
-/// or footnote tags. The value differs from the paragraph's (the em dash
+/// Give each block quote's attribution the citations and footnotes of the
+/// paragraph it is laid out in: that paragraph is the only one realized
+/// with their tags. The value differs from the paragraph's (the em dash
 /// before it), so the edges carry no span. A label attribution is realized
 /// as a citation of that label, which this carries.
 fn attach_attributions(ctx: &mut ConvertContext, attributions: &[(Location, Content)]) {
@@ -716,6 +720,10 @@ fn attach_attributions(ctx: &mut ConvertContext, attributions: &[(Location, Cont
         let Some(record) = ctx.records.get_mut(&id) else { continue };
         let mut text = realized_edges(par);
         text.slot = TextSlot::Attribution;
+        // References and links come from the attribution's own text
+        // (`quote::convert`), with the spans this paragraph cannot give.
+        text.ref_targets.clear();
+        text.link_targets.clear();
         record.add_text(text);
     }
 }
@@ -980,13 +988,16 @@ pub fn unrealized_edges(content: &Content) -> TextRecord {
 }
 
 /// What the frames say about an element that its content does not.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Site {
     /// For a grid, the element that stands in for its location (see
     /// `Ancestry::grids`).
     anchor: Option<Location>,
     /// For a figure, whether it is a drawing (see `Ancestry::is_drawing`).
     drawing: bool,
+    /// The language of the element's text, when it differs from the
+    /// document's (see `Ancestry::lang_of`).
+    lang: Option<EcoString>,
 }
 
 /// Convert one element into its node, registering the records.
@@ -996,21 +1007,20 @@ fn dispatch(
     content: &Content,
     site: Site,
     styles: StyleChain,
-    doc_lang: Option<&str>,
     ctx: &mut ConvertContext,
 ) -> typst_library::diag::SourceResult<Option<CndNode>> {
     let node = if let Some(heading) = content.to_packed::<HeadingElem>() {
-        let (node, record) = heading::convert(engine, introspector, heading, styles)?;
+        let (node, record) =
+            heading::convert(engine, introspector, heading, styles, site.lang)?;
         ctx.register(node.base.id, record);
         CndNode::Heading(node)
     } else if let Some(par) = content.to_packed::<ParElem>() {
-        let (node, record) =
-            paragraph::convert(engine, introspector, par, styles, doc_lang)?;
+        let (node, record) = paragraph::convert(engine, introspector, par, site.lang)?;
         ctx.register(node.base.id, record);
         CndNode::Paragraph(node)
     } else if let Some(quote) = content.to_packed::<QuoteElem>() {
         let (node, records) =
-            quote::convert(engine, introspector, quote, styles, doc_lang)?;
+            quote::convert(engine, introspector, quote, styles, site.lang)?;
         ctx.register_records(records);
         CndNode::Quote(node)
     } else if let Some(list) = content.to_packed::<ListElem>() {
@@ -1186,7 +1196,7 @@ pub fn make_record(
         .collect();
     let mut cite_markers = collect_cite_markers(content);
     for cite in &mut cite_markers {
-        cite.span = cite_span.get(&cite.loc).copied();
+        cite.span = cite.loc.and_then(|loc| cite_span.get(&loc).copied());
     }
 
     let state_metadata = match location {
@@ -1224,7 +1234,13 @@ fn collect_cite_markers(content: &Content) -> Vec<CiteMarker> {
                 .supplement
                 .get_cloned(StyleChain::default())
                 .map(|c| extract::extract_text(&c).into());
-            markers.push(CiteMarker { key: cite.key, loc, form, supplement, span: None });
+            markers.push(CiteMarker {
+                key: cite.key,
+                loc: Some(loc),
+                form,
+                supplement,
+                span: None,
+            });
         }
         ControlFlow::<()>::Continue(())
     });
@@ -1343,10 +1359,6 @@ pub fn figure_counter_label(
         }
         _ => None,
     }
-}
-
-pub fn caption_text(caption: &Packed<FigureCaption>) -> EcoString {
-    extract::extract_text(&caption.body)
 }
 
 /// The source text `span` covers, trimmed: what an author wrote for an

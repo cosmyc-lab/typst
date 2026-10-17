@@ -43,3 +43,20 @@ Inserted $#[x] + 1$ content.
 $z$
 
 #figure(rect(width: 1cm, height: 1cm), caption: [A square.]) <fig-a>
+
+// Label texts are rich too: a heading's, a caption's and a term's marks
+// come from what the author wrote, inline math included.
+= The *core* model
+
+== Power $x^2$ rule
+
+#figure(rect(width: 1cm, height: 1cm), caption: [A _small_ atom]) <fig-b>
+
+/ Plain: A plain definition.
+/ The *key* idea: A definition whose term has an author mark.
+/ Marked @fig-b#footnote[A note in a term.]: The marked definition.
+
+#[
+  #set text(lang: "fr")
+  Une phrase en français.
+]

@@ -1468,6 +1468,7 @@ fn example_files_exist() {
         "footnote_reused_content.typ",
         "quote_attribution_reuse.typ",
         "marks.typ",
+        "bib_rich.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -4499,4 +4500,146 @@ fn link_over_whole_code_keeps_span() {
     assert_eq!(codepoint_slice(&text.value, &[code.start, code.end]), "api");
     assert_eq!(text.links.len(), 1);
     assert_eq!(text.links[0].text_span, Some(vec![code.start, code.end]));
+}
+
+// Label texts (CND 0.5 §4.1): headings, captions, terms and bibliography
+// entries are rich text walked from what the author wrote.
+
+#[test]
+fn heading_text_has_marks() {
+    let cnd = cnd_for_example("marks.typ");
+    let heading = find_heading(&cnd.nodes, "The core model");
+    assert_eq!(mark_slices(&heading.text, typst_cnd::STRONG), ["core"]);
+    assert_eq!(heading.text.marks.len(), 1, "{:?}", heading.text.marks);
+}
+
+#[test]
+fn heading_inline_math_keeps_its_source() {
+    let cnd = cnd_for_example("marks.typ");
+    let heading = find_heading(&cnd.nodes, "Power x^2 rule");
+    let math: Vec<_> = heading
+        .text
+        .marks
+        .iter()
+        .filter(|m| m.kind == typst_cnd::MATH)
+        .collect();
+    assert_eq!(math.len(), 1, "{:?}", heading.text.marks);
+    assert_eq!(
+        codepoint_slice(&heading.text.value, &[math[0].start, math[0].end]),
+        "x^2"
+    );
+    assert_eq!(math[0].raw.as_ref().map(|raw| raw.value.as_str()), Some("x^2"));
+    assert_eq!(heading.heading_path.last().map(String::as_str), Some("Power x^2 rule"));
+}
+
+#[test]
+fn caption_has_marks_and_no_supplement() {
+    let cnd = cnd_for_example("marks.typ");
+    let figure = find_by_label(&cnd.nodes, "fig-b").expect("figure fig-b");
+    let CndNode::Figure(figure) = figure else { panic!("fig-b is a figure") };
+    let caption = figure.caption.as_ref().expect("a caption");
+    assert_eq!(caption.value, "A small atom");
+    assert_eq!(mark_slices(caption, typst_cnd::EMPH), ["small"]);
+}
+
+#[test]
+fn term_has_no_presentation_strong() {
+    let cnd = cnd_for_example("marks.typ");
+    let terms = find_terms(&cnd.nodes);
+    let plain = &terms[0].items[0];
+    assert_eq!(plain.term.value, "Plain");
+    assert!(plain.term.marks.is_empty(), "{:?}", plain.term.marks);
+    // The author's own strong in a term is a mark.
+    let marked = &terms[0].items[1];
+    assert_eq!(marked.term.value, "The key idea");
+    assert_eq!(mark_slices(&marked.term, typst_cnd::STRONG), ["key"]);
+}
+
+#[test]
+fn edges_written_in_a_term_sit_on_the_term() {
+    let cnd = cnd_for_example("marks.typ");
+    let terms = find_terms(&cnd.nodes);
+    let marked = &terms[0].items[2];
+    assert_eq!(marked.term.value, "Marked");
+    let refs: Vec<_> = marked
+        .term
+        .refs
+        .iter()
+        .map(|r| (r.label.as_str(), r.text_span.clone()))
+        .collect();
+    assert_eq!(refs, [("fig-b", None)]);
+    // A footnote written in a term has no edge yet: its rendered marker is
+    // not in the term's authored content.
+    assert!(marked.term.footnotes.is_empty());
+
+    // Nothing written in the term lands on the definition.
+    let definition = paragraph_at(&marked.children, 0);
+    assert_eq!(definition.text.value, "The marked definition.");
+    assert!(definition.text.refs.is_empty(), "{:?}", definition.text.refs);
+    assert!(definition.text.footnotes.is_empty(), "{:?}", definition.text.footnotes);
+    assert!(definition.text.cites.is_empty(), "{:?}", definition.text.cites);
+
+    // A citation in a term sits on the term, span-less.
+    let cnd = cnd_for_example("bib_rich.typ");
+    let terms = find_terms(&cnd.nodes);
+    let item = &terms[0].items[0];
+    assert_eq!(item.term.value, "Prior art");
+    let cites: Vec<_> = item
+        .term
+        .cites
+        .iter()
+        .map(|c| (c.label.as_str(), c.text_span.clone()))
+        .collect();
+    assert_eq!(cites, [("jones2022", None)]);
+    assert!(item.term.refs.is_empty(), "a citation key is no cross-reference");
+    let definition = paragraph_at(&item.children, 0);
+    assert!(definition.text.cites.is_empty(), "{:?}", definition.text.cites);
+    assert_pool_refs_resolve(&cnd);
+}
+
+#[test]
+fn bib_formatted_is_rich_text() {
+    let cnd = cnd_for_example("bib_rich.typ");
+    let smith = cnd
+        .bibliography
+        .iter()
+        .find(|entry| entry.label == "smith2024")
+        .expect("smith2024");
+    let formatted = smith.formatted.as_ref().expect("formatted");
+    assert!(formatted.value.contains("Journal of Document Systems"), "{formatted:?}");
+    assert_eq!(
+        mark_slices(formatted, typst_cnd::EMPH),
+        ["Journal of Document Systems"],
+        "{formatted:?}"
+    );
+}
+
+#[test]
+fn lang_only_where_it_differs() {
+    let cnd = cnd_for_example("marks.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("en"));
+    let french = paragraph_text(&cnd, "français");
+    assert_eq!(french.lang.as_deref(), Some("fr"));
+    let with_lang: Vec<_> = all_nodes_full(&cnd)
+        .into_iter()
+        .flat_map(|node| node.texts())
+        .filter(|text| text.lang.is_some())
+        .map(|text| text.value.as_str())
+        .collect();
+    assert_eq!(with_lang, ["Une phrase en français."]);
+}
+
+#[test]
+fn default_lang_goes_on_doc_not_texts() {
+    let cnd = cnd_for_example("bib_rich.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("en"));
+    let mut texts: Vec<&RichText> = all_nodes_full(&cnd)
+        .into_iter()
+        .flat_map(|node| node.texts())
+        .collect();
+    texts.extend(cnd.bibliography.iter().filter_map(|entry| entry.formatted.as_ref()));
+    assert!(texts.len() > 3);
+    for text in texts {
+        assert_eq!(text.lang, None, "{:?}", text.value);
+    }
 }

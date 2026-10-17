@@ -15,17 +15,20 @@
 //! `None` (the schema allows null spans).
 
 use typst_library::engine::Engine;
-use typst_library::foundations::{NativeElement, StyleChain};
+use typst_library::foundations::{Content, NativeElement, StyleChain};
 use typst_library::introspection::{Counter, Introspector};
 use typst_library::model::{
     BibliographyElem, FootnoteElem, FootnoteEntry, RenderedEntry, Works,
 };
+use typst_library::text::TextElem;
 use uuid::Uuid;
 
 use crate::emit::ancestry::Ancestry;
 use crate::emit::convert::{ConvertContext, Synthetic};
-use crate::emit::extract::extract_text;
-use crate::model::{BibEntry, CiteRef, Footnote, FootnoteRef, RichText, TextSlot};
+use crate::emit::extract::{LinkDest, extract_text, label_text, no_source};
+use crate::model::{
+    BibEntry, CiteRef, Footnote, FootnoteRef, LinkRef, RichText, TextSlot,
+};
 
 /// Build the footnote pool into `ctx.footnotes`, the declaration-marker →
 /// pool-id map into `ctx.footnote_loc_to_id`, and the printed-entry →
@@ -191,7 +194,7 @@ pub fn build_bibliography_pool(
             let bib_entry = BibEntry {
                 id,
                 label: label.resolve().to_string(),
-                formatted: Some(RichText::plain(rendered_string(entry))),
+                formatted: Some(formatted(entry)),
                 type_: raw.get("type").and_then(|v| v.as_str()).map(str::to_string),
                 authors: source
                     .authors()
@@ -217,17 +220,30 @@ pub fn build_bibliography_pool(
     Ok(())
 }
 
-/// Rendered reference string for a bibliography entry: the optional prefix
-/// (e.g. the `[1]` label) joined with the entry body.
-fn rendered_string(entry: &RenderedEntry) -> String {
-    let body = extract_text(&entry.body);
-    match &entry.prefix {
-        Some(prefix) => {
-            let prefix = extract_text(prefix);
-            if prefix.is_empty() { body.to_string() } else { format!("{prefix} {body}") }
+/// The reference as displayed for a bibliography entry, as rich text: the
+/// optional prefix (e.g. the `[1]` label) joined with the entry body by a
+/// space. The rendered entry is content the style built, never realized,
+/// so it is walked as authored (`label_text`): the italics a style puts on
+/// a journal title are an `emph` mark.
+///
+/// Its links to a URL are its `links` (spec §5.1: an edge in `formatted` is
+/// owned by the entry). Any other edge would resolve from a text that is no
+/// node's, which this producer does not resolve: it is dropped.
+fn formatted(entry: &RenderedEntry) -> RichText {
+    let content = match &entry.prefix {
+        Some(prefix) if !extract_text(prefix).is_empty() => {
+            Content::sequence([prefix.clone(), TextElem::packed(" "), entry.body.clone()])
         }
-        None => body.to_string(),
+        _ => entry.body.clone(),
+    };
+    let (mut text, record) = label_text(&content, &no_source);
+    for (dest, span) in record.link_markers {
+        if let LinkDest::Url(href) = dest {
+            let text_span = span.filter(|(s, e)| s != e).map(|(s, e)| vec![s, e]);
+            text.links.push(LinkRef { href: href.into(), text_span });
+        }
     }
+    text
 }
 
 /// `(source node, source text, footnote pool entry, the marker's text span)`.
@@ -246,7 +262,7 @@ pub fn resolve_cite_edges(ctx: &mut ConvertContext, ancestry: &Ancestry) {
     for (node_id, record) in ctx.records_sorted() {
         for text in &record.texts {
             for marker in &text.cite_markers {
-                if ancestry.is_artifact(marker.loc) {
+                if marker.loc.is_some_and(|loc| ancestry.is_artifact(loc)) {
                     continue;
                 }
                 // The edge names its target by label now, but the lookup
