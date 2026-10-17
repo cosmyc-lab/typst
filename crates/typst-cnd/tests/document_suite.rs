@@ -4389,6 +4389,21 @@ fn a_paragraph_of_only_inline_math_is_kept() {
     assert_eq!((text.marks[0].start, text.marks[0].end), (0, 1));
 }
 
+/// The same once an artifact was left out of the paragraph before the
+/// equation: the source still counts as the paragraph's own text.
+#[test]
+fn inline_math_after_an_artifact_is_kept() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Paragraph(p) if p.text.value == "w" => Some(&p.text),
+            _ => None,
+        })
+        .expect("the paragraph holding an artifact and `$w$`");
+    assert_eq!(mark_slices(text, typst_cnd::MATH), ["w"]);
+}
+
 #[test]
 fn author_superscript_is_a_sup_mark() {
     let cnd = cnd_for_example("marks.typ");

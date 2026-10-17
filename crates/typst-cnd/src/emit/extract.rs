@@ -63,10 +63,14 @@ fn math_source(text: &str) -> Option<String> {
 ///
 /// Content that was empty to begin with is not "emptied": with no exclusion
 /// at all this is `false`, so a paragraph that never held text keeps
-/// whatever handling it had before exclusion existed.
-pub fn is_emptied_by_exclusion(content: &Content) -> bool {
+/// whatever handling it had before exclusion existed. An inline equation
+/// counts as text: its source, read through `source`.
+pub fn is_emptied_by_exclusion(
+    content: &Content,
+    source: &dyn Fn(Span) -> Option<String>,
+) -> bool {
     let mut out = EcoString::new();
-    let mut ctx = MarkerCtx::default();
+    let mut ctx = MarkerCtx { source: Some(source), ..MarkerCtx::default() };
     walk(content, &mut out, &mut ctx);
     ctx.excluded_any && out.trim().is_empty()
 }

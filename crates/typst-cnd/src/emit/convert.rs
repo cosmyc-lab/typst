@@ -644,14 +644,14 @@ pub fn convert_from_introspector(
         // A paragraph made only of text that belongs to another node (a
         // heading body re-emitted by a show rule, a boxed block quote) or to
         // no node (a PDF artifact) has nothing of its own left.
-        if extract::is_emptied_by_exclusion(&par.body) {
+        // An inline equation's text is its source, so a paragraph holding
+        // only `$z$` is kept.
+        let source = |span| extract::source_text(engine, span);
+        if extract::is_emptied_by_exclusion(&par.body, &source) {
             continue;
         }
         // A paragraph with no text at all — a `box` holding a shape, say —
         // says nothing.
-        // An inline equation's text is its source, so a paragraph holding
-        // only `$z$` is kept.
-        let source = |span| extract::source_text(engine, span);
         if extract::extract_rich(&par.body, &source).value.trim().is_empty() {
             continue;
         }

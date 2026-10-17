@@ -28,6 +28,8 @@ Join *a**b* here.
 
 Read the #link("https://example.com")[`api`] docs.
 
+#pdf.artifact[★] $w$
+
 $z$
 
 #figure(rect(width: 1cm, height: 1cm), caption: [A square.]) <fig-a>
