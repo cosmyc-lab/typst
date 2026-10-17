@@ -220,8 +220,6 @@ impl Synthetic {
         CndNode::List(list)
     }
 
-    /// Give `text` to the first paragraph among `nodes`, in reading order.
-    /// Returns it back when there is none.
     /// Give `text` to the first paragraph of the first slot (an item's or
     /// a cell's children) that has one. Returns it back when none does.
     pub fn attach_to_first_slot<'a>(
@@ -237,6 +235,8 @@ impl Synthetic {
         Some(text)
     }
 
+    /// Give `text` to the first paragraph among `nodes`, in reading order.
+    /// Returns it back when there is none.
     pub fn attach_to_first_paragraph(
         &mut self,
         nodes: &[CndNode],
