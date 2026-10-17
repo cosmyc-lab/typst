@@ -87,7 +87,9 @@ fn is_excluded_scope(inner: &Content) -> bool {
 /// Whether `inner` is the number a printed footnote entry starts with: a
 /// `Label` marker that no footnote marker's tags hold. The marker in the
 /// text renders its number inside a `Label` marker too, but inside the
-/// footnote's own tags, and that number is the edge's span.
+/// footnote's own tags, and that number is the edge's span. A custom
+/// `show footnote.entry` rule that drops the number leaves no `Label`
+/// marker, and so nothing is excluded.
 fn is_entry_number(inner: &Content, ctx: &MarkerCtx) -> bool {
     ctx.footnotes.is_empty()
         && inner

@@ -381,28 +381,29 @@ fn build_skip_ranges(engine: &Engine, introspector: &dyn Introspector) -> SkipRa
     }
 }
 
-/// Where a block quote's body and attribution are written, to tell the
+/// What a block quote's body and attribution are made of, to tell the
 /// paragraph its attribution is laid out in from those of its body.
+///
+/// Membership is by the spans of the elements themselves, never by a hull
+/// of their source ranges: a body that uses content defined earlier by a
+/// `#let` has a hull reaching across everything written in between, the
+/// attribution included.
 struct QuoteSource {
-    /// The body's reach in the source (see [`content_range`]).
-    body: Option<SourceRange>,
-    /// What the attribution's paragraph is spanned with: the attribution
-    /// content's reach, or for a label (realized as a citation spanned at
-    /// the quote) the quote's own span.
+    /// The spans of everything the body holds.
+    body: rustc_hash::FxHashSet<Span>,
+    /// What the attribution's paragraph holds.
     attribution: Option<AttributionSource>,
 }
 
-#[derive(Clone, Copy)]
 enum AttributionSource {
-    /// Something in the paragraph is written inside this range.
-    Within(SourceRange),
-    /// Something in the paragraph is spanned exactly here.
-    At(SourceRange),
+    /// The spans of everything the attribution content holds.
+    Content(rustc_hash::FxHashSet<Span>),
+    /// A label, realized as a citation spanned at the quote itself.
+    Label(Span),
 }
 
 /// Each block quote's [`QuoteSource`], by its location.
 fn quote_sources(
-    engine: &Engine,
     introspector: &dyn Introspector,
 ) -> rustc_hash::FxHashMap<Location, QuoteSource> {
     let mut out = rustc_hash::FxHashMap::default();
@@ -411,18 +412,16 @@ fn quote_sources(
         let Some(location) = elem.location() else { continue };
         let materialized = StyleChain::default();
         let attribution = match quote.attribution.get_ref(materialized) {
-            Some(Attribution::Content(content)) => {
-                content_range(engine, content).map(AttributionSource::Within)
-            }
-            Some(Attribution::Label(_)) => {
-                source_range(engine, elem.span()).map(AttributionSource::At)
-            }
+            Some(Attribution::Content(content)) => Some(AttributionSource::Content(
+                crate::emit::ancestry::body_spans(content),
+            )),
+            Some(Attribution::Label(_)) => Some(AttributionSource::Label(elem.span())),
             None => None,
         };
         out.insert(
             location,
             QuoteSource {
-                body: content_range(engine, &quote.body),
+                body: crate::emit::ancestry::body_spans(&quote.body),
                 attribution,
             },
         );
@@ -430,45 +429,28 @@ fn quote_sources(
     out
 }
 
-/// How far `content` reaches in the source: the hull of the spans it holds
-/// in the file of its first spanned element.
-fn content_range(engine: &Engine, content: &Content) -> Option<SourceRange> {
-    let mut range: Option<SourceRange> = None;
-    let _ = content.traverse(&mut |element: Content| {
-        if let Some(found) = source_range(engine, element.span()) {
-            range = match range {
-                None => Some(found),
-                Some(cur) if cur.file == found.file => Some(SourceRange {
-                    file: cur.file,
-                    start: cur.start.min(found.start),
-                    end: cur.end.max(found.end),
-                }),
-                other => other,
-            };
-        }
-        ControlFlow::<()>::Continue(())
-    });
-    range
-}
-
-/// Whether the paragraph `par`, laid out in the body of the block quote
-/// `quote`, is the one its attribution is laid out in: nothing in it is
-/// written in the quote's body, and something is written in the
-/// attribution. Decided by source ranges, never by comparing texts.
-fn is_attribution(engine: &Engine, quote: &QuoteSource, par: &Content) -> bool {
-    let Some(attribution) = quote.attribution else { return false };
+/// Whether the paragraph `par`, laid out in the body of a block quote, is
+/// the one its attribution is laid out in: something in it is part of the
+/// attribution, and nothing in it is part of the body only. Decided by the
+/// elements' spans, never by comparing texts.
+fn is_attribution(quote: &QuoteSource, par: &Content) -> bool {
+    let Some(attribution) = &quote.attribution else { return false };
     let mut in_body = false;
     let mut in_attribution = false;
     let _ = par.traverse(&mut |element: Content| {
-        if let Some(range) = source_range(engine, element.span()) {
-            if quote.body.is_some_and(|body| range_contains(body, range)) {
-                in_body = true;
-                return ControlFlow::Break(());
-            }
-            in_attribution |= match attribution {
-                AttributionSource::Within(outer) => range_contains(outer, range),
-                AttributionSource::At(at) => at == range,
-            };
+        let span = element.span();
+        if span.is_detached() {
+            return ControlFlow::Continue(());
+        }
+        let of_attribution = match attribution {
+            AttributionSource::Content(spans) => spans.contains(&span),
+            AttributionSource::Label(at) => *at == span,
+        };
+        if of_attribution {
+            in_attribution = true;
+        } else if quote.body.contains(&span) {
+            in_body = true;
+            return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
     });
@@ -510,7 +492,7 @@ pub fn convert_from_introspector(
     ctx: &mut ConvertContext,
 ) -> typst_library::diag::SourceResult<()> {
     let skip_ranges = build_skip_ranges(engine, introspector);
-    let quote_sources = quote_sources(engine, introspector);
+    let quote_sources = quote_sources(introspector);
     let doc_selector = doc_selector();
     let mut items: Vec<(Location, Content)> = Vec::new();
 
@@ -649,7 +631,7 @@ pub fn convert_from_introspector(
             // A block quote's attribution is a text of the quote's own.
             if let Some(SlotKey::QuoteBody(quote)) = ancestry.slot_of(loc)
                 && let Some(source) = quote_sources.get(&quote)
-                && is_attribution(engine, source, &elem)
+                && is_attribution(source, &elem)
             {
                 attributions.push((quote, elem.clone()));
                 continue;
@@ -872,23 +854,16 @@ impl Assembler<'_> {
     fn fill(&mut self, location: Location, node: &mut CndNode, path: &[String]) {
         let slots: Vec<(&mut Vec<CndNode>, SlotKey)> = match node {
             CndNode::List(list) => {
-                let keys = self.ancestry.item_slots(location);
-                debug_assert_eq!(list.items.len(), keys.len(), "one body per item");
-                list.items
-                    .iter_mut()
-                    .zip(keys)
-                    .map(|(item, key)| (&mut item.children, *key))
-                    .collect()
+                let mut items: Vec<&mut Vec<CndNode>> =
+                    list.items.iter_mut().map(|item| &mut item.children).collect();
+                self.fill_items(location, &mut items, path);
+                return;
             }
             CndNode::Terms(terms) => {
-                let keys = self.ancestry.item_slots(location);
-                debug_assert_eq!(terms.items.len(), keys.len(), "one body per item");
-                terms
-                    .items
-                    .iter_mut()
-                    .zip(keys)
-                    .map(|(item, key)| (&mut item.children, *key))
-                    .collect()
+                let mut items: Vec<&mut Vec<CndNode>> =
+                    terms.items.iter_mut().map(|item| &mut item.children).collect();
+                self.fill_items(location, &mut items, path);
+                return;
             }
             CndNode::Table(table) => self.cell_slots(location, &mut table.cells),
             CndNode::Layout(layout) => self.cell_slots(location, &mut layout.cells),
@@ -907,6 +882,30 @@ impl Assembler<'_> {
         for (children, key) in slots {
             if let Some(items) = self.slots.remove(&key) {
                 *children = self.nodes(items, path);
+            }
+        }
+    }
+
+    /// Fill the items of the list, enum or term list at `location`: item k
+    /// takes the k-th body laid out for it.
+    ///
+    /// Typst lays out one body per item, so the counts agree (the debug
+    /// assertion fails loudly in tests if they ever do not). Should they
+    /// differ, no text is dropped: bodies beyond the last item go to the
+    /// last item, and items beyond the last body stay empty.
+    fn fill_items(
+        &mut self,
+        location: Location,
+        items: &mut [&mut Vec<CndNode>],
+        path: &[String],
+    ) {
+        let keys = self.ancestry.item_slots(location).to_vec();
+        debug_assert_eq!(items.len(), keys.len(), "one body per item");
+        let Some(last) = items.len().checked_sub(1) else { return };
+        for (index, key) in keys.into_iter().enumerate() {
+            if let Some(routed) = self.slots.remove(&key) {
+                let nodes = self.nodes(routed, path);
+                items[index.min(last)].extend(nodes);
             }
         }
     }

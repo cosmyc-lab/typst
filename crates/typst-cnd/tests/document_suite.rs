@@ -1449,6 +1449,9 @@ fn example_files_exist() {
         "figure_drawings.typ",
         "containers_quotes_notes.typ",
         "footnote_across_pages.typ",
+        "footnote_list_across_pages.typ",
+        "footnote_reused_content.typ",
+        "quote_attribution_reuse.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -4165,6 +4168,132 @@ fn a_broken_footnote_keeps_its_rest() {
             "BA1 body line one.",
             "BA2 body line two carries a long note.1",
             "BA3 after the list."
+        ]
+    );
+}
+
+#[test]
+fn a_list_broken_with_its_footnote_stays_the_notes() {
+    // The note's list itself breaks: its second item is printed on the next
+    // page while a flow list is open across the same break. It stays the
+    // second item of the note's list, and the flow list keeps its own nine
+    // items, each with its own text.
+    let cnd = cnd_for_example("footnote_list_across_pages.typ");
+    assert_eq!(cnd.footnotes.len(), 1);
+    let note = &cnd.footnotes[0];
+    assert_eq!(
+        node_types(&note.children),
+        ["paragraph", "paragraph", "paragraph", "paragraph", "list", "paragraph"]
+    );
+    let CndNode::List(list) = &note.children[4] else { unreachable!() };
+    assert_eq!(
+        list.items.iter().map(item_text).collect::<Vec<_>>(),
+        ["SN5 note item one", "SN6 note item two"]
+    );
+    let pages: Vec<i32> = list
+        .items
+        .iter()
+        .map(|item| item.children[0].base().location.page)
+        .collect();
+    assert_eq!(pages, [1, 2], "the second item is printed on the next page");
+    let flow = list_starting_with(&find_lists(&cnd.nodes), "LA1");
+    let expected: Vec<String> =
+        ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+            .iter()
+            .enumerate()
+            .map(|(i, word)| format!("LA{} flow item {word}", i + 1))
+            .collect();
+    assert_eq!(flow.items.iter().map(item_text).collect::<Vec<_>>(), expected);
+    for token in ["SN5", "SN6", "SN7", "LA9"] {
+        assert_eq!(occurrences(&cnd, token), 1, "{token} once");
+    }
+}
+
+#[test]
+fn a_footnote_of_reused_content_takes_nothing_from_the_flow() {
+    let cnd = cnd_for_example("footnote_reused_content.typ");
+    // The flow keeps everything written between a `#let` and the note that
+    // uses it, and its own copy of content a note shows too.
+    let section = &find_heading(&cnd.nodes, "Section").children;
+    assert_eq!(
+        node_types(section),
+        [
+            "paragraph",
+            "list",
+            "paragraph",
+            "paragraph",
+            "paragraph",
+            "paragraph",
+            "list",
+            "paragraph",
+        ]
+    );
+    assert_eq!(
+        paragraph_values(section),
+        [
+            "RA1 first flow paragraph.",
+            "RA2 second flow paragraph.1",
+            "RA3 introduces a note.2",
+            "RS2 shared sentence used twice.",
+            "RA4 introduces a list note.3",
+            "RA5 after.",
+        ]
+    );
+    let notes: Vec<Vec<&str>> =
+        cnd.footnotes.iter().map(|note| node_types(&note.children)).collect();
+    assert_eq!(notes, [vec!["paragraph"], vec!["paragraph"], vec!["list"]]);
+    assert_eq!(
+        paragraph_values(&cnd.footnotes[0].children),
+        ["RS1 source: annual report. See page 4."]
+    );
+    assert_eq!(
+        paragraph_values(&cnd.footnotes[1].children),
+        ["RS2 shared sentence used twice."]
+    );
+    // Shown twice by the author: once in the flow, once in a note.
+    for token in ["RS2 shared sentence", "RL1 shared list item", "RL2 shared list item"] {
+        assert_eq!(occurrences(&cnd, token), 2, "{token}");
+    }
+    for token in ["RS1", "RA1", "RP1", "RP2", "RA2"] {
+        assert_eq!(occurrences(&cnd, token), 1, "{token}");
+    }
+}
+
+#[test]
+fn a_quote_body_of_reused_content_keeps_its_attribution_apart() {
+    let cnd = cnd_for_example("quote_attribution_reuse.typ");
+    let quotes = block_quotes(&cnd.nodes);
+    let summary: Vec<(Option<&str>, Vec<&str>)> = quotes
+        .iter()
+        .map(|quote| (value(&quote.attribution), paragraph_values(&quote.children)))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (Some("HA1 Ada"), vec!["HI1 intro shared. HB1 body."]),
+            (Some("HA2 Bob"), vec!["HB2 first.", "HB3 second paragraph."]),
+            (Some("HA3 Cy"), vec!["HB4 kept."]),
+        ]
+    );
+    for token in ["HA1", "HA2", "HA3", "HI1"] {
+        assert_eq!(occurrences(&cnd, token), 1, "{token} once");
+    }
+    assert_eq!(occurrences(&cnd, "DQ1"), 0, "decorative text is never emitted");
+
+    // Footnote numbers in any style are left out of the notes' text. A
+    // custom entry rule that drops the number leaves nothing to exclude.
+    let notes: Vec<(&str, Vec<&str>)> = cnd
+        .footnotes
+        .iter()
+        .map(|note| (note.label.as_str(), paragraph_values(&note.children)))
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            ("i", vec!["FR1 roman note."]),
+            ("ii", vec!["FR2 second."]),
+            ("x", vec!["FT1 tenth note."]),
+            ("xi", vec!["FC1 custom entry."]),
         ]
     );
 }

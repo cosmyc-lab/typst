@@ -41,10 +41,11 @@
 //!   inline quote opens no slot: it is text of the paragraph around it. A
 //!   footnote entry is printed at the bottom of the page; its number is a
 //!   `Label` marker inside its first paragraph, which that paragraph's text
-//!   leaves out (see `extract`). The rest of a note too long for its page
-//!   is printed on the next one with no entry tags around it: what is
-//!   written in the note's body and laid out there takes the entry's slot
-//!   (see [`Ancestry::note_spill`]).
+//!   leaves out (see `extract`). A note is drawn in a frame of its own,
+//!   whose logical parent is the footnote; a note too long for its page
+//!   continues in another such frame on the next page. What is open in a
+//!   note's frames is the note's own, kept across pages apart from the
+//!   flow (see [`NoteStacks`]).
 //!
 //! [`Feature::CndSemantics`]: typst_library::Feature::CndSemantics
 
@@ -206,9 +207,10 @@ pub struct Ancestry {
     /// While walking: the grids laid out in a figure's body that have no
     /// anchor yet, with that figure and whether they sit in a `place`.
     grids_in_figures: FxHashMap<Location, (Location, bool)>,
-    /// Each printed footnote entry, with where its note's body is written
-    /// (see [`Ancestry::note_spill`]).
-    note_bodies: Vec<(SourceRange, Location)>,
+    /// The footnotes that have a printed entry, by the footnote's location.
+    printed_notes: FxHashSet<Location>,
+    /// What is open in each note's frames (see [`NoteStacks`]).
+    note_stacks: NoteStacks,
 }
 
 impl Ancestry {
@@ -225,11 +227,8 @@ impl Ancestry {
         let places = FloatPlaces::of(paged);
         for elem in paged.introspector().query(&FootnoteEntry::ELEM.select()) {
             let Some(entry) = elem.to_packed::<FootnoteEntry>() else { continue };
-            let Some(location) = elem.location() else { continue };
-            if let Some(body) = entry.note.body_content()
-                && let Some(range) = content_range(engine, body)
-            {
-                ancestry.note_bodies.push((range, location));
+            if let Some(note) = entry.note.location() {
+                ancestry.printed_notes.insert(note);
             }
         }
         let mut stack: Vec<Open> = Vec::new();
@@ -344,38 +343,6 @@ impl Ancestry {
     /// node.
     pub fn is_absorbed(&self, location: Location) -> bool {
         self.absorbed.contains(&location) || self.is_artifact(location)
-    }
-
-    /// The footnote entry the element `inner`, laid out at `location`, is
-    /// the continuation of, if any.
-    ///
-    /// A note too long for its page is broken: the rest of it is printed at
-    /// the bottom of the next page, with no entry tags around it. What is
-    /// laid out there would otherwise land in the flow — or in whatever
-    /// list or table is still open across the page break. An element that
-    /// may become a node, written in a note's body, laid out with no entry
-    /// open around it and not inside another such continuation, is that
-    /// note's: it takes the entry's slot.
-    fn note_spill(
-        &self,
-        engine: &Engine,
-        stack: &[Open],
-        inner: &Content,
-    ) -> Option<Location> {
-        if self.note_bodies.is_empty()
-            || stack.iter().any(|open| {
-                open.spilled.is_some()
-                    || matches!(open.slot, Some(SlotKey::FootnoteBody(_)))
-            })
-        {
-            return None;
-        }
-        let own = source_range(engine, inner.span())?;
-        self.note_bodies
-            .iter()
-            .filter(|(body, _)| contains(*body, own))
-            .min_by_key(|(body, _)| body.end - body.start)
-            .map(|(_, entry)| *entry)
     }
 
     /// Note that an element that may become a node is laid out in the body
@@ -773,7 +740,7 @@ fn float_range(engine: &Engine, place: &Content) -> Option<SourceRange> {
 /// helper defined in the preamble, `#let aside(x) = place(…)[Aside: #x]`,
 /// holds spans both there and at its call, and a paragraph written in between
 /// shares none of them.
-fn body_spans(body: &Content) -> FxHashSet<Span> {
+pub(crate) fn body_spans(body: &Content) -> FxHashSet<Span> {
     let mut spans = FxHashSet::default();
     let _ = body.traverse(&mut |element| {
         let span = element.span();
@@ -799,6 +766,37 @@ fn paragraphs_text(body: &Content) -> String {
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// What is open in each printed note's frames, by the footnote's location.
+///
+/// A note is drawn in a frame of its own at the bottom of the page, while
+/// the paragraph holding its marker — and whatever else of the flow — is
+/// still open. A note too long for its page continues in another frame on
+/// the next page, with no entry tag: its entry, and a list broken with it,
+/// opened on the first page. So each note's frames are walked with a stack
+/// of their own, kept from one frame to the next: the flow's tags neither
+/// enclose the note's content nor close what the note left open, and the
+/// rest of a note continues inside its entry.
+#[derive(Default)]
+struct NoteStacks(FxHashMap<Location, Vec<Open>>);
+
+impl NoteStacks {
+    fn take(&mut self, note: Location) -> Vec<Open> {
+        self.0.remove(&note).unwrap_or_default()
+    }
+
+    fn keep(&mut self, note: Location, stack: Vec<Open>) {
+        if !stack.is_empty() {
+            self.0.insert(note, stack);
+        }
+    }
+}
+
+impl std::fmt::Debug for NoteStacks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoteStacks").field("open", &self.0.len()).finish()
+    }
 }
 
 /// A tag that is currently open while walking the frames.
@@ -836,9 +834,6 @@ struct Open {
     /// For a paragraph laid out in a figure's body, that figure: whether
     /// the paragraph routes a node is settled once its glyphs are counted.
     figure_par: Option<Location>,
-    /// For an element laid out in the rest of a broken footnote, that
-    /// footnote's entry (see [`Ancestry::note_spill`]).
-    spilled: Option<Location>,
     /// For a cell, the table or grid it is a cell of, and its position.
     cell_owner: Option<Location>,
     cell_position: Option<(usize, usize)>,
@@ -1081,7 +1076,35 @@ fn walk(
             // Depth-first keeps the tag stream in document order.
             FrameItem::Group(group) => {
                 let scope = scope.enter(group, places, stack.len());
-                walk(&group.frame, engine, floats, places, scope, stack, ancestry);
+                match group.parent {
+                    // A note's frame: what is open around it is the flow's,
+                    // not the note's (see `NoteStacks`).
+                    Some(parent) if ancestry.printed_notes.contains(&parent.location) => {
+                        let mut own = ancestry.note_stacks.take(parent.location);
+                        let scope = DrawScope { decorative: scope.decorative, base: 0 };
+                        walk(
+                            &group.frame,
+                            engine,
+                            floats,
+                            places,
+                            scope,
+                            &mut own,
+                            ancestry,
+                        );
+                        ancestry.note_stacks.keep(parent.location, own);
+                    }
+                    _ => {
+                        walk(
+                            &group.frame,
+                            engine,
+                            floats,
+                            places,
+                            scope,
+                            stack,
+                            ancestry,
+                        );
+                    }
+                }
             }
             FrameItem::Tag(Tag::Start(inner, flags)) => {
                 let Some(location) = inner.location() else { continue };
@@ -1199,16 +1222,6 @@ fn walk(
                     }
                     None => {}
                 }
-                let spilled = if (flags.introspectable && is_node_kind(inner))
-                    || inner.elem() == GridElem::ELEM
-                {
-                    ancestry.note_spill(engine, stack, inner)
-                } else {
-                    None
-                };
-                if let Some(entry) = spilled {
-                    ancestry.slots.insert(location, SlotKey::FootnoteBody(entry));
-                }
 
                 let slot = opens;
                 let cell_owner = match slot {
@@ -1290,7 +1303,6 @@ fn walk(
                         .to_packed::<FigureElem>()
                         .and_then(|figure| source_range(engine, figure.body.span())),
                     figure_par,
-                    spilled,
                     cell_owner,
                     cell_position: cell_position(inner),
                     had_child: false,
