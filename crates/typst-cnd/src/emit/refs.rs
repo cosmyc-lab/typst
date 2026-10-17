@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::emit::convert::ConvertContext;
 use crate::emit::extract::LinkDest;
-use crate::model::{CndNode, NodeLink, NodeRef};
+use crate::model::{CndNode, LinkRef, NodeRef};
 
 /// `(source node, target node, the target's label, the marker's text span)`.
 type RefEdge = (Uuid, Uuid, Option<String>, Option<(i64, i64)>);
@@ -196,7 +196,7 @@ pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) 
     for (source_id, href, span) in links {
         if let Some(node) = find_node_mut(&mut ctx.roots, source_id) {
             node.links_mut()
-                .push(NodeLink { href, text_span: normalize_link_span(span) });
+                .push(LinkRef { href, text_span: normalize_link_span(span) });
         }
     }
 

@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub use crate::rich_text::{CiteRef, FootnoteRef, LinkRef, NodeRef, RawSource};
+
 /// The `links` family (ADR 0024, cnd-sdk) is a 0.4.0 format change: this is
 /// the only machine-readable signal a consumer has for whether a CND may
 /// carry `links` at all (a reindex gate, or a converter's decision whether
@@ -74,23 +76,6 @@ pub struct SourceInfo {
     pub hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
-}
-
-/// The producer's verbatim source for a node, with its language. A bare
-/// string dropped the one thing a consumer needs in order to decide whether
-/// to attempt a parse: which language the content is in.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct RawSource {
-    pub format: String,
-    pub value: String,
-}
-
-impl RawSource {
-    /// Every `raw` this producer emits is Typst source, by construction.
-    pub fn typst(value: impl Into<String>) -> Self {
-        Self { format: "typst".into(), value: value.into() }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,7 +154,7 @@ impl CndNode {
         &mut self.base_mut().footnotes
     }
 
-    pub fn links_mut(&mut self) -> &mut Vec<NodeLink> {
+    pub fn links_mut(&mut self) -> &mut Vec<LinkRef> {
         &mut self.base_mut().links
     }
 
@@ -184,69 +169,6 @@ impl CndNode {
             _ => None,
         }
     }
-}
-
-/// Forward cross-reference edge, keyed by the target's label (ADR 0017,
-/// superseding the `{id, label}` form of ADR 0002). `label` resolves in the
-/// `nodes` tree.
-///
-/// An edge keys on the label rather than the id because an id is not
-/// durable across builds (ADR 0015) — this producer mints a fresh `uuid4`
-/// on every run, so an edge carrying one would expire immediately. The
-/// label lives in the Typst source and survives.
-///
-/// `text_span` is an optional `[start, end)` codepoint offset marking where
-/// the reference marker sits in the containing node's rendered text; named
-/// `text_span` to pin the coordinate space (ADR 0013).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct NodeRef {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text_span: Option<Vec<i64>>,
-}
-
-impl NodeRef {
-    pub fn new(label: impl Into<String>) -> Self {
-        Self { label: label.into(), text_span: None }
-    }
-}
-
-/// Forward citation edge; `label` resolves in the `bibliography` pool
-/// (proposal 0004). `form` mirrors Typst's citation form; `text_span` as on
-/// `NodeRef` (ADR 0013).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct CiteRef {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text_span: Option<Vec<i64>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub form: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supplement: Option<String>,
-}
-
-/// Forward footnote edge; `label` resolves in the `footnotes` pool.
-/// `text_span` as on `NodeRef` (ADR 0013).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct FootnoteRef {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text_span: Option<Vec<i64>>,
-}
-
-/// Forward hyperlink edge (ADR 0024, cnd-sdk): `href` is the URL string the
-/// marker points at. Unlike `NodeRef`/`CiteRef`/`FootnoteRef`, `links` has
-/// no resolution domain — an `href` is never invalid for naming something
-/// the CND does not carry. `text_span` as on `NodeRef` (ADR 0013).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct NodeLink {
-    pub href: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text_span: Option<Vec<i64>>,
 }
 
 /// Footnote pool entry — flat supporting text keyed by its rendered
@@ -308,7 +230,7 @@ pub struct NodeBase {
     /// Forward hyperlink edges (ADR 0024, cnd-sdk) — a fourth, href-keyed
     /// forward family alongside `refs`/`cites`/`footnotes`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub links: Vec<NodeLink>,
+    pub links: Vec<LinkRef>,
     /// A plain `serde_json::Map`, not a `HashMap`: without `serde_json`'s
     /// `preserve_order` feature (never enabled in this workspace — it would
     /// change map ordering for every crate in the build), `Map` is backed
