@@ -1,14 +1,20 @@
 mod common;
 
 use common::{
-    NodeStats, all_example_files, assert_cnd_contract, assert_json_roundtrip,
-    assert_labels_globally_unique, assert_pool_refs_resolve, assert_refs_resolve,
-    assert_tag_sequence, assert_unique_ids, cnd_for_example, codepoint_slice,
-    compile_example, example_path, find_by_label, find_lists, heading_texts,
-    incoming_count, label_exists, paragraph_texts_in_order, table_stats,
-    tags_under_heading, walk_nodes,
+    NodeStats, all_example_files, all_nodes, all_nodes_full, all_texts,
+    assert_cnd_contract, assert_json_roundtrip, assert_labels_globally_unique,
+    assert_pool_refs_resolve, assert_refs_resolve, assert_tag_sequence,
+    assert_unique_ids, cnd_for_example, codepoint_slice, compile_example, example_path,
+    find_by_label, find_lists, first_paragraph, footnote_text, heading_texts,
+    incoming_count, item_text, label_exists, nested_items, nested_lists,
+    paragraph_texts_in_order, table_stats, tags_under_heading, walk_nodes,
 };
-use typst_cnd::{CndNode, ListItem, TableKind, cnd_to_json};
+use typst_cnd::{CndNode, ListItem, RichText, cnd_to_json};
+
+/// The value of an optional text, for compact assertions.
+fn value(text: &Option<RichText>) -> Option<&str> {
+    text.as_ref().map(|text| text.value.as_str())
+}
 
 /// `(bibliography key, citation form, supplement)` on one node.
 type CiteTuple = (String, Option<String>, Option<String>);
@@ -68,8 +74,8 @@ fn structured_cross_references() {
     let CndNode::Figure(figure) = figure else {
         panic!("expected figure node");
     };
-    assert_eq!(figure.caption.as_deref(), Some("Paramètres nominaux de fonctionnement."));
-    assert!(figure.number.as_deref().is_some_and(|n| n.contains('1')));
+    assert_eq!(value(&figure.caption), Some("Paramètres nominaux de fonctionnement."));
+    assert!(figure.numbering.as_ref().is_some_and(|n| n.value.contains('1')));
     let table = figure
         .children
         .iter()
@@ -78,12 +84,15 @@ fn structured_cross_references() {
             _ => None,
         })
         .expect("table child");
+    // `table.raw` is gone in 0.5: the table's content is its cells, each
+    // one's text a paragraph child.
     assert!(
         table
-            .raw
-            .as_ref()
-            .map(|r| r.value.as_str())
-            .is_some_and(|r| r.contains("table("))
+            .cells
+            .iter()
+            .any(|cell| !first_paragraph(&cell.children).is_empty()),
+        "the table carries its cell text: {:?}",
+        table.cells
     );
     assert!(
         incoming_count(&cnd.nodes, figure.base.label.as_deref().expect("label")) > 0,
@@ -195,7 +204,7 @@ fn complex_refs_dense_graph() {
         panic!("expected heading");
     };
     assert!(
-        !overview.base.refs.is_empty(),
+        !overview.text.refs.is_empty(),
         "overview heading should reference labelled targets"
     );
 
@@ -224,7 +233,7 @@ fn complex_refs_dense_graph() {
             _ => None,
         })
         .expect("regulation paragraph with metadata");
-    assert!(!regulation_para.base.refs.is_empty());
+    assert!(!regulation_para.text.refs.is_empty());
 
     assert_refs_resolve(&cnd.nodes);
 }
@@ -273,8 +282,18 @@ fn complex_tables_standalone_and_figure_variants() {
             _ => None,
         })
         .expect("table child b");
-    assert!(a_table.cells.iter().any(|c| c.text.contains("PT-A")));
-    assert!(b_table.cells.iter().any(|c| c.text.contains("PT-C")));
+    assert!(
+        a_table
+            .cells
+            .iter()
+            .any(|c| first_paragraph(&c.children).contains("PT-A"))
+    );
+    assert!(
+        b_table
+            .cells
+            .iter()
+            .any(|c| first_paragraph(&c.children).contains("PT-C"))
+    );
 
     assert_refs_resolve(&cnd.nodes);
 }
@@ -320,7 +339,7 @@ fn complex_columns_reading_order_flatten() {
         .children
         .iter()
         .find_map(|n| match n {
-            CndNode::Paragraph(p) if p.text.starts_with("[L1]") => Some(p),
+            CndNode::Paragraph(p) if p.text.value.starts_with("[L1]") => Some(p),
             _ => None,
         })
         .expect("L1 paragraph");
@@ -333,7 +352,7 @@ fn complex_columns_reading_order_flatten() {
     let CndNode::Figure(figure) = figure else {
         panic!("expected figure");
     };
-    assert!(figure.caption.as_ref().is_some_and(|c| c.contains("bus")));
+    assert!(value(&figure.caption).is_some_and(|c| c.contains("bus")));
     let table = figure
         .children
         .iter()
@@ -363,13 +382,13 @@ fn complex_columns_reading_order_flatten() {
     let post = find_by_label(&cnd.nodes, "ch-single")
         .and_then(|n| match n {
             CndNode::Heading(h) => h.children.iter().find_map(|c| match c {
-                CndNode::Paragraph(p) if p.text.starts_with("[POST]") => Some(p),
+                CndNode::Paragraph(p) if p.text.value.starts_with("[POST]") => Some(p),
                 _ => None,
             }),
             _ => None,
         })
         .expect("post paragraph");
-    assert!(!post.base.refs.is_empty());
+    assert!(!post.text.refs.is_empty());
 
     assert_refs_resolve(&cnd.nodes);
 }
@@ -411,7 +430,7 @@ fn newsletter_dashing_dept_news_template() {
     fn find_heading<'a>(nodes: &'a [CndNode], needle: &str) -> Option<&'a CndNode> {
         nodes
             .iter()
-            .find(|n| matches!(n, CndNode::Heading(h) if h.text.contains(needle)))
+            .find(|n| matches!(n, CndNode::Heading(h) if h.text.value.contains(needle)))
     }
 
     let sixtus = find_heading(&cnd.nodes, "Sixtus Award").expect("sixtus heading");
@@ -420,7 +439,7 @@ fn newsletter_dashing_dept_news_template() {
         .children
         .iter()
         .filter_map(|c| match c {
-            CndNode::Paragraph(p) => Some(p.text.as_str()),
+            CndNode::Paragraph(p) => Some(p.text.value.as_str()),
             _ => None,
         })
         .collect();
@@ -453,22 +472,18 @@ fn rich_document_node_types() {
     // Every captioned float is now a figure wrapper, including the
     // grid-in-figure — so this counts the image figure plus the grid figure.
     assert!(stats.figures >= 1, "expected at least one figure node");
-    assert!(stats.tables >= 1, "expected a grid-in-figure table node");
+    assert!(stats.layouts >= 1, "expected a grid-in-figure layout node");
 
     let grid_fig = find_by_label(&cnd.nodes, "rich-grid").expect("grid figure");
     let CndNode::Figure(grid_fig) = grid_fig else {
         panic!("expected grid figure node");
     };
-    assert!(grid_fig.caption.as_deref().is_some_and(|c| c.contains("grid")));
-    let grid = grid_fig
-        .children
-        .iter()
-        .find_map(|c| match c {
-            CndNode::Table(t) => Some(t),
-            _ => None,
-        })
-        .expect("grid table child");
-    assert_eq!(grid.kind, typst_cnd::TableKind::Grid);
+    assert!(value(&grid_fig.caption).is_some_and(|c| c.contains("grid")));
+    // A grid is a `layout` in 0.5, the former grid-kind table.
+    assert!(
+        grid_fig.children.iter().any(|c| matches!(c, CndNode::Layout(_))),
+        "grid layout child"
+    );
 
     assert_refs_resolve(&cnd.nodes);
 }
@@ -503,11 +518,14 @@ fn complex_semantic_all_node_types_and_xrefs() {
     assert!(stats.lists >= 2);
     assert_eq!(stats.code, 2);
     assert_eq!(stats.math, 2);
-    assert_eq!(stats.tables, 3);
+    // Two tables and a grid, which is a `layout` in 0.5.
+    assert_eq!(stats.tables, 2);
+    assert_eq!(stats.layouts, 1);
     // Three figure wrappers: the two captioned tables/grids (tab-signals,
     // fig-grid-zones) plus the one true non-table figure (fig-diagram).
     assert_eq!(stats.figures, 3);
-    assert_eq!(stats.paragraphs, 8);
+    // The flow paragraphs; list items, cells and quotes hold their own.
+    assert_eq!(paragraph_texts_in_order(&cnd.nodes).len(), 8);
 
     for label in [
         "ch-corpus",
@@ -527,23 +545,18 @@ fn complex_semantic_all_node_types_and_xrefs() {
     let CndNode::Quote(knuth) = knuth else {
         panic!("expected quote node");
     };
-    assert_eq!(knuth.attribution.as_deref(), Some("Donald Knuth"));
-    assert!(knuth.text.contains("Programs are meant to be read"));
+    assert_eq!(value(&knuth.attribution), Some("Donald Knuth"));
+    assert!(first_paragraph(&knuth.children).contains("Programs are meant to be read"));
 
     let grid_fig = find_by_label(&cnd.nodes, "fig-grid-zones").expect("grid");
     let CndNode::Figure(grid_fig) = grid_fig else {
         panic!("expected grid figure node");
     };
-    assert!(grid_fig.caption.as_deref().is_some_and(|c| c.contains("Zone layout")));
-    let grid = grid_fig
-        .children
-        .iter()
-        .find_map(|c| match c {
-            CndNode::Table(t) => Some(t),
-            _ => None,
-        })
-        .expect("grid table child");
-    assert_eq!(grid.kind, TableKind::Grid);
+    assert!(value(&grid_fig.caption).is_some_and(|c| c.contains("Zone layout")));
+    assert!(
+        grid_fig.children.iter().any(|c| matches!(c, CndNode::Layout(_))),
+        "grid layout child"
+    );
 
     let signals = find_by_label(&cnd.nodes, "tab-signals").expect("signals");
     let CndNode::Figure(signals) = signals else {
@@ -561,7 +574,9 @@ fn complex_semantic_all_node_types_and_xrefs() {
         .children
         .iter()
         .find_map(|n| match n {
-            CndNode::Paragraph(p) if p.text.contains("Overview paragraph") => Some(p),
+            CndNode::Paragraph(p) if p.text.value.contains("Overview paragraph") => {
+                Some(p)
+            }
             _ => None,
         })
         .expect("overview paragraph");
@@ -582,21 +597,23 @@ fn complex_semantic_all_node_types_and_xrefs() {
         .children
         .iter()
         .find_map(|n| match n {
-            CndNode::Paragraph(p) if p.text.contains("Closing paragraph") => Some(p),
+            CndNode::Paragraph(p) if p.text.value.contains("Closing paragraph") => {
+                Some(p)
+            }
             _ => None,
         })
         .expect("closing xref paragraph");
-    assert!(closing.base.refs.len() >= 5);
+    assert!(closing.text.refs.len() >= 5);
     // A label is now the edge itself, not an optional decoration on it —
     // an unlabelled edge cannot be represented (ADR 0017).
     assert!(
-        closing.base.refs.iter().all(|reference| !reference.label.is_empty()),
+        closing.text.refs.iter().all(|reference| !reference.label.is_empty()),
         "refs should carry Typst labels: {:?}",
-        closing.base.refs
+        closing.text.refs
     );
     assert!(
         closing
-            .base
+            .text
             .refs
             .iter()
             .any(|reference| reference.label == "eq-golden"),
@@ -611,12 +628,12 @@ fn complex_semantic_all_node_types_and_xrefs() {
     let bullet = lists
         .iter()
         .find(|list| {
-            !list.ordered && list.items.iter().any(|item| !item.children.is_empty())
+            !list.ordered && list.items.iter().any(|item| !nested_lists(item).is_empty())
         })
         .expect("bullet list with nested children");
     assert_eq!(bullet.items.len(), 3);
-    assert_eq!(bullet.items[1].children.len(), 2);
-    assert!(bullet.items[1].children[1].text.contains("LI-B2"));
+    assert_eq!(nested_items(&bullet.items[1]).len(), 2);
+    assert!(item_text(nested_items(&bullet.items[1])[1]).contains("LI-B2"));
 
     let annex = find_by_label(&cnd.nodes, "ch-annex").expect("annex");
     let CndNode::Heading(annex) = annex else {
@@ -630,7 +647,12 @@ fn complex_semantic_all_node_types_and_xrefs() {
             _ => None,
         })
         .expect("standalone bare table");
-    assert!(standalone.cells.iter().any(|c| c.text.contains("complex_semantic")));
+    assert!(
+        standalone
+            .cells
+            .iter()
+            .any(|c| first_paragraph(&c.children).contains("complex_semantic"))
+    );
 
     assert_refs_resolve(&cnd.nodes);
 }
@@ -667,7 +689,9 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
     assert_eq!(stats.code, 1);
     assert_eq!(stats.math, 1);
     assert_eq!(stats.lists, 1);
-    assert_eq!(stats.tables, 2);
+    // A table and a grid, which is a `layout` in 0.5.
+    assert_eq!(stats.tables, 1);
+    assert_eq!(stats.layouts, 1);
 
     assert_tag_sequence(
         &cnd.nodes,
@@ -685,7 +709,11 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
         .children
         .iter()
         .find_map(|n| match n {
-            CndNode::Quote(q) if q.text.contains("Quote trapped") => Some(q),
+            CndNode::Quote(q)
+                if first_paragraph(&q.children).contains("Quote trapped") =>
+            {
+                Some(q)
+            }
             _ => None,
         })
         .expect("quote in column block");
@@ -693,10 +721,10 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
         quote.base.state_metadata.get("track").and_then(|v| v.as_str()),
         Some("left")
     );
-    assert_eq!(quote.attribution.as_deref(), Some("Source L"));
+    assert_eq!(value(&quote.attribution), Some("Source L"));
     assert!(
         cols.children.iter().all(|n| match n {
-            CndNode::Paragraph(p) => !p.text.contains("Quote trapped"),
+            CndNode::Paragraph(p) => !p.text.value.contains("Quote trapped"),
             _ => true,
         }),
         "quote body must not duplicate as paragraph"
@@ -706,15 +734,10 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
     let CndNode::Figure(grid_fig) = grid_fig else {
         panic!("expected grid figure");
     };
-    let grid = grid_fig
-        .children
-        .iter()
-        .find_map(|c| match c {
-            CndNode::Table(t) => Some(t),
-            _ => None,
-        })
-        .expect("grid table child");
-    assert_eq!(grid.kind, TableKind::Grid);
+    assert!(
+        grid_fig.children.iter().any(|c| matches!(c, CndNode::Layout(_))),
+        "grid layout child"
+    );
 
     let tail = find_by_label(&cnd.nodes, "sec-tail").expect("tail");
     let CndNode::Heading(tail) = tail else {
@@ -724,12 +747,13 @@ fn complex_hardcore_columns_semantics_and_reading_order() {
         .children
         .iter()
         .find_map(|n| match n {
-            CndNode::Paragraph(p) if p.text.starts_with("[TAIL-1]") => Some(p),
+            CndNode::Paragraph(p) if p.text.value.starts_with("[TAIL-1]") => Some(p),
             _ => None,
         })
         .expect("tail paragraph");
     assert!(
-        tail_para.text.contains("Équation") && tail_para.text.contains("Tableau"),
+        tail_para.text.value.contains("Équation")
+            && tail_para.text.value.contains("Tableau"),
         "tail paragraph should contain resolved reference text"
     );
 
@@ -765,27 +789,23 @@ fn inline_code_not_duplicated_in_paragraphs() {
     for list in lists {
         for item in &list.items {
             for token in &["typst-cnd", "cargo test", "inline code"] {
-                let count = item.text.matches(token).count();
+                let count = item_text(item).matches(token).count();
                 assert!(
                     count <= 1,
                     "inline code token {token:?} appears {count}× in list item (expected ≤1): {:?}",
-                    item.text
+                    item_text(item)
                 );
             }
         }
     }
 
-    let mut quote_texts: Vec<String> = Vec::new();
-    fn collect_quote_texts(nodes: &[CndNode], out: &mut Vec<String>) {
-        for node in nodes {
-            match node {
-                CndNode::Quote(q) => out.push(q.text.clone()),
-                CndNode::Heading(h) => collect_quote_texts(&h.children, out),
-                _ => {}
-            }
-        }
-    }
-    collect_quote_texts(&cnd.nodes, &mut quote_texts);
+    let quote_texts: Vec<String> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Quote(q) => Some(first_paragraph(&q.children).to_string()),
+            _ => None,
+        })
+        .collect();
     assert!(!quote_texts.is_empty(), "inline_code.typ should produce at least one quote");
     for text in &quote_texts {
         let count = text.matches("extract_text").count();
@@ -807,36 +827,32 @@ fn terms_definition_lists() {
     assert_eq!(stats.terms, 2);
     assert_eq!(stats.lists, 0, "nested list must inline into the term, not emit a node");
 
-    let mut terms: Vec<&CndNode> = Vec::new();
-    fn collect<'a>(nodes: &'a [CndNode], out: &mut Vec<&'a CndNode>) {
-        for node in nodes {
-            if matches!(node, CndNode::Terms(_)) {
-                out.push(node);
-            }
-            if let CndNode::Heading(h) = node {
-                collect(&h.children, out);
-            }
-        }
-    }
-    collect(&cnd.nodes, &mut terms);
+    let terms: Vec<&CndNode> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter(|node| matches!(node, CndNode::Terms(_)))
+        .collect();
     assert_eq!(terms.len(), 2);
 
+    // `tight` is gone in 0.5 (spacing is presentation): the tight and the
+    // wide list are two distinct nodes, each with its own items.
     let CndNode::Terms(tight) = terms[0] else { panic!() };
-    assert!(tight.tight, "first list is a tight definition list");
     assert_eq!(tight.items.len(), 3);
-    assert_eq!(tight.items[0].term, "manifest");
-    assert_eq!(tight.items[0].description, "The serialized document tree.");
+    assert_eq!(tight.items[0].term.value, "manifest");
+    assert_eq!(
+        first_paragraph(&tight.items[0].children),
+        "The serialized document tree."
+    );
 
     let CndNode::Terms(wide) = terms[1] else { panic!() };
-    assert!(!wide.tight, "second list is a wide definition list");
+    assert_ne!(tight.base.id, wide.base.id);
     assert_eq!(wide.items.len(), 3);
     let consumer = &wide.items[1];
-    assert_eq!(consumer.term, "consumer");
+    assert_eq!(consumer.term.value, "consumer");
+    let description = first_paragraph(&consumer.children);
     assert!(
-        consumer.description.contains("the search indexer")
-            && consumer.description.contains("export tooling"),
-        "nested list content is inlined into the term description: {:?}",
-        consumer.description
+        description.contains("the search indexer")
+            && description.contains("export tooling"),
+        "nested list content is inlined into the term description: {description:?}"
     );
 
     assert_refs_resolve(&cnd.nodes);
@@ -854,7 +870,7 @@ fn image_figure_carries_path_and_alt() {
         panic!("expected figure wrapper");
     };
     assert_eq!(figure.kind.as_deref(), Some("image"));
-    assert!(figure.caption.as_deref().is_some_and(|c| c.contains("cover art")));
+    assert!(value(&figure.caption).is_some_and(|c| c.contains("cover art")));
 
     let image = figure
         .children
@@ -930,7 +946,7 @@ fn footnotes_pool_and_edges() {
     let labels: Vec<&str> = cnd.footnotes.iter().map(|f| f.label.as_str()).collect();
     assert_eq!(labels, vec!["1", "2", "3"]);
     assert!(
-        cnd.footnotes.iter().any(|f| f.text.contains("2023 audit")),
+        cnd.footnotes.iter().any(|f| footnote_text(f).contains("2023 audit")),
         "footnote body text is captured in the pool"
     );
 
@@ -942,7 +958,7 @@ fn footnotes_pool_and_edges() {
         for node in nodes {
             match node {
                 CndNode::Paragraph(p) => {
-                    out.push(p.base.footnotes.iter().map(|r| r.label.clone()).collect());
+                    out.push(p.text.footnotes.iter().map(|r| r.label.clone()).collect());
                 }
                 CndNode::Heading(h) => walk(&h.children, out),
                 _ => {}
@@ -969,9 +985,9 @@ fn footnotes_pool_and_edges() {
         for node in nodes {
             match node {
                 CndNode::Paragraph(p) => {
-                    for reference in &p.base.footnotes {
+                    for reference in &p.text.footnotes {
                         out.push((
-                            p.text.clone(),
+                            p.text.value.clone(),
                             reference.label.clone(),
                             reference.text_span.clone(),
                         ));
@@ -1017,7 +1033,7 @@ fn citations_bibliography_pool_and_cite_edges() {
     assert!(smith.authors.iter().any(|a| a.contains("Smith")));
     assert_eq!(smith.doi.as_deref(), Some("10.1000/jods.2024.12"));
     assert!(
-        smith.formatted.as_deref().is_some_and(|f| !f.is_empty()),
+        value(&smith.formatted).is_some_and(|f| !f.is_empty()),
         "formatted reference string present"
     );
     assert!(smith.fields.get("title").is_some(), "fields carries the full source entry");
@@ -1032,7 +1048,7 @@ fn citations_bibliography_pool_and_cite_edges() {
         for node in nodes {
             match node {
                 CndNode::Paragraph(p) => out.push(
-                    p.base
+                    p.text
                         .cites
                         .iter()
                         .map(|c| (c.label.clone(), c.form.clone(), c.supplement.clone()))
@@ -1069,9 +1085,9 @@ fn citations_bibliography_pool_and_cite_edges() {
         for node in nodes {
             match node {
                 CndNode::Paragraph(p) => {
-                    for cite in &p.base.cites {
+                    for cite in &p.text.cites {
                         out.push((
-                            p.text.clone(),
+                            p.text.value.clone(),
                             cite.label.clone(),
                             cite.form.clone(),
                             cite.text_span.clone(),
@@ -1099,23 +1115,15 @@ fn citations_bibliography_pool_and_cite_edges() {
 
     // A `@key` citation is a RefElem but must not create a cross-reference
     // edge — citations resolve in the bibliography, not the node tree.
-    fn assert_no_bibkey_refs(nodes: &[CndNode]) {
-        for node in nodes {
-            for reference in &node.base().refs {
-                let label = reference.label.as_str();
-                assert!(
-                    label != "smith2024" && label != "jones2022",
-                    "citation key leaked into refs: {label}"
-                );
-            }
-            match node {
-                CndNode::Heading(h) => assert_no_bibkey_refs(&h.children),
-                CndNode::Figure(f) => assert_no_bibkey_refs(&f.children),
-                _ => {}
-            }
+    for text in all_texts(&cnd.nodes) {
+        for reference in &text.refs {
+            let label = reference.label.as_str();
+            assert!(
+                label != "smith2024" && label != "jones2022",
+                "citation key leaked into refs: {label}"
+            );
         }
     }
-    assert_no_bibkey_refs(&cnd.nodes);
 
     assert_refs_resolve(&cnd.nodes);
 }
@@ -1129,9 +1137,13 @@ fn ref_text_spans_are_codepoint_offsets() {
     fn walk(nodes: &[CndNode], out: &mut Vec<(String, String, Vec<i64>)>) {
         for node in nodes {
             if let CndNode::Paragraph(p) = node {
-                for reference in &p.base.refs {
+                for reference in &p.text.refs {
                     if let Some(span) = &reference.text_span {
-                        out.push((p.text.clone(), reference.label.clone(), span.clone()));
+                        out.push((
+                            p.text.value.clone(),
+                            reference.label.clone(),
+                            span.clone(),
+                        ));
                     }
                 }
             }
@@ -1177,7 +1189,7 @@ fn markers_in_non_flat_nodes_do_not_leak_or_span() {
 
     // The footnote still enters the pool even though it sits in a list item.
     assert_eq!(cnd.footnotes.len(), 1);
-    assert!(cnd.footnotes[0].text.contains("inside a list item"));
+    assert!(footnote_text(&cnd.footnotes[0]).contains("inside a list item"));
 
     // Leak guard: the footnote body must not bleed into the list item text
     // (the item body is text-extracted unrealized; ADR 0013 leak fix).
@@ -1186,10 +1198,11 @@ fn markers_in_non_flat_nodes_do_not_leak_or_span() {
     let carrier = list
         .items
         .iter()
-        .find(|item| item.text.contains("carrying a footnote"))
+        .find(|item| item_text(item).contains("carrying a footnote"))
         .expect("the footnote-carrying item");
     assert_eq!(
-        carrier.text, "An item carrying a footnote.",
+        item_text(carrier),
+        "An item carrying a footnote.",
         "the footnote body must not leak into the list item text"
     );
 
@@ -1465,56 +1478,21 @@ struct ParagraphEdges {
 
 /// The out-of-tree edges of the first paragraph whose text contains `needle`.
 fn paragraph_edges(nodes: &[CndNode], needle: &str) -> ParagraphEdges {
-    fn walk(nodes: &[CndNode], needle: &str, out: &mut Option<ParagraphEdges>) {
-        for node in nodes {
-            if out.is_some() {
-                return;
-            }
-            if let CndNode::Paragraph(p) = node
-                && p.text.contains(needle)
-            {
-                *out = Some(ParagraphEdges {
-                    refs: p.base.refs.iter().map(|r| r.label.clone()).collect(),
-                    cites: p.base.cites.iter().map(|c| c.label.clone()).collect(),
-                    footnotes: p.base.footnotes.iter().map(|f| f.label.clone()).collect(),
-                });
-                return;
-            }
-            match node {
-                CndNode::Heading(h) => walk(&h.children, needle, out),
-                CndNode::Figure(f) => walk(&f.children, needle, out),
-                _ => {}
-            }
-        }
+    let Some(CndNode::Paragraph(p)) = find_paragraph(nodes, needle) else {
+        return ParagraphEdges::default();
+    };
+    ParagraphEdges {
+        refs: p.text.refs.iter().map(|r| r.label.clone()).collect(),
+        cites: p.text.cites.iter().map(|c| c.label.clone()).collect(),
+        footnotes: p.text.footnotes.iter().map(|f| f.label.clone()).collect(),
     }
-    let mut out = None;
-    walk(nodes, needle, &mut out);
-    out.unwrap_or_default()
 }
 
 /// The first paragraph whose text contains `needle`, anywhere in the tree.
 fn find_paragraph<'a>(nodes: &'a [CndNode], needle: &str) -> Option<&'a CndNode> {
-    for node in nodes {
-        if let CndNode::Paragraph(p) = node
-            && p.text.contains(needle)
-        {
-            return Some(node);
-        }
-        match node {
-            CndNode::Heading(h) => {
-                if let Some(found) = find_paragraph(&h.children, needle) {
-                    return Some(found);
-                }
-            }
-            CndNode::Figure(f) => {
-                if let Some(found) = find_paragraph(&f.children, needle) {
-                    return Some(found);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    all_nodes(nodes).into_iter().find(
+        |node| matches!(node, CndNode::Paragraph(p) if p.text.value.contains(needle)),
+    )
 }
 
 /// `#link` capture (ADR 0024): the three-row mapping (URL -> `links`,
@@ -1537,22 +1515,22 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
     let CndNode::Paragraph(nested) = nested else { unreachable!() };
 
     let link = nested
-        .base
+        .text
         .links
         .iter()
         .find(|l| l.href == "https://example.com")
-        .unwrap_or_else(|| panic!("expected a links entry in {:?}", nested.base.links));
+        .unwrap_or_else(|| panic!("expected a links entry in {:?}", nested.text.links));
     let link_span = link
         .text_span
         .as_ref()
         .unwrap_or_else(|| panic!("expected a non-null span for {link:?}"));
 
     let reference = nested
-        .base
+        .text
         .refs
         .iter()
         .find(|r| r.label == "sec-overview")
-        .unwrap_or_else(|| panic!("expected a refs entry in {:?}", nested.base.refs));
+        .unwrap_or_else(|| panic!("expected a refs entry in {:?}", nested.text.refs));
     let ref_span = reference
         .text_span
         .as_ref()
@@ -1562,8 +1540,8 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
         link_span[0] <= ref_span[0] && ref_span[1] <= link_span[1],
         "the link's span {link_span:?} must contain the ref's span {ref_span:?}"
     );
-    let link_slice = codepoint_slice(&nested.text, link_span);
-    let ref_slice = codepoint_slice(&nested.text, ref_span);
+    let link_slice = codepoint_slice(&nested.text.value, link_span);
+    let ref_slice = codepoint_slice(&nested.text.value, ref_span);
     assert!(
         link_slice.contains(&ref_slice),
         "the link's rendered text {link_slice:?} must contain the ref's {ref_slice:?}"
@@ -1579,13 +1557,16 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
         find_paragraph(&cnd.nodes, "in running text").expect("the plain-url paragraph");
     let CndNode::Paragraph(plain) = plain else { unreachable!() };
     let plain_link = plain
-        .base
+        .text
         .links
         .iter()
         .find(|l| l.href == "https://example.com/docs")
-        .unwrap_or_else(|| panic!("expected a links entry in {:?}", plain.base.links));
+        .unwrap_or_else(|| panic!("expected a links entry in {:?}", plain.text.links));
     let plain_span = plain_link.text_span.as_ref().expect("non-null span");
-    assert_eq!(codepoint_slice(&plain.text, plain_span), "https://example.com/docs");
+    assert_eq!(
+        codepoint_slice(&plain.text.value, plain_span),
+        "https://example.com/docs"
+    );
 
     // Row 2: `#link(<label>)[body]` is a cross-reference with a custom
     // body — a `refs` entry, not a `links` entry.
@@ -1593,19 +1574,19 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
         .expect("the link-to-label paragraph");
     let CndNode::Paragraph(labelled) = labelled else { unreachable!() };
     let labelled_ref = labelled
-        .base
+        .text
         .refs
         .iter()
         .find(|r| r.label == "sec-overview")
-        .unwrap_or_else(|| panic!("expected a refs entry in {:?}", labelled.base.refs));
+        .unwrap_or_else(|| panic!("expected a refs entry in {:?}", labelled.text.refs));
     assert_eq!(
-        codepoint_slice(&labelled.text, labelled_ref.text_span.as_ref().unwrap()),
+        codepoint_slice(&labelled.text.value, labelled_ref.text_span.as_ref().unwrap()),
         "see the overview"
     );
     assert!(
-        labelled.base.links.is_empty(),
+        labelled.text.links.is_empty(),
         "a link-to-label must not also surface as a links entry: {:?}",
-        labelled.base.links
+        labelled.text.links
     );
 
     // Non-textual body (an empty-bodied link): a `links` entry with a null
@@ -1617,12 +1598,12 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
         unreachable!()
     };
     let empty_body_link = empty_body_paragraph
-        .base
+        .text
         .links
         .iter()
         .find(|l| l.href == "https://example.com/cover")
         .unwrap_or_else(|| {
-            panic!("expected a links entry in {:?}", empty_body_paragraph.base.links)
+            panic!("expected a links entry in {:?}", empty_body_paragraph.text.links)
         });
     assert!(
         empty_body_link.text_span.is_none(),
@@ -1638,28 +1619,33 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
         unreachable!()
     };
     assert!(
-        position_link_paragraph.base.links.is_empty(),
+        position_link_paragraph.text.links.is_empty(),
         "a position destination must be dropped, not emitted as a links entry: {:?}",
-        position_link_paragraph.base.links
+        position_link_paragraph.text.links
     );
     assert!(
-        position_link_paragraph.base.refs.is_empty(),
+        position_link_paragraph.text.refs.is_empty(),
         "a position destination must be dropped, not emitted as a refs entry: {:?}",
-        position_link_paragraph.base.refs
+        position_link_paragraph.text.refs
     );
 
     // Non-flat node (a list item): the span fallback rule ("nodes whose
     // text is not a single flat string emit `text_span: None`") now also
     // applies to `links` — generalised from the same rule already in force
-    // for `refs` (refs.rs).
+    // for `refs` (refs.rs). The list's span-less edges sit on a paragraph of
+    // its items.
     let lists = find_lists(&cnd.nodes);
     let list = lists.first().expect("the bullet list");
-    let list_link = list
-        .base
-        .links
+    let list_links: Vec<_> = list
+        .items
+        .iter()
+        .flat_map(|item| all_texts(&item.children))
+        .flat_map(|text| text.links.iter())
+        .collect();
+    let list_link = list_links
         .iter()
         .find(|l| l.href == "https://example.com/list")
-        .unwrap_or_else(|| panic!("expected a links entry in {:?}", list.base.links));
+        .unwrap_or_else(|| panic!("expected a links entry in {list_links:?}"));
     assert!(
         list_link.text_span.is_none(),
         "a link inside a non-flat node must carry a null span, got {:?}",
@@ -1680,20 +1666,22 @@ fn link_capture_maps_dest_kinds_and_does_not_disturb_ref_spans() {
         .expect("the first half of the split link body");
     let CndNode::Paragraph(first_half) = first_half else { unreachable!() };
     assert!(
-        first_half.base.links.is_empty(),
+        first_half.text.links.is_empty(),
         "known gap: a `LinkElem` whose body splits into two paragraphs is \
          dropped, not null-spanned — got {:?}",
-        first_half.base.links
+        first_half.text.links
     );
     let second_half = find_paragraph(&cnd.nodes, "Second half of the same link body")
         .expect("the second half of the split link body");
     let CndNode::Paragraph(second_half) = second_half else { unreachable!() };
-    assert!(second_half.base.links.is_empty(), "same known gap, other half");
+    assert!(second_half.text.links.is_empty(), "same known gap, other half");
 }
 
 /// `(text, number)` of each item, for compact assertions on one level.
-fn item_summary(items: &[ListItem]) -> Vec<(&str, Option<i32>)> {
-    items.iter().map(|item| (item.text.as_str(), item.number)).collect()
+fn item_summary<'a>(
+    items: impl IntoIterator<Item = &'a ListItem>,
+) -> Vec<(&'a str, Option<i32>)> {
+    items.into_iter().map(|item| (item_text(item), item.number)).collect()
 }
 
 /// The emitted list whose first item's text starts with `prefix`.
@@ -1704,7 +1692,11 @@ fn list_starting_with<'a>(
     lists
         .iter()
         .copied()
-        .find(|list| list.items.first().is_some_and(|item| item.text.starts_with(prefix)))
+        .find(|list| {
+            list.items
+                .first()
+                .is_some_and(|item| item_text(item).starts_with(prefix))
+        })
         .unwrap_or_else(|| panic!("no list starting with {prefix:?}"))
 }
 
@@ -1713,11 +1705,21 @@ fn nested_list_items_are_children_of_their_parent() {
     let cnd = cnd_for_example("nested_lists.typ");
     let lists = find_lists(&cnd.nodes);
 
-    // One list node per list written at the top level, plus the one inside
-    // the figure (whose text the figure does not carry). The nested lists
-    // and the list inside the quote are not lists of their own.
-    let mut firsts: Vec<&str> =
-        lists.iter().map(|list| list.items[0].text.as_str()).collect();
+    // One outer list node per list written at the top level, plus the one
+    // inside the figure (whose text the figure does not carry). Nested lists
+    // are list nodes inside their parent item; the list inside the quote is
+    // not a list of its own.
+    let nested: std::collections::HashSet<uuid::Uuid> = lists
+        .iter()
+        .flat_map(|list| list.items.iter())
+        .flat_map(nested_lists)
+        .map(|list| list.base.id)
+        .collect();
+    let mut firsts: Vec<&str> = lists
+        .iter()
+        .filter(|list| !nested.contains(&list.base.id))
+        .map(|list| item_text(&list.items[0]))
+        .collect();
     firsts.sort_unstable();
     assert_eq!(
         firsts,
@@ -1738,14 +1740,14 @@ fn nested_list_items_are_children_of_their_parent() {
         [("NA1 top one", None), ("NA2 top two", None), ("NA6 top three", None)]
     );
     assert_eq!(
-        item_summary(&a.items[1].children),
+        item_summary(nested_items(&a.items[1])),
         [("NA3 child one", None), ("NA4 child two", None)]
     );
     assert_eq!(
-        item_summary(&a.items[1].children[1].children),
+        item_summary(nested_items(nested_items(&a.items[1])[1])),
         [("NA5 grandchild", None)]
     );
-    assert!(a.items[1].children[0].children.is_empty());
+    assert!(nested_lists(nested_items(&a.items[1])[0]).is_empty());
 
     // Bullets under an enum.
     let b = list_starting_with(&lists, "NB1");
@@ -1755,23 +1757,25 @@ fn nested_list_items_are_children_of_their_parent() {
         [("NB1 enum one", Some(1)), ("NB2 enum two", Some(2))]
     );
     assert_eq!(
-        item_summary(&b.items[1].children),
+        item_summary(nested_items(&b.items[1])),
         [("NB3 bullet in enum", None), ("NB4 bullet in enum", None)]
     );
+    assert!(nested_lists(&b.items[1]).iter().all(|list| !list.ordered));
 
     // An enum under a bullet, started at 5 by a set rule.
     let c = list_starting_with(&lists, "NC1");
     assert_eq!(item_summary(&c.items), [("NC1 bullet with enum children", None)]);
     assert_eq!(
-        item_summary(&c.items[0].children),
+        item_summary(nested_items(&c.items[0])),
         [("NC2 enum at five", Some(5)), ("NC3 enum at six", Some(6))]
     );
+    assert!(nested_lists(&c.items[0]).iter().all(|list| list.ordered));
 
     // An enum under a bullet, started at 5 by explicit markup.
     let d = list_starting_with(&lists, "ND1");
     assert_eq!(item_summary(&d.items), [("ND1 bullet with explicit numbers", None)]);
     assert_eq!(
-        item_summary(&d.items[0].children),
+        item_summary(nested_items(&d.items[0])),
         [("ND2 explicit five", Some(5)), ("ND3 follows five", Some(6))]
     );
 
@@ -1779,7 +1783,7 @@ fn nested_list_items_are_children_of_their_parent() {
     let e = list_starting_with(&lists, "NE1");
     assert_eq!(item_summary(&e.items), [("NE1 explicit list inside", None)]);
     assert_eq!(
-        item_summary(&e.items[0].children),
+        item_summary(nested_items(&e.items[0])),
         [("NE2 explicit child", None), ("NE3 explicit child", None)]
     );
 
@@ -1803,7 +1807,8 @@ fn nested_list_items_are_children_of_their_parent() {
             _ => None,
         })
         .expect("a quote");
-    assert!(quote.text.contains("NF2") && quote.text.contains("NF3"), "{:?}", quote.text);
+    let quote_text = first_paragraph(&quote.children);
+    assert!(quote_text.contains("NF2") && quote_text.contains("NF3"), "{quote_text:?}");
 }
 
 /// How many times each word occurs in the serialized CND.
@@ -1818,17 +1823,11 @@ fn word_counts(cnd: &typst_cnd::Cnd) -> std::collections::HashMap<String, usize>
 
 /// The text of every list item, nested ones included.
 fn all_list_item_texts(cnd: &typst_cnd::Cnd) -> Vec<String> {
-    fn walk(items: &[ListItem], out: &mut Vec<String>) {
-        for item in items {
-            out.push(item.text.clone());
-            walk(&item.children, out);
-        }
-    }
-    let mut out = Vec::new();
-    for list in find_lists(&cnd.nodes) {
-        walk(&list.items, &mut out);
-    }
-    out
+    find_lists(&cnd.nodes)
+        .into_iter()
+        .flat_map(|list| list.items.iter())
+        .map(|item| item_text(item).to_string())
+        .collect()
 }
 
 #[test]
@@ -1905,10 +1904,12 @@ fn lists_in_bare_floats_beside_open_lists_are_kept_once() {
     let parent = find_lists(&cnd.nodes)
         .into_iter()
         .flat_map(|list| list.items.iter())
-        .find(|item| item.text.contains("FLT1"))
+        .find(|item| item_text(item).contains("FLT1"))
         .expect("FLT1 item");
     assert!(
-        parent.children.iter().any(|child| child.text.contains("FLT2")),
+        nested_items(parent)
+            .iter()
+            .any(|child| item_text(child).contains("FLT2")),
         "FLT2 must be FLT1's child, not a list of its own"
     );
 }
@@ -1950,7 +1951,7 @@ fn lists_in_footnotes_live_in_the_footnote_pool_only() {
                 "{name}: {token} must not be in a body list node: {texts:?}"
             );
             assert!(
-                cnd.footnotes.iter().any(|note| note.text.contains(token)),
+                cnd.footnotes.iter().any(|note| footnote_text(note).contains(token)),
                 "{name}: {token} must be in the footnote pool"
             );
             assert_eq!(counts.get(*token).copied(), Some(1), "{name}: {token} once");
@@ -2145,23 +2146,6 @@ fn a_float_held_only_by_words_is_never_absorbed() {
     }
 }
 
-/// Every node of the tree, depth first, with heading and figure children.
-fn all_nodes(nodes: &[CndNode]) -> Vec<&CndNode> {
-    fn walk<'a>(nodes: &'a [CndNode], out: &mut Vec<&'a CndNode>) {
-        for node in nodes {
-            out.push(node);
-            match node {
-                CndNode::Heading(h) => walk(&h.children, out),
-                CndNode::Figure(f) => walk(&f.children, out),
-                _ => {}
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(nodes, &mut out);
-    out
-}
-
 #[test]
 fn handbuilt_toc_emits_each_boxed_number_once() {
     // The number in a styled box is part of its grid cell's paragraph: it
@@ -2195,7 +2179,7 @@ fn figure_bodies_are_not_duplicated() {
     let captions: Vec<&str> = nodes
         .iter()
         .filter_map(|n| match n {
-            CndNode::Figure(f) => f.caption.as_deref(),
+            CndNode::Figure(f) => value(&f.caption),
             _ => None,
         })
         .collect();
@@ -2209,13 +2193,15 @@ fn figure_bodies_are_not_duplicated() {
             "FF3 caption table",
         ]
     );
+    // A grid in a figure is a `layout` in 0.5, the former grid-kind table.
     let cells: Vec<&str> = nodes
         .iter()
         .filter_map(|n| match n {
-            CndNode::Table(t) => Some(t),
+            CndNode::Table(t) => Some(&t.cells),
+            CndNode::Layout(l) => Some(&l.cells),
             _ => None,
         })
-        .flat_map(|t| t.cells.iter().map(|c| c.text.as_str()))
+        .flat_map(|cells| cells.iter().map(|c| first_paragraph(&c.children)))
         .collect();
     for cell in ["FB1 key", "FB4 value", "FD1 key", "FD2 value", "FF1 key", "FF2 value"] {
         assert_eq!(
@@ -2253,7 +2239,11 @@ fn terms_never_swallow_paragraphs_that_start_like_them() {
             CndNode::Terms(t) => Some(t),
             _ => None,
         })
-        .flat_map(|t| t.items.iter().map(|i| (i.term.as_str(), i.description.as_str())))
+        .flat_map(|t| {
+            t.items
+                .iter()
+                .map(|i| (i.term.value.as_str(), first_paragraph(&i.children)))
+        })
         .collect();
     assert_eq!(terms, [("Status", "accepted"), ("Owner", "someone")]);
     let paragraphs = paragraph_texts_in_order(&cnd.nodes);
@@ -2278,8 +2268,9 @@ fn a_list_in_a_quote_is_carried_by_the_quote_only() {
             _ => None,
         })
         .expect("a quote");
+    let quote_text = first_paragraph(&quote.children);
     for token in ["QW1", "QW2", "QW3"] {
-        assert!(quote.text.contains(token), "{token} in the quote: {:?}", quote.text);
+        assert!(quote_text.contains(token), "{token} in the quote: {quote_text:?}");
     }
     let counts = word_counts(&cnd);
     for token in ["QW1", "QW2", "QW3", "QW4"] {
@@ -2314,7 +2305,7 @@ fn a_figure_carries_its_raw_block() {
                     _ => None,
                 })
                 .collect();
-            (f.caption.as_deref(), code)
+            (value(&f.caption), code)
         })
         .collect();
     assert_eq!(
@@ -2336,7 +2327,7 @@ fn a_figure_around_a_helper_drawing_keeps_its_caption_and_image() {
     let captions: Vec<&str> = nodes
         .iter()
         .filter_map(|n| match n {
-            CndNode::Figure(f) => f.caption.as_deref(),
+            CndNode::Figure(f) => value(&f.caption),
             _ => None,
         })
         .collect();
@@ -2383,7 +2374,7 @@ fn decorative_content_is_never_emitted() {
         "the paragraph referring to decorative labels is kept: {paragraphs:?}"
     );
 
-    let notes: Vec<&str> = cnd.footnotes.iter().map(|f| f.text.as_str()).collect();
+    let notes: Vec<String> = cnd.footnotes.iter().map(footnote_text).collect();
     assert_eq!(notes, ["Kept note."], "only the kept footnote is pooled");
     assert_eq!(
         cnd.footnotes[0].label, "3",
@@ -2420,23 +2411,17 @@ fn decorative_content_is_never_emitted() {
 }
 
 fn cites_of_paragraph(nodes: &[CndNode], prefix: &str) -> Option<Vec<String>> {
-    nodes.iter().find_map(|node| match node {
-        CndNode::Paragraph(p) if p.text.starts_with(prefix) => {
-            Some(p.base.cites.iter().map(|c| c.label.clone()).collect())
+    all_nodes(nodes).into_iter().find_map(|node| match node {
+        CndNode::Paragraph(p) if p.text.value.starts_with(prefix) => {
+            Some(p.text.cites.iter().map(|c| c.label.clone()).collect())
         }
-        CndNode::Heading(h) => cites_of_paragraph(&h.children, prefix),
         _ => None,
     })
 }
 
 fn collect_footnote_labels(nodes: &[CndNode], out: &mut Vec<String>) {
-    for node in nodes {
-        out.extend(node.base().footnotes.iter().map(|r| r.label.clone()));
-        match node {
-            CndNode::Heading(h) => collect_footnote_labels(&h.children, out),
-            CndNode::Figure(f) => collect_footnote_labels(&f.children, out),
-            _ => {}
-        }
+    for text in all_texts(nodes) {
+        out.extend(text.footnotes.iter().map(|r| r.label.clone()));
     }
 }
 
@@ -2511,4 +2496,165 @@ fn the_paged_layout_is_kept_for_export() {
     // or a page image can be exported without laying it out again.
     assert!(!compile_example("minimal.typ").paged().pages().is_empty());
     assert!(compile_example("complex_multipage.typ").paged().pages().len() > 1);
+}
+
+/// Every example's CND, compiled once for the structural tests below.
+fn example_cnds() -> &'static [(String, typst_cnd::Cnd)] {
+    static CNDS: std::sync::OnceLock<Vec<(String, typst_cnd::Cnd)>> =
+        std::sync::OnceLock::new();
+    CNDS.get_or_init(|| {
+        let dir = common::examples_dir();
+        let mut out: Vec<(String, typst_cnd::Cnd)> = all_example_files()
+            .into_iter()
+            .map(|path| {
+                let name = path.strip_prefix(&dir).unwrap_or(&path).to_string_lossy();
+                let name = name.replace('\\', "/");
+                let cnd = cnd_for_example(&name);
+                (name, cnd)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    })
+}
+
+/// Every example's CND as the JSON this producer writes.
+fn example_json() -> Vec<(String, serde_json::Value)> {
+    example_cnds()
+        .iter()
+        .map(|(name, cnd)| {
+            let json = cnd_to_json(cnd).expect("serialize");
+            (name.clone(), serde_json::from_str(&json).expect("parse"))
+        })
+        .collect()
+}
+
+/// Walk a CND's JSON structurally, calling `f(path, parent key, object,
+/// is_node)` on every object. A node is an element of an array under
+/// `nodes` or `children`. Free-form objects (`state_metadata`, `fields`)
+/// are never entered.
+fn walk_json(
+    value: &serde_json::Value,
+    path: &str,
+    key: &str,
+    in_node_list: bool,
+    f: &mut impl FnMut(&str, &str, &serde_json::Map<String, serde_json::Value>, bool),
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            f(path, key, object, in_node_list);
+            for (k, v) in object {
+                if k == "state_metadata" || k == "fields" {
+                    continue;
+                }
+                walk_json(v, &format!("{path}.{k}"), k, false, f);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            let nodes = key == "nodes" || key == "children";
+            for (i, item) in items.iter().enumerate() {
+                walk_json(item, &format!("{path}[{i}]"), key, nodes, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn every_node_has_a_page() {
+    for (name, cnd) in example_cnds() {
+        for node in all_nodes_full(cnd) {
+            assert!(
+                node.base().location.page >= 1,
+                "{name}: node {} has no page: {node:?}",
+                node.id()
+            );
+        }
+    }
+}
+
+#[test]
+fn cnd_version_is_0_5_0() {
+    for (name, cnd) in example_cnds() {
+        assert_eq!(cnd.cnd_version, "0.5.0", "{name}");
+    }
+}
+
+/// No key the 0.5 node model removed is written.
+#[test]
+fn no_removed_04_keys() {
+    for (name, json) in example_json() {
+        walk_json(&json, "", "", false, &mut |path, key, object, is_node| {
+            for removed in ["tight", "block", "counter_label", "content_kind"] {
+                assert!(!object.contains_key(removed), "{name}: {path} has {removed:?}");
+            }
+            let kind = object.get("type").and_then(|t| t.as_str());
+            if is_node && matches!(kind, Some("heading" | "figure" | "math")) {
+                assert!(!object.contains_key("number"), "{name}: {path} has \"number\"");
+            }
+            if key == "items" && object.contains_key("term") {
+                assert!(
+                    !object.contains_key("description"),
+                    "{name}: {path} is a terms item with \"description\""
+                );
+            }
+            if is_node {
+                for family in ["refs", "cites", "footnotes", "links"] {
+                    assert!(
+                        !object.contains_key(family),
+                        "{name}: node {path} has {family:?}; edges live on texts"
+                    );
+                }
+            }
+        });
+    }
+}
+
+/// Every default-valued field is omitted, as the reference writer does
+/// (spec §6, *Defaults*). Required fields are written even when empty: of
+/// the list and object fields, that is `heading_path` and the top-level
+/// `nodes` (`schema/cnd.schema.json`).
+#[test]
+fn defaults_are_omitted() {
+    fn is_empty(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Array(items) => items.is_empty(),
+            serde_json::Value::Object(object) => object.is_empty(),
+            _ => false,
+        }
+    }
+    for (name, json) in example_json() {
+        walk_json(&json, "", "", false, &mut |path, _, object, is_node| {
+            let required: &[&str] = if path.is_empty() {
+                &["nodes"]
+            } else if is_node
+                && object.get("type").and_then(|t| t.as_str()) == Some("heading")
+            {
+                &["heading_path"]
+            } else {
+                &[]
+            };
+            for (key, value) in object {
+                let at = format!("{name}: {path}.{key}");
+                assert!(!value.is_null(), "{at} is null");
+                if !required.contains(&key.as_str()) {
+                    assert!(!is_empty(value), "{at} is {value}");
+                }
+                if let serde_json::Value::Array(items) = value {
+                    for (i, item) in items.iter().enumerate() {
+                        assert!(!is_empty(item), "{at}[{i}] is {item}");
+                    }
+                }
+                match key.as_str() {
+                    "ordered" | "is_header" => {
+                        assert_ne!(value, &serde_json::Value::Bool(false), "{at}");
+                    }
+                    "rowspan" | "colspan" => {
+                        assert_ne!(value, &serde_json::json!(1), "{at}");
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
 }

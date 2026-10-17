@@ -23,7 +23,6 @@ pub fn convert(
     equation.synthesize(engine, styles)?;
 
     let text = extract_text(&equation.body);
-    let block = equation.block.get(styles);
     let numbering: Option<EcoString> = equation.numbering().and_then(|numbering| {
         let location = equation.location()?;
         equation
@@ -36,11 +35,11 @@ pub fn convert(
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = equation.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed, &[])?;
+    // An equation carries no edges (spec §4: only texts hold them).
+    let (record, _) = convert::make_record(engine, introspector, &packed, &[])?;
 
     let mut node = MathNode::new(id, text.into(), location);
-    node.block = block;
-    node.number = numbering.map(Into::into);
+    node.numbering = convert::numbering(numbering, None::<String>);
     node.raw = raw_typst_from_span(engine, equation.span()).map(RawSource::typst);
 
     Ok((node, record))

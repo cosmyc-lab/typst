@@ -14,11 +14,13 @@ use typst_library::model::{
 use typst_syntax::Span;
 use uuid::Uuid;
 
-use crate::emit::convert::{self, NodeRecord};
+use crate::emit::convert::{self, NodeRecord, Records, Synthetic, TextRecord};
 use crate::emit::extract::extract_text;
 use crate::emit::figure::figure_kind;
 use crate::location::placeholder_location;
-use crate::model::{CndNode, FigureNode, RawSource, TableCell, TableKind, TableNode};
+use crate::model::{
+    Cell, CndNode, FigureNode, LayoutNode, RichText, TableNode, TextSlot,
+};
 
 /// Find a table element nested inside realized figure (or other) content.
 pub fn table_in_content(content: &Content) -> Option<Packed<TableElem>> {
@@ -66,6 +68,22 @@ fn table_fingerprint(table: &Packed<TableElem>) -> EcoString {
         .into()
 }
 
+/// The figure's span-less edges go to the first paragraph of its body
+/// (interim rule), else to its caption; with neither they are dropped.
+pub(crate) fn attach_figure_edges(
+    figure: &FigureNode,
+    record: &mut NodeRecord,
+    edges: TextRecord,
+    synthetic: &mut Synthetic,
+) {
+    if let Some(mut edges) = synthetic.attach_to_first_paragraph(&figure.children, edges)
+        && figure.caption.is_some()
+    {
+        edges.slot = TextSlot::Caption;
+        record.add_text(edges);
+    }
+}
+
 /// Convert a table wrapped in a figure into a `FigureNode` wrapper holding
 /// a `TableNode` child. The caption/number live on the wrapper (ADR 0010);
 /// `TableNode` itself carries no caption.
@@ -76,7 +94,7 @@ pub fn from_figure(
     figure: &Packed<FigureElem>,
     table: &Packed<TableElem>,
     styles: StyleChain,
-) -> typst_library::diag::SourceResult<(FigureNode, Vec<(Uuid, NodeRecord)>)> {
+) -> typst_library::diag::SourceResult<(FigureNode, Records)> {
     let mut figure = figure.clone();
     figure.synthesize(engine, styles)?;
 
@@ -88,34 +106,32 @@ pub fn from_figure(
         .or_else(|| caption_from_source(engine, content.span()))
         .or_else(|| caption_from_source(engine, figure.span()))
         .or_else(|| caption_from_source(engine, Span::detached()));
-    let fig_number = convert::figure_number(engine, &figure, styles)
-        .or_else(|| figure_number_fallback(introspector, content));
-    let wrapper_record = convert::make_record(engine, introspector, content, &[])?;
+    let fig_number = convert::figure_number(engine, &figure, styles);
+    let (mut wrapper_record, wrapper_edges) =
+        convert::make_record(engine, introspector, content, &[])?;
 
-    let (table_node, table_record) = convert(
-        engine,
-        introspector,
-        table,
-        styles,
-        Some(content.span()),
-        content.label(),
-    )?;
-    let table_id = table_node.base.id;
+    let (table_node, mut table_records) = convert(engine, introspector, table, styles)?;
+    table_records.locate_in(content.location());
 
     let wrapper_id = Uuid::new_v4();
     let mut wrapper = FigureNode::new(wrapper_id, placeholder_location());
-    wrapper.caption = caption.map(Into::into);
-    wrapper.number = fig_number.map(Into::into);
-    wrapper.counter_label =
-        convert::figure_counter_label(&figure, styles).map(Into::into);
+    wrapper.caption = caption.map(RichText::plain);
+    wrapper.numbering =
+        convert::numbering(fig_number, convert::figure_counter_label(&figure, styles));
     wrapper.kind = figure_kind(&figure, styles);
     wrapper.children.push(CndNode::Table(table_node));
 
-    Ok((wrapper, vec![(wrapper_id, wrapper_record), (table_id, table_record)]))
+    let mut synthetic = Synthetic::new(content.location());
+    synthetic.records = table_records.synthetic;
+    attach_figure_edges(&wrapper, &mut wrapper_record, wrapper_edges, &mut synthetic);
+
+    let mut own = vec![(wrapper_id, wrapper_record)];
+    own.extend(table_records.own);
+    Ok((wrapper, Records { own, synthetic: synthetic.records }))
 }
 
 /// Convert a grid wrapped in a figure into a `FigureNode` wrapper holding a
-/// `TableNode { kind: Grid }` child.
+/// `LayoutNode` child.
 pub fn from_figure_grid(
     engine: &mut Engine,
     introspector: &dyn Introspector,
@@ -123,7 +139,7 @@ pub fn from_figure_grid(
     figure: &Packed<FigureElem>,
     grid: &Packed<GridElem>,
     styles: StyleChain,
-) -> typst_library::diag::SourceResult<(FigureNode, Vec<(Uuid, NodeRecord)>)> {
+) -> typst_library::diag::SourceResult<(FigureNode, Records)> {
     let mut figure = figure.clone();
     figure.synthesize(engine, styles)?;
 
@@ -132,46 +148,43 @@ pub fn from_figure_grid(
         .get_cloned(styles)
         .as_ref()
         .map(caption_text)
-        .map(Into::into);
-    let fig_number = convert::figure_number(engine, &figure, styles).map(Into::into);
-    let wrapper_record = convert::make_record(engine, introspector, content, &[])?;
+        .map(RichText::plain);
+    let fig_number = convert::figure_number(engine, &figure, styles);
+    let (mut wrapper_record, wrapper_edges) =
+        convert::make_record(engine, introspector, content, &[])?;
 
     let mut grid = grid.clone();
     if grid.grid.is_none() {
         grid.synthesize(engine, styles)?;
     }
 
-    let table_id = Uuid::new_v4();
-    let cells = cells_from_cell_grid(grid.grid.as_ref().map(|grid| grid.as_ref()));
-
-    let mut table_node = TableNode::new(table_id, placeholder_location());
-    table_node.kind = TableKind::Grid;
-    table_node.content_kind = content_kind_from_metadata(&wrapper_record.state_metadata);
-    table_node.cells = cells;
-    table_node.raw = raw_typst_for_label(engine, content.label()).map(RawSource::typst);
-
-    let table_record = NodeRecord {
-        location: content.location(),
-        label: None,
-        ref_targets: Vec::new(),
-        footnote_locs: Vec::new(),
-        cite_markers: Vec::new(),
-        ref_markers: Vec::new(),
-        link_targets: Vec::new(),
-        link_markers: Vec::new(),
-        state_metadata: serde_json::Map::new(),
-    };
+    let mut synthetic = Synthetic::new(content.location());
+    let layout_id = Uuid::new_v4();
+    synthetic
+        .records
+        .push((layout_id, NodeRecord::synthetic(content.location())));
+    let mut layout = LayoutNode::new(layout_id, placeholder_location());
+    layout.cells = cells_from_cell_grid(
+        grid.grid.as_ref().map(|grid| grid.as_ref()),
+        &mut synthetic,
+    );
 
     let wrapper_id = Uuid::new_v4();
     let mut wrapper = FigureNode::new(wrapper_id, placeholder_location());
     wrapper.caption = caption;
-    wrapper.number = fig_number;
-    wrapper.counter_label =
-        convert::figure_counter_label(&figure, styles).map(Into::into);
+    wrapper.numbering =
+        convert::numbering(fig_number, convert::figure_counter_label(&figure, styles));
     wrapper.kind = figure_kind(&figure, styles);
-    wrapper.children.push(CndNode::Table(table_node));
+    wrapper.children.push(CndNode::Layout(layout));
+    attach_figure_edges(&wrapper, &mut wrapper_record, wrapper_edges, &mut synthetic);
 
-    Ok((wrapper, vec![(wrapper_id, wrapper_record), (table_id, table_record)]))
+    Ok((
+        wrapper,
+        Records {
+            own: vec![(wrapper_id, wrapper_record)],
+            synthetic: synthetic.records,
+        },
+    ))
 }
 
 fn caption_text(caption: &Packed<FigureCaption>) -> EcoString {
@@ -180,15 +193,14 @@ fn caption_text(caption: &Packed<FigureCaption>) -> EcoString {
 
 /// Convert a table element into a CND table node. `TableNode` carries no
 /// caption of its own — a captioned table is this node wrapped in a
-/// `FigureNode` by the caller (`from_figure`).
+/// `FigureNode` by the caller (`from_figure`). Its span-less edges go to its
+/// first cell paragraph (interim rule).
 pub fn convert(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     table: &Packed<TableElem>,
     styles: StyleChain,
-    source_span: Option<Span>,
-    label: Option<Label>,
-) -> typst_library::diag::SourceResult<(TableNode, NodeRecord)> {
+) -> typst_library::diag::SourceResult<(TableNode, Records)> {
     let mut table = table.clone();
     if table.grid.is_none() {
         table.synthesize(engine, styles)?;
@@ -197,36 +209,28 @@ pub fn convert(
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = table.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed, &[])?;
+    let (record, edges) = convert::make_record(engine, introspector, &packed, &[])?;
+    let mut synthetic = Synthetic::new(record.location);
 
     let header_rows = count_header_rows(&table);
-    let cells = cells_from_grid(&table, header_rows);
-    let raw_typst = source_span
-        .and_then(|span| raw_typst_from_span(engine, span))
-        .or_else(|| raw_typst_for_label(engine, label))
-        .or_else(|| raw_typst_from_span(engine, table.span()));
-
     let mut node = TableNode::new(id, location);
-    node.content_kind = content_kind_from_metadata(&record.state_metadata);
-    node.cells = cells;
-    node.raw = raw_typst.map(RawSource::typst);
-
-    Ok((node, record))
-}
-
-/// Promote a `content_kind` hint from the generic `cnd.metadata` state bag
-/// (already captured on every node's `state_metadata`, see
-/// `emit/convert.rs`'s `make_record`/`apply_metadata`) into the table's own
-/// typed field — the one `cnd.core.node_text`'s "auto"/"inline" rendering
-/// actually reads. Only a string value is accepted; anything else (wrong
-/// type, or simply absent) leaves the hint unset rather than guessing.
-fn content_kind_from_metadata(
-    metadata: &serde_json::Map<String, serde_json::Value>,
-) -> Option<String> {
-    match metadata.get("content_kind") {
-        Some(serde_json::Value::String(s)) => Some(s.clone()),
-        _ => None,
+    node.cells = cells_from_grid(&table, header_rows, &mut synthetic);
+    for cell in &node.cells {
+        if synthetic
+            .attach_to_first_paragraph(&cell.children, edges.clone())
+            .is_none()
+        {
+            break;
+        }
     }
+
+    Ok((
+        node,
+        Records {
+            own: vec![(id, record)],
+            synthetic: synthetic.records,
+        },
+    ))
 }
 
 fn count_header_rows(table: &Packed<TableElem>) -> i32 {
@@ -253,8 +257,12 @@ fn count_header_items(header: &Packed<TableHeader>) -> usize {
     max_row.max(1)
 }
 
-fn cells_from_grid(table: &Packed<TableElem>, header_rows: i32) -> Vec<TableCell> {
-    cells_from_cell_grid(table.grid.as_ref().map(|grid| grid.as_ref()))
+fn cells_from_grid(
+    table: &Packed<TableElem>,
+    header_rows: i32,
+    synthetic: &mut Synthetic,
+) -> Vec<Cell> {
+    cells_from_cell_grid(table.grid.as_ref().map(|grid| grid.as_ref()), synthetic)
         .into_iter()
         .map(|mut cell| {
             cell.is_header = cell.row < header_rows;
@@ -263,7 +271,12 @@ fn cells_from_grid(table: &Packed<TableElem>, header_rows: i32) -> Vec<TableCell
         .collect()
 }
 
-pub fn cells_from_cell_grid(grid: Option<&CellGrid>) -> Vec<TableCell> {
+/// The cells of a resolved grid. A cell with text gets one paragraph child
+/// holding it; an empty cell has no children.
+pub fn cells_from_cell_grid(
+    grid: Option<&CellGrid>,
+    synthetic: &mut Synthetic,
+) -> Vec<Cell> {
     let Some(grid) = grid else {
         return Vec::new();
     };
@@ -278,13 +291,19 @@ pub fn cells_from_cell_grid(grid: Option<&CellGrid>) -> Vec<TableCell> {
         let Entry::Cell(cell) = entry else { continue };
         let row = (idx / cols) as i32;
         let col = (idx % cols) as i32;
-        cells.push(TableCell {
+        let text = extract_text(&cell.body);
+        let children = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![synthetic.paragraph(RichText::plain(text))]
+        };
+        cells.push(Cell {
             row,
             col,
             rowspan: cell.rowspan.get() as i32,
             colspan: cell.colspan.get() as i32,
             is_header: false,
-            text: extract_text(&cell.body).into(),
+            children,
         });
     }
     cells
@@ -340,15 +359,6 @@ fn matching_paren_end(text: &str) -> Option<usize> {
         }
     }
     None
-}
-
-fn figure_number_fallback(
-    introspector: &dyn Introspector,
-    content: &Content,
-) -> Option<EcoString> {
-    let loc = content.location()?;
-    let index = introspector.query_count_before(&FigureElem::ELEM.select(), loc) + 1;
-    Some(ecow::eco_format!("Tableau {index}"))
 }
 
 fn caption_from_source(engine: &Engine, span: Span) -> Option<EcoString> {

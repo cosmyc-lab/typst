@@ -22,7 +22,11 @@ use crate::emit::extract::{ExtractedMarker, LinkDest, MarkerKind};
 use crate::emit::{
     code, extract, figure, heading, list, math, paragraph, quote, reading_order, table,
 };
-use crate::model::{CndNode, HeadingNode};
+use crate::location::placeholder_location;
+use crate::model::{
+    CndNode, HeadingNode, ListItem, ListNode, Numbering, ParagraphNode, RichText,
+    TextSlot,
+};
 
 /// A citation marker occurring in a node's content, captured for
 /// resolution into a `CiteRef` once the bibliography pool exists. `span`
@@ -38,18 +42,18 @@ pub struct CiteMarker {
     pub span: Option<(i64, i64)>,
 }
 
-/// Metadata captured for each emitted node.
+/// The edges captured for one text of a node, before they are resolved
+/// into the `refs`/`cites`/`footnotes`/`links` of the `RichText` in `slot`.
 #[derive(Debug, Clone)]
-pub struct NodeRecord {
-    pub location: Option<Location>,
-    pub label: Option<Label>,
+pub struct TextRecord {
+    pub slot: TextSlot,
     pub ref_targets: Vec<Label>,
-    /// Footnote markers occurring in this node's content: each marker's own
-    /// location (resolved to a footnote-pool id in `pools::resolve_footnotes`)
-    /// paired with its text span (`Some` only for flat-text nodes).
+    /// Footnote markers occurring in this text: each marker's own location
+    /// (resolved to a footnote-pool id in `pools::resolve_footnotes`) paired
+    /// with its text span (`Some` only for flat-text nodes).
     pub footnote_locs: Vec<(Location, Option<(i64, i64)>)>,
-    /// Citation markers occurring in this node's content, resolved to
-    /// `CiteRef` edges in `pools::resolve_cite_edges`.
+    /// Citation markers occurring in this text, resolved to `CiteRef` edges
+    /// in `pools::resolve_cite_edges`.
     pub cite_markers: Vec<CiteMarker>,
     /// Cross-reference markers with their text spans — only from flat-text
     /// nodes. Consulted in `refs::resolve_refs` to attach a span to the
@@ -65,7 +69,181 @@ pub struct NodeRecord {
     /// `refs::resolve_refs` (a label/location destination is a
     /// cross-reference with a custom body).
     pub link_markers: Vec<(LinkDest, (i64, i64))>,
+}
+
+impl TextRecord {
+    pub fn new(slot: TextSlot) -> Self {
+        Self {
+            slot,
+            ref_targets: Vec::new(),
+            footnote_locs: Vec::new(),
+            cite_markers: Vec::new(),
+            ref_markers: Vec::new(),
+            link_targets: Vec::new(),
+            link_markers: Vec::new(),
+        }
+    }
+
+    /// Add `other`'s edges to this record, skipping any it already has, so
+    /// that one text never receives the same marker twice.
+    pub fn merge(&mut self, other: TextRecord) {
+        for (loc, span) in other.footnote_locs {
+            if self.footnote_locs.iter().all(|(known, _)| *known != loc) {
+                self.footnote_locs.push((loc, span));
+            }
+        }
+        for marker in other.cite_markers {
+            if self.cite_markers.iter().all(|known| known.loc != marker.loc) {
+                self.cite_markers.push(marker);
+            }
+        }
+        for label in other.ref_targets {
+            if !self.ref_targets.contains(&label) {
+                self.ref_targets.push(label);
+            }
+        }
+        for marker in other.ref_markers {
+            if !self.ref_markers.contains(&marker) {
+                self.ref_markers.push(marker);
+            }
+        }
+        for dest in other.link_targets {
+            if !self.link_targets.contains(&dest) {
+                self.link_targets.push(dest);
+            }
+        }
+        for marker in other.link_markers {
+            if !self.link_markers.contains(&marker) {
+                self.link_markers.push(marker);
+            }
+        }
+    }
+}
+
+/// Metadata captured for each emitted node.
+#[derive(Debug, Clone)]
+pub struct NodeRecord {
+    pub location: Option<Location>,
+    pub label: Option<Label>,
     pub state_metadata: serde_json::Map<String, serde_json::Value>,
+    /// At most one record per text slot of the node.
+    pub texts: Vec<TextRecord>,
+}
+
+impl NodeRecord {
+    /// The record of a node the emitter builds itself (a container's
+    /// paragraph, a nested list): it carries its container's `location`, so
+    /// it gets the container's page, and nothing else.
+    pub fn synthetic(location: Option<Location>) -> Self {
+        Self {
+            location,
+            label: None,
+            state_metadata: serde_json::Map::new(),
+            texts: Vec::new(),
+        }
+    }
+
+    /// Add `text`'s edges to the record of its slot.
+    pub fn add_text(&mut self, text: TextRecord) {
+        match self.texts.iter_mut().find(|known| known.slot == text.slot) {
+            Some(known) => known.merge(text),
+            None => self.texts.push(text),
+        }
+    }
+}
+
+/// The records an emitter produced. `own` are the records of the nodes the
+/// Typst elements map to, and go through [`ConvertContext::register`].
+/// `synthetic` are those of the nodes an emitter builds to fill a container
+/// slot: they share their container's location and must not take over its
+/// entry in `location_to_id`, so they are inserted as they are.
+#[derive(Debug, Default)]
+pub struct Records {
+    pub own: Vec<(Uuid, NodeRecord)>,
+    pub synthetic: Vec<(Uuid, NodeRecord)>,
+}
+
+impl Records {
+    /// Give the records that have no location of their own `location`, the
+    /// location of the container that holds them (a figure's body read from
+    /// its unrealized content), so that every node gets a page. They then
+    /// share that location, so they are filed as synthetic.
+    pub fn locate_in(&mut self, location: Option<Location>) {
+        let (unlocated, located): (Vec<_>, Vec<_>) =
+            self.own.drain(..).partition(|(_, record)| record.location.is_none());
+        self.own = located;
+        for (id, mut record) in unlocated {
+            record.location = location;
+            self.synthetic.push((id, record));
+        }
+        for (_, record) in &mut self.synthetic {
+            if record.location.is_none() {
+                record.location = location;
+            }
+        }
+    }
+}
+
+/// Builds the synthetic nodes that fill a container's slots: each gets its
+/// own id and a record with the container's location.
+///
+/// Interim shape (until the container bodies are rebuilt from the realized
+/// layout): the container's span-less edges move to its first paragraph
+/// descendant, see [`Synthetic::attach_to_first_paragraph`].
+#[derive(Debug)]
+pub struct Synthetic {
+    location: Option<Location>,
+    pub records: Vec<(Uuid, NodeRecord)>,
+}
+
+impl Synthetic {
+    pub fn new(location: Option<Location>) -> Self {
+        Self { location, records: Vec::new() }
+    }
+
+    fn record(&mut self) -> Uuid {
+        let id = Uuid::new_v4();
+        self.records.push((id, NodeRecord::synthetic(self.location)));
+        id
+    }
+
+    pub fn paragraph(&mut self, text: RichText) -> CndNode {
+        let id = self.record();
+        CndNode::Paragraph(ParagraphNode::new(id, text, placeholder_location()))
+    }
+
+    pub fn list(&mut self, ordered: bool, items: Vec<ListItem>) -> CndNode {
+        let id = self.record();
+        let mut list = ListNode::new(id, placeholder_location());
+        list.ordered = ordered;
+        list.items = items;
+        CndNode::List(list)
+    }
+
+    /// Give `text` to the first paragraph among `nodes`, in reading order.
+    /// Returns it back when there is none.
+    pub fn attach_to_first_paragraph(
+        &mut self,
+        nodes: &[CndNode],
+        text: TextRecord,
+    ) -> Option<TextRecord> {
+        let mut first = None;
+        crate::model::walk(nodes, &mut |node| {
+            if first.is_none() && matches!(node, CndNode::Paragraph(_)) {
+                first = Some(node.id());
+            }
+        });
+        let Some(first) = first else { return Some(text) };
+        let mut text = text;
+        text.slot = TextSlot::Text;
+        match self.records.iter_mut().find(|(id, _)| *id == first) {
+            Some((_, record)) => {
+                record.add_text(text);
+                None
+            }
+            None => Some(text),
+        }
+    }
 }
 
 /// Conversion context shared across the document walk.
@@ -112,6 +290,18 @@ impl ConvertContext {
             self.records.iter().map(|(id, record)| (*id, record)).collect();
         records.sort_unstable_by_key(|(id, _)| *id);
         records
+    }
+
+    pub fn register_records(&mut self, records: Records) {
+        for (id, record) in records.own {
+            self.register(id, record);
+        }
+        for (id, record) in records.synthetic {
+            if let Some(label) = record.label {
+                self.label_to_id.insert(label, id);
+            }
+            self.records.insert(id, record);
+        }
     }
 
     pub fn register(&mut self, id: Uuid, record: NodeRecord) {
@@ -380,26 +570,12 @@ fn absorb_covered_paragraphs(ctx: &mut ConvertContext, absorbed: &[(Location, Co
         let links = collect_link_targets(nested);
         let Some(record) = ctx.records.get_mut(&id) else { continue };
 
-        for loc in footnotes {
-            if record.footnote_locs.iter().all(|(known, _)| *known != loc) {
-                record.footnote_locs.push((loc, None));
-            }
-        }
-        for marker in cites {
-            if record.cite_markers.iter().all(|known| known.loc != marker.loc) {
-                record.cite_markers.push(marker);
-            }
-        }
-        for label in refs {
-            if !record.ref_targets.contains(&label) {
-                record.ref_targets.push(label);
-            }
-        }
-        for dest in links {
-            if !record.link_targets.contains(&dest) {
-                record.link_targets.push(dest);
-            }
-        }
+        let mut text = TextRecord::new(TextSlot::Text);
+        text.footnote_locs = footnotes.into_iter().map(|loc| (loc, None)).collect();
+        text.cite_markers = cites;
+        text.ref_targets = refs;
+        text.link_targets = links;
+        record.add_text(text);
     }
 }
 
@@ -420,21 +596,21 @@ fn dispatch(
         ctx.register(node.base.id, record);
         push_node(CndNode::Paragraph(node), ctx, stack);
     } else if let Some(quote) = content.to_packed::<QuoteElem>() {
-        let (node, record) =
+        let (node, records) =
             quote::convert(engine, introspector, quote, styles, doc_lang)?;
-        ctx.register(node.base.id, record);
+        ctx.register_records(records);
         push_node(CndNode::Quote(node), ctx, stack);
     } else if let Some(list) = content.to_packed::<ListElem>() {
-        let (node, record) = list::from_list(engine, introspector, list, styles)?;
-        ctx.register(node.base.id, record);
+        let (node, records) = list::from_list(engine, introspector, list, styles)?;
+        ctx.register_records(records);
         push_node(CndNode::List(node), ctx, stack);
     } else if let Some(enum_) = content.to_packed::<EnumElem>() {
-        let (node, record) = list::from_enum(engine, introspector, enum_, styles)?;
-        ctx.register(node.base.id, record);
+        let (node, records) = list::from_enum(engine, introspector, enum_, styles)?;
+        ctx.register_records(records);
         push_node(CndNode::List(node), ctx, stack);
     } else if let Some(terms) = content.to_packed::<TermsElem>() {
-        let (node, record) = list::from_terms(engine, introspector, terms, styles)?;
-        ctx.register(node.base.id, record);
+        let (node, records) = list::from_terms(engine, introspector, terms)?;
+        ctx.register_records(records);
         push_node(CndNode::Terms(node), ctx, stack);
     } else if let Some(raw) = content.to_packed::<RawElem>() {
         let (node, record) = code::convert(engine, introspector, raw, styles)?;
@@ -460,9 +636,7 @@ fn dispatch(
                     table_elem,
                     styles,
                 )?;
-                for (id, record) in records {
-                    ctx.register(id, record);
-                }
+                ctx.register_records(records);
                 push_node(CndNode::Figure(node), ctx, stack);
             }
         } else if let Some(grid) = table::grid_in_content(content) {
@@ -474,28 +648,17 @@ fn dispatch(
                 &grid,
                 styles,
             )?;
-            for (id, record) in records {
-                ctx.register(id, record);
-            }
+            ctx.register_records(records);
             push_node(CndNode::Figure(node), ctx, stack);
         } else {
             let (node, records) =
                 figure::from_figure(engine, introspector, content, figure, styles)?;
-            for (id, record) in records {
-                ctx.register(id, record);
-            }
+            ctx.register_records(records);
             push_node(CndNode::Figure(node), ctx, stack);
         }
     } else if let Some(table_elem) = content.to_packed::<TableElem>() {
-        let (node, record) = table::convert(
-            engine,
-            introspector,
-            table_elem,
-            styles,
-            None,
-            content.label(),
-        )?;
-        ctx.register(node.base.id, record);
+        let (node, records) = table::convert(engine, introspector, table_elem, styles)?;
+        ctx.register_records(records);
         push_node(CndNode::Table(node), ctx, stack);
     }
     Ok(())
@@ -597,18 +760,21 @@ pub fn metadata_at(
     crate::metadata::metadata_at(engine, introspector, location)
 }
 
-/// Build a node's record. `markers` carries the text-span markers from the
-/// flat-text walk of the node's body (paragraph/heading/quote); it is empty
-/// for non-flat nodes, whose marker *locations* are still captured (so their
-/// footnote/cite edges resolve) but whose `text_span`s stay `None` because
-/// their `text` is a concatenation of item/cell strings, not one string the
-/// offsets index into (ADR 0013).
+/// Build a node's record and the edges of its content. `markers` carries
+/// the text-span markers from the flat-text walk of the node's body
+/// (paragraph/heading/quote); it is empty for non-flat nodes, whose marker
+/// *locations* are still captured (so their footnote/cite edges resolve)
+/// but whose `text_span`s stay `None` (ADR 0013).
+///
+/// The edges come back apart, in a `TextRecord` for the `Text` slot: the
+/// caller decides which text holds them (its own, or for a container the
+/// text of a paragraph inside it). The returned `NodeRecord` has no texts.
 pub fn make_record(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     content: &Content,
     markers: &[ExtractedMarker],
-) -> typst_library::diag::SourceResult<NodeRecord> {
+) -> typst_library::diag::SourceResult<(NodeRecord, TextRecord)> {
     let location = content.location();
     let label = content.label();
     let mut ref_targets = collect_ref_targets(content);
@@ -655,17 +821,17 @@ pub fn make_record(
         None => serde_json::Map::new(),
     };
 
-    Ok(NodeRecord {
-        location,
-        label,
+    let record = NodeRecord { location, label, state_metadata, texts: Vec::new() };
+    let text = TextRecord {
+        slot: TextSlot::Text,
         ref_targets,
         footnote_locs,
         cite_markers,
         ref_markers,
         link_targets,
         link_markers,
-        state_metadata,
-    })
+    };
+    Ok((record, text))
 }
 
 /// Collect citation markers (location + form/supplement) occurring in
@@ -716,26 +882,16 @@ fn collect_footnote_locs(content: &Content) -> Vec<Location> {
 }
 
 pub fn apply_metadata(ctx: &mut ConvertContext) {
-    fn walk(node: &mut CndNode, records: &rustc_hash::FxHashMap<Uuid, NodeRecord>) {
-        let id = node.id();
-        if let Some(record) = records.get(&id) {
-            if let Some(label) = &record.label {
-                set_label(node, label.resolve().as_str());
-            }
-            if !record.state_metadata.is_empty() {
-                set_metadata(node, record.state_metadata.clone());
-            }
+    let records = &ctx.records;
+    crate::model::walk_mut(&mut ctx.roots, &mut |node| {
+        let Some(record) = records.get(&node.id()) else { return };
+        if let Some(label) = &record.label {
+            set_label(node, label.resolve().as_str());
         }
-        if let Some(children) = node.children_mut() {
-            for child in children {
-                walk(child, records);
-            }
+        if !record.state_metadata.is_empty() {
+            set_metadata(node, record.state_metadata.clone());
         }
-    }
-
-    for root in &mut ctx.roots {
-        walk(root, &ctx.records);
-    }
+    });
 }
 
 fn set_label(node: &mut CndNode, label: &str) {
@@ -749,11 +905,24 @@ fn set_metadata(
     node.base_mut().state_metadata = metadata;
 }
 
+/// A displayed counter value and its word, as a `Numbering`; `None` when
+/// nothing is displayed.
+pub fn numbering(
+    value: Option<impl Into<String>>,
+    name: Option<impl Into<String>>,
+) -> Option<Numbering> {
+    let value: String = value?.into();
+    if value.is_empty() {
+        return None;
+    }
+    Some(Numbering { value, name: name.map(Into::into) })
+}
+
 /// The figure's counter value **as resolved and displayed** — `"3"`,
 /// `"2.1"` — and nothing else.
 ///
 /// The supplement ("Figure", "Table", "Abbildung") is deliberately not
-/// prepended. It is a localized rendering word, and baking it into data
+/// prepended: it goes to `Numbering.name`. It is a localized rendering word, and baking it into data
 /// makes the field unusable in any other locale; composing the prefix is a
 /// consumer's decision, and `FigureNode::kind` already carries the counter
 /// selector it composes from (spec §6).
@@ -774,8 +943,7 @@ pub fn figure_number(
 }
 
 /// The figure's supplement — the word displayed in front of the number
-/// ("Figure", "Tabelle", "Atom"), emitted as `counter_label` (spec §6,
-/// proposal 0010).
+/// ("Figure", "Tabelle", "Atom"), emitted as `Numbering.name` (spec §6).
 ///
 /// Typst has already resolved this during `synthesize()`: either from the
 /// element kind and the document language, or from the author for a custom

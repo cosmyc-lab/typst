@@ -9,34 +9,45 @@ use typst_library::model::{
 use typst_library::text::SpaceElem;
 use typst_syntax::Span;
 
-use crate::emit::convert::{self, NodeRecord};
+use crate::emit::convert::{self, Records, Synthetic};
 use crate::emit::extract::extract_text;
 use crate::location::placeholder_location;
 use crate::model::{
-    ListItem as CndListItem, ListNode, TermItem as CndTermItem, TermsNode,
+    ListItem as CndListItem, ListNode, RichText, TermItem as CndTermItem, TermsNode,
 };
+
+/// Nested items, grouped into runs of the same kind: each run becomes one
+/// nested `list` node, `true` for an enum.
+type Runs = Vec<(bool, Vec<CndListItem>)>;
 
 pub fn from_list(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     list: &Packed<ListElem>,
     styles: StyleChain,
-) -> typst_library::diag::SourceResult<(ListNode, NodeRecord)> {
+) -> typst_library::diag::SourceResult<(ListNode, Records)> {
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = list.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed, &[])?;
+    let (record, edges) = convert::make_record(engine, introspector, &packed, &[])?;
+    let mut synthetic = Synthetic::new(record.location);
 
     let mut node = ListNode::new(id, location);
     node.ordered = false;
-    node.tight = list.tight.get(styles);
     node.items = list
         .children
         .iter()
-        .map(|item| list_item(introspector, item, styles))
+        .map(|item| list_item(introspector, item, styles, &mut synthetic))
         .collect();
+    attach_list_edges(&node, edges, &mut synthetic);
 
-    Ok((node, record))
+    Ok((
+        node,
+        Records {
+            own: vec![(id, record)],
+            synthetic: synthetic.records,
+        },
+    ))
 }
 
 pub fn from_enum(
@@ -44,69 +55,105 @@ pub fn from_enum(
     introspector: &dyn Introspector,
     enum_: &Packed<EnumElem>,
     styles: StyleChain,
-) -> typst_library::diag::SourceResult<(ListNode, NodeRecord)> {
+) -> typst_library::diag::SourceResult<(ListNode, Records)> {
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = enum_.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed, &[])?;
+    let (record, edges) = convert::make_record(engine, introspector, &packed, &[])?;
+    let mut synthetic = Synthetic::new(record.location);
 
     let mut node = ListNode::new(id, location);
     node.ordered = true;
-    node.tight = enum_.tight.get(styles);
-    node.items = enum_items(introspector, enum_, styles);
+    node.items = enum_items(introspector, enum_, styles, &mut synthetic);
+    attach_list_edges(&node, edges, &mut synthetic);
 
-    Ok((node, record))
+    Ok((
+        node,
+        Records {
+            own: vec![(id, record)],
+            synthetic: synthetic.records,
+        },
+    ))
+}
+
+/// The list's span-less edges go to its first paragraph (interim rule).
+fn attach_list_edges(
+    node: &ListNode,
+    edges: convert::TextRecord,
+    synthetic: &mut Synthetic,
+) {
+    for item in &node.items {
+        if synthetic
+            .attach_to_first_paragraph(&item.children, edges.clone())
+            .is_none()
+        {
+            return;
+        }
+    }
 }
 
 /// Convert a Typst definition list (`/ term: description`) into a
-/// `TermsNode`. Mirror of `from_list`: term/description are flat text by
-/// schema, so there is no nesting recursion (proposal 0004).
+/// `TermsNode`. Each description is one paragraph child of its item.
 pub fn from_terms(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     terms: &Packed<TermsElem>,
-    styles: StyleChain,
-) -> typst_library::diag::SourceResult<(TermsNode, NodeRecord)> {
+) -> typst_library::diag::SourceResult<(TermsNode, Records)> {
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = terms.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed, &[])?;
+    let (record, edges) = convert::make_record(engine, introspector, &packed, &[])?;
+    let mut synthetic = Synthetic::new(record.location);
 
     let mut node = TermsNode::new(id, location);
-    node.tight = terms.tight.get(styles);
-    node.items = terms.children.iter().map(term_item).collect();
+    node.items = terms
+        .children
+        .iter()
+        .map(|item| term_item(item, &mut synthetic))
+        .collect();
+    for item in &node.items {
+        if synthetic
+            .attach_to_first_paragraph(&item.children, edges.clone())
+            .is_none()
+        {
+            break;
+        }
+    }
 
-    Ok((node, record))
+    Ok((
+        node,
+        Records {
+            own: vec![(id, record)],
+            synthetic: synthetic.records,
+        },
+    ))
 }
 
-fn term_item(item: &Packed<TermItem>) -> CndTermItem {
+fn term_item(item: &Packed<TermItem>, synthetic: &mut Synthetic) -> CndTermItem {
+    let description =
+        synthetic.paragraph(RichText::plain(extract_text(&item.description)));
     CndTermItem {
-        term: extract_text(&item.term).into(),
-        description: extract_text(&item.description).into(),
+        term: RichText::plain(extract_text(&item.term)),
+        children: vec![description],
     }
 }
 
-/// One list item: its own text, and the items nested under it as children.
+/// One list item: a paragraph with its own text, then one nested list per
+/// run of same-kind nested items.
 ///
 /// Items nested in markup (`- parent` followed by an indented `- child`) are
 /// not wrapped in a list inside the parent's body: they sit there as bare
 /// `ListItem`/`EnumItem`s, and are grouped into a list only when the parent
 /// is laid out. An explicit `#list(..)`/`#enum(..)` call does sit there as a
-/// list. Either way they become `children`, and the parent's `text` keeps
-/// only what is not nested.
+/// list. Either way they become nested lists, and the paragraph keeps only
+/// what is not nested.
 fn list_item(
     introspector: &dyn Introspector,
     item: &Packed<ListItem>,
     styles: StyleChain,
+    synthetic: &mut Synthetic,
 ) -> CndListItem {
-    let mut own = Vec::new();
-    let mut children = Vec::new();
-    split_body(introspector, &item.body, styles, &mut own, &mut children);
-    CndListItem {
-        text: extract_text(&Content::sequence(own)).trim().into(),
-        number: None,
-        children,
-    }
+    item_from_body(introspector, &item.body, None, styles, synthetic)
 }
 
 fn enum_item(
@@ -114,14 +161,34 @@ fn enum_item(
     item: &Packed<EnumItem>,
     number: u64,
     styles: StyleChain,
+    synthetic: &mut Synthetic,
+) -> CndListItem {
+    item_from_body(introspector, &item.body, Some(number as i32), styles, synthetic)
+}
+
+fn item_from_body(
+    introspector: &dyn Introspector,
+    body: &Content,
+    number: Option<i32>,
+    styles: StyleChain,
+    synthetic: &mut Synthetic,
 ) -> CndListItem {
     let mut own = Vec::new();
-    let mut children = Vec::new();
-    split_body(introspector, &item.body, styles, &mut own, &mut children);
-    CndListItem {
-        text: extract_text(&Content::sequence(own)).trim().into(),
-        number: Some(number as i32),
-        children,
+    let mut runs = Runs::new();
+    split_body(introspector, body, styles, &mut own, &mut runs, synthetic);
+    let text = extract_text(&Content::sequence(own)).trim().to_string();
+    let mut children = vec![synthetic.paragraph(RichText::plain(text))];
+    for (ordered, items) in runs {
+        children.push(synthetic.list(ordered, items));
+    }
+    CndListItem { number, checked: None, children }
+}
+
+/// Append `item` to the run of its kind, opening a new run on a change.
+fn push_run(runs: &mut Runs, ordered: bool, item: CndListItem) {
+    match runs.last_mut() {
+        Some((kind, items)) if *kind == ordered => items.push(item),
+        _ => runs.push((ordered, vec![item])),
     }
 }
 
@@ -131,7 +198,8 @@ fn split_body(
     body: &Content,
     styles: StyleChain,
     own: &mut Vec<Content>,
-    children: &mut Vec<CndListItem>,
+    runs: &mut Runs,
+    synthetic: &mut Synthetic,
 ) {
     let parts: Vec<&Content> = match body.to_packed::<SequenceElem>() {
         Some(sequence) => sequence.children.iter().collect(),
@@ -139,7 +207,9 @@ fn split_body(
     };
     // Consecutive bare enum items form one enum, numbered as it is displayed.
     let mut group: Vec<&Packed<EnumItem>> = Vec::new();
-    let flush = |group: &mut Vec<&Packed<EnumItem>>, children: &mut Vec<CndListItem>| {
+    let flush = |group: &mut Vec<&Packed<EnumItem>>,
+                 runs: &mut Runs,
+                 synthetic: &mut Synthetic| {
         if let Some(first) = group.first() {
             let (start, reversed) = realized_enum(introspector, first.span())
                 .map(|realized| enum_settings(&realized, StyleChain::default()))
@@ -147,12 +217,10 @@ fn split_body(
                     (styles.get(EnumElem::start), styles.get(EnumElem::reversed))
                 });
             let numbers = enum_numbers(group.iter().copied(), start, reversed, styles);
-            children.extend(
-                group
-                    .drain(..)
-                    .zip(numbers)
-                    .map(|(item, n)| enum_item(introspector, item, n, styles)),
-            );
+            for (item, n) in group.drain(..).zip(numbers) {
+                let item = enum_item(introspector, item, n, styles, synthetic);
+                push_run(runs, true, item);
+            }
         }
     };
     for part in parts {
@@ -167,15 +235,19 @@ fn split_body(
             }
             continue;
         }
-        flush(&mut group, children);
+        flush(&mut group, runs, synthetic);
         if let Some(item) = part.to_packed::<ListItem>() {
-            children.push(list_item(introspector, item, styles));
+            let item = list_item(introspector, item, styles, synthetic);
+            push_run(runs, false, item);
         } else if let Some(list) = part.to_packed::<ListElem>() {
-            children.extend(
-                list.children.iter().map(|item| list_item(introspector, item, styles)),
-            );
+            for item in &list.children {
+                let item = list_item(introspector, item, styles, synthetic);
+                push_run(runs, false, item);
+            }
         } else if let Some(enum_) = part.to_packed::<EnumElem>() {
-            children.extend(enum_items(introspector, enum_, styles));
+            for item in enum_items(introspector, enum_, styles, synthetic) {
+                push_run(runs, true, item);
+            }
         } else if let Some(styled) = part.to_packed::<StyledElem>() {
             // A set rule inside the body (`#set enum(start: 5)`) styles the
             // rest of it, nested items included.
@@ -184,13 +256,14 @@ fn split_body(
                 &styled.child,
                 styles.chain(&styled.styles),
                 own,
-                children,
+                runs,
+                synthetic,
             );
         } else {
             own.push(part.clone());
         }
     }
-    flush(&mut group, children);
+    flush(&mut group, runs, synthetic);
 }
 
 /// An enum's items with the numbers it displays.
@@ -198,6 +271,7 @@ fn enum_items(
     introspector: &dyn Introspector,
     enum_: &Packed<EnumElem>,
     styles: StyleChain,
+    synthetic: &mut Synthetic,
 ) -> Vec<CndListItem> {
     let (start, reversed) = enum_settings(enum_, styles);
     let numbers = enum_numbers(enum_.children.iter(), start, reversed, styles);
@@ -205,7 +279,7 @@ fn enum_items(
         .children
         .iter()
         .zip(numbers)
-        .map(|(item, n)| enum_item(introspector, item, n, styles))
+        .map(|(item, n)| enum_item(introspector, item, n, styles, synthetic))
         .collect()
 }
 

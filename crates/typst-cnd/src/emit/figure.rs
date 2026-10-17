@@ -9,10 +9,10 @@ use typst_library::text::RawElem;
 use typst_library::visualize::ImageElem;
 use uuid::Uuid;
 
-use crate::emit::convert::{self, NodeRecord};
+use crate::emit::convert::{self, NodeRecord, Records, Synthetic};
 use crate::emit::{code, table};
 use crate::location::placeholder_location;
-use crate::model::{CndNode, FigureNode, ImageNode, RawSource};
+use crate::model::{CndNode, FigureNode, ImageNode, RawSource, RichText};
 
 /// Convert a non-table figure (image, code, custom kind, …) into a wrapper
 /// `FigureNode` plus whatever children it carries. Table/grid figures are
@@ -24,7 +24,7 @@ pub fn from_figure(
     content: &Content,
     figure: &Packed<FigureElem>,
     styles: StyleChain,
-) -> typst_library::diag::SourceResult<(FigureNode, Vec<(Uuid, NodeRecord)>)> {
+) -> typst_library::diag::SourceResult<(FigureNode, Records)> {
     let mut figure = figure.clone();
     figure.synthesize(engine, styles)?;
 
@@ -33,19 +33,19 @@ pub fn from_figure(
         .get_cloned(styles)
         .as_ref()
         .map(convert::caption_text)
-        .map(Into::into);
-    let fig_number = convert::figure_number(engine, &figure, styles).map(Into::into);
-    let record = convert::make_record(engine, introspector, content, &[])?;
+        .map(RichText::plain);
+    let fig_number = convert::figure_number(engine, &figure, styles);
+    let (mut record, edges) = convert::make_record(engine, introspector, content, &[])?;
 
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let mut node = FigureNode::new(id, location);
     node.caption = caption;
-    node.number = fig_number;
-    node.counter_label = convert::figure_counter_label(&figure, styles).map(Into::into);
+    node.numbering =
+        convert::numbering(fig_number, convert::figure_counter_label(&figure, styles));
     node.kind = figure_kind(&figure, styles);
 
-    let mut records = vec![(id, record)];
+    let mut records = Vec::new();
 
     if let Some(image) = content.query_first_naive(&ImageElem::ELEM.select()) {
         if let Some(image) = image.to_packed::<ImageElem>() {
@@ -67,6 +67,13 @@ pub fn from_figure(
 
     node.raw = table::raw_typst_for_label(engine, content.label()).map(RawSource::typst);
 
+    // No body here holds a paragraph, so the edges go to the caption.
+    let mut synthetic = Synthetic::new(content.location());
+    table::attach_figure_edges(&node, &mut record, edges, &mut synthetic);
+    records.insert(0, (id, record));
+
+    let mut records = Records { own: records, synthetic: synthetic.records };
+    records.locate_in(content.location());
     Ok((node, records))
 }
 
@@ -83,7 +90,8 @@ pub fn bare_image(
     image: &Packed<ImageElem>,
     styles: StyleChain,
 ) -> typst_library::diag::SourceResult<(ImageNode, NodeRecord)> {
-    let record = convert::make_record(engine, introspector, content, &[])?;
+    // An image carries no edges (spec §4: only texts hold them).
+    let (record, _) = convert::make_record(engine, introspector, content, &[])?;
     let id = Uuid::new_v4();
     let mut node = ImageNode::new(id, placeholder_location());
     node.alt = image.alt.get_cloned(styles).map(Into::into);
@@ -94,17 +102,7 @@ pub fn bare_image(
 /// A record carrying only a location, for a figure's synthetic child node —
 /// nothing else is inherited from the wrapper (ADR 0010).
 fn minimal_record(content: &Content) -> NodeRecord {
-    NodeRecord {
-        location: content.location(),
-        label: None,
-        ref_targets: Vec::new(),
-        footnote_locs: Vec::new(),
-        cite_markers: Vec::new(),
-        ref_markers: Vec::new(),
-        link_targets: Vec::new(),
-        link_markers: Vec::new(),
-        state_metadata: serde_json::Map::new(),
-    }
+    NodeRecord::synthetic(content.location())
 }
 
 /// Read the figure kind Typst itself already resolved during

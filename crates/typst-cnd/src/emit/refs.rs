@@ -10,14 +10,15 @@ use uuid::Uuid;
 
 use crate::emit::convert::ConvertContext;
 use crate::emit::extract::LinkDest;
-use crate::model::{CndNode, LinkRef, NodeRef};
+use crate::model::{CndNode, LinkRef, NodeRef, TextSlot};
 
-/// `(source node, target node, the target's label, the marker's text span)`.
-type RefEdge = (Uuid, Uuid, Option<String>, Option<(i64, i64)>);
-/// A `links` edge before it reaches the node: (node id, href, span).
+/// `(source node, source text, target node, the target's label, the
+/// marker's text span)`.
+type RefEdge = (Uuid, TextSlot, Uuid, Option<String>, Option<(i64, i64)>);
+/// A `links` edge before it reaches the node: (node id, text, href, span).
 /// Sibling of `RefEdge` above — same reason, and clippy's `type_complexity`
 /// is denied by CI's `-Dwarnings`.
-type LinkEdge = (Uuid, String, Option<(i64, i64)>);
+type LinkEdge = (Uuid, TextSlot, String, Option<(i64, i64)>);
 
 fn doc_selector() -> Selector {
     Selector::Or(eco_vec![
@@ -35,7 +36,7 @@ fn doc_selector() -> Selector {
 }
 
 /// Resolve cross-references and populate the forward-only `refs` list on
-/// each source node (ADR 0008). The reverse index is derived on demand by
+/// each source text (ADR 0008). The reverse index is derived on demand by
 /// the SDK (`Cnd.incoming`), never materialized here.
 pub fn resolve_refs(
     ctx: &mut ConvertContext,
@@ -58,38 +59,43 @@ pub fn resolve_refs(
     let mut ref_marker_sources: rustc_hash::FxHashSet<Uuid> =
         rustc_hash::FxHashSet::default();
     for (source_id, record) in ctx.records_sorted() {
-        // `ref_markers` first: these carry spans, and `set_ref` dedups
-        // first-wins per target, so the spanned edge must be pushed before
-        // the span-less `ref_targets` edge for the same target (today
-        // `ref_targets` is empty for realized flat nodes, but keep the order
-        // robust against that ever changing).
-        for (label, span) in &record.ref_markers {
-            if ctx.bib_key_to_id.contains_key(label) {
-                continue;
+        for text in &record.texts {
+            // `ref_markers` first: these carry spans, and `set_ref` dedups
+            // first-wins per target, so the spanned edge must be pushed
+            // before the span-less `ref_targets` edge for the same target
+            // (today `ref_targets` is empty for realized flat nodes, but keep
+            // the order robust against that ever changing).
+            for (label, span) in &text.ref_markers {
+                if ctx.bib_key_to_id.contains_key(label) {
+                    continue;
+                }
+                if let Some(target_id) = resolve_label(*label, ctx, introspector) {
+                    ref_marker_sources.insert(source_id);
+                    edges.push((
+                        source_id,
+                        text.slot,
+                        target_id,
+                        Some(label.resolve().as_str().into()),
+                        Some(*span),
+                    ));
+                }
             }
-            if let Some(target_id) = resolve_label(*label, ctx, introspector) {
-                ref_marker_sources.insert(source_id);
-                edges.push((
-                    source_id,
-                    target_id,
-                    Some(label.resolve().as_str().into()),
-                    Some(*span),
-                ));
-            }
-        }
-        for label in &record.ref_targets {
-            // A `@key` citation is a RefElem too, but resolves in the
-            // bibliography pool, not the node tree — keep it out of `refs`.
-            if ctx.bib_key_to_id.contains_key(label) {
-                continue;
-            }
-            if let Some(target_id) = resolve_label(*label, ctx, introspector) {
-                edges.push((
-                    source_id,
-                    target_id,
-                    Some(label.resolve().as_str().into()),
-                    None,
-                ));
+            for label in &text.ref_targets {
+                // A `@key` citation is a RefElem too, but resolves in the
+                // bibliography pool, not the node tree — keep it out of
+                // `refs`.
+                if ctx.bib_key_to_id.contains_key(label) {
+                    continue;
+                }
+                if let Some(target_id) = resolve_label(*label, ctx, introspector) {
+                    edges.push((
+                        source_id,
+                        text.slot,
+                        target_id,
+                        Some(label.resolve().as_str().into()),
+                        None,
+                    ));
+                }
             }
         }
     }
@@ -117,6 +123,7 @@ pub fn resolve_refs(
         if let Some(target_id) = resolve_label(label, ctx, introspector) {
             edges.push((
                 source_id,
+                TextSlot::Text,
                 target_id,
                 Some(label.resolve().as_str().into()),
                 None,
@@ -128,6 +135,7 @@ pub fn resolve_refs(
             {
                 edges.push((
                     paragraph_id,
+                    TextSlot::Text,
                     target_id,
                     Some(label.resolve().as_str().into()),
                     None,
@@ -136,7 +144,7 @@ pub fn resolve_refs(
         }
     }
 
-    for (source, target, marker_label, span) in edges {
+    for (source, slot, target, marker_label, span) in edges {
         // An edge names its target by label (ADR 0017). Prefer the label the
         // target node actually carries — that is the one a consumer resolves
         // against; the marker label is the fallback for the rare case where
@@ -146,7 +154,7 @@ pub fn resolve_refs(
         let Some(label) = node_label(ctx, target).or(marker_label) else {
             continue;
         };
-        set_ref(ctx, source, label, span);
+        set_ref(ctx, source, slot, label, span);
     }
 }
 
@@ -169,54 +177,59 @@ pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) 
     let mut ref_edges: Vec<RefEdge> = Vec::new();
 
     for (source_id, record) in ctx.records_sorted() {
-        for (dest, span) in &record.link_markers {
-            collect_link_edge(
-                ctx,
-                introspector,
-                source_id,
-                dest,
-                Some(*span),
-                &mut links,
-                &mut ref_edges,
-            );
-        }
-        for dest in &record.link_targets {
-            collect_link_edge(
-                ctx,
-                introspector,
-                source_id,
-                dest,
-                None,
-                &mut links,
-                &mut ref_edges,
-            );
+        for text in &record.texts {
+            let source = (source_id, text.slot);
+            for (dest, span) in &text.link_markers {
+                collect_link_edge(
+                    ctx,
+                    introspector,
+                    source,
+                    dest,
+                    Some(*span),
+                    &mut links,
+                    &mut ref_edges,
+                );
+            }
+            for dest in &text.link_targets {
+                collect_link_edge(
+                    ctx,
+                    introspector,
+                    source,
+                    dest,
+                    None,
+                    &mut links,
+                    &mut ref_edges,
+                );
+            }
         }
     }
 
-    for (source_id, href, span) in links {
-        if let Some(node) = find_node_mut(&mut ctx.roots, source_id) {
-            node.links_mut()
+    for (source_id, slot, href, span) in links {
+        if let Some(text) =
+            find_node_mut(&mut ctx.roots, source_id).and_then(|node| node.text_mut(slot))
+        {
+            text.links
                 .push(LinkRef { href, text_span: normalize_link_span(span) });
         }
     }
 
-    for (source, target, marker_label, span) in ref_edges {
+    for (source, slot, target, marker_label, span) in ref_edges {
         let Some(label) = node_label(ctx, target).or(marker_label) else { continue };
-        set_ref(ctx, source, label, span);
+        set_ref(ctx, source, slot, label, span);
     }
 }
 
 fn collect_link_edge(
     ctx: &ConvertContext,
     introspector: &dyn Introspector,
-    source_id: Uuid,
+    (source_id, slot): (Uuid, TextSlot),
     dest: &LinkDest,
     span: Option<(i64, i64)>,
     links: &mut Vec<LinkEdge>,
     ref_edges: &mut Vec<RefEdge>,
 ) {
     match dest {
-        LinkDest::Url(href) => links.push((source_id, href.to_string(), span)),
+        LinkDest::Url(href) => links.push((source_id, slot, href.to_string(), span)),
         LinkDest::Label(label) => {
             // Mirrors `resolve_refs`'s bib-key guard: a `@key` citation is a
             // `RefElem` that resolves in the bibliography pool, not the node
@@ -232,6 +245,7 @@ fn collect_link_edge(
             if let Some(target_id) = resolve_label(*label, ctx, introspector) {
                 ref_edges.push((
                     source_id,
+                    slot,
                     target_id,
                     Some(label.resolve().as_str().into()),
                     span,
@@ -240,7 +254,7 @@ fn collect_link_edge(
         }
         LinkDest::Location(loc) => {
             if let Some(target_id) = ctx.location_to_id.get(loc).copied() {
-                ref_edges.push((source_id, target_id, None, span));
+                ref_edges.push((source_id, slot, target_id, None, span));
             }
         }
     }
@@ -298,19 +312,21 @@ fn heading_ids_from_nodes(nodes: &[CndNode]) -> Vec<Uuid> {
     out
 }
 
+/// The flow paragraphs, in reading order: those under headings and figures,
+/// never one inside another container's slot.
+///
+/// A deliberate exception to walking every slot: the fallback above pairs
+/// this list by index with the `ParElem`s of the source content, and the
+/// paragraphs an emitter builds to fill a container (a list item's, a
+/// cell's) have no `ParElem` there, so counting them would shift every
+/// index after them and misattribute the edges.
 fn walk_paragraph_ids(nodes: &[CndNode], out: &mut Vec<Uuid>) {
     for node in nodes {
         match node {
             CndNode::Paragraph(n) => out.push(n.base.id),
             CndNode::Heading(n) => walk_paragraph_ids(&n.children, out),
             CndNode::Figure(n) => walk_paragraph_ids(&n.children, out),
-            CndNode::Table(_)
-            | CndNode::Quote(_)
-            | CndNode::Code(_)
-            | CndNode::Math(_)
-            | CndNode::Image(_)
-            | CndNode::List(_)
-            | CndNode::Terms(_) => {}
+            _ => {}
         }
     }
 }
@@ -381,29 +397,15 @@ fn resolve_label(
     find_by_label(ctx, label)
 }
 
+/// The first table or figure in reading order.
 fn find_labeled_table(ctx: &ConvertContext) -> Option<Uuid> {
-    fn walk(nodes: &[CndNode]) -> Option<Uuid> {
-        for node in nodes {
-            match node {
-                CndNode::Table(n) => return Some(n.base.id),
-                CndNode::Figure(n) => return Some(n.base.id),
-                CndNode::Heading(n) => {
-                    if let Some(id) = walk(&n.children) {
-                        return Some(id);
-                    }
-                }
-                CndNode::Paragraph(_)
-                | CndNode::Quote(_)
-                | CndNode::Code(_)
-                | CndNode::Math(_)
-                | CndNode::Image(_)
-                | CndNode::List(_)
-                | CndNode::Terms(_) => {}
-            }
+    let mut found = None;
+    crate::model::walk(&ctx.roots, &mut |node| {
+        if found.is_none() && matches!(node, CndNode::Table(_) | CndNode::Figure(_)) {
+            found = Some(node.id());
         }
-        None
-    }
-    walk(&ctx.roots)
+    });
+    found
 }
 
 fn last_paragraph_under_heading(nodes: &[CndNode], heading_id: Uuid) -> Option<Uuid> {
@@ -424,19 +426,14 @@ fn last_paragraph_under_heading(nodes: &[CndNode], heading_id: Uuid) -> Option<U
         false
     }
 
+    // The last *flow* paragraph, as `walk_paragraph_ids` counts them: a
+    // paragraph inside a container slot is not the heading's own text.
     fn find_last_paragraph(nodes: &[CndNode], last: &mut Option<Uuid>) {
         for node in nodes {
             match node {
                 CndNode::Paragraph(n) => *last = Some(n.base.id),
                 CndNode::Heading(n) => find_last_paragraph(&n.children, last),
-                CndNode::Table(_)
-                | CndNode::Quote(_)
-                | CndNode::Code(_)
-                | CndNode::Math(_)
-                | CndNode::Figure(_)
-                | CndNode::Image(_)
-                | CndNode::List(_)
-                | CndNode::Terms(_) => {}
+                _ => {}
             }
         }
     }
@@ -447,30 +444,26 @@ fn last_paragraph_under_heading(nodes: &[CndNode], heading_id: Uuid) -> Option<U
 }
 
 fn node_label(ctx: &ConvertContext, id: Uuid) -> Option<String> {
-    fn walk(nodes: &[CndNode], id: Uuid) -> Option<String> {
-        for node in nodes {
-            if node.id() == id {
-                return node.base().label.clone();
-            }
-            if let CndNode::Heading(h) = node
-                && let Some(label) = walk(&h.children, id)
-            {
-                return Some(label);
-            }
+    let mut label = None;
+    crate::model::walk(&ctx.roots, &mut |node| {
+        if node.id() == id {
+            label = node.base().label.clone();
         }
-        None
-    }
-    walk(&ctx.roots, id)
+    });
+    label
 }
 
 fn set_ref(
     ctx: &mut ConvertContext,
     source: Uuid,
+    slot: TextSlot,
     label: String,
     span: Option<(i64, i64)>,
 ) {
-    if let Some(node) = find_node_mut(&mut ctx.roots, source) {
-        let refs = node.refs_mut();
+    if let Some(text) =
+        find_node_mut(&mut ctx.roots, source).and_then(|node| node.text_mut(slot))
+    {
+        let refs = &mut text.refs;
         // Dedup by target label (one edge per target per node); the first
         // occurrence — the primary, span-carrying path — wins. Labels are
         // globally unique (ADR 0017), so this is the same dedup the target
@@ -481,15 +474,16 @@ fn set_ref(
     }
 }
 
+/// The node with `id`, in any slot of the tree.
 pub fn find_node_mut(nodes: &mut [CndNode], id: Uuid) -> Option<&mut CndNode> {
     for node in nodes {
         if node.id() == id {
             return Some(node);
         }
-        if let Some(children) = node.children_mut()
-            && let Some(found) = find_node_mut(children, id)
-        {
-            return Some(found);
+        for list in node.child_lists_mut() {
+            if let Some(found) = find_node_mut(list, id) {
+                return Some(found);
+            }
         }
     }
     None

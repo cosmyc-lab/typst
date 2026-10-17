@@ -7,7 +7,7 @@ use typst_library::text::Locale;
 use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::extract_with_markers;
 use crate::location::placeholder_location;
-use crate::model::ParagraphNode;
+use crate::model::{ParagraphNode, RichText};
 
 /// Convert a realized paragraph into a CND paragraph node.
 pub fn convert(
@@ -24,10 +24,13 @@ pub fn convert(
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = par.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed, &markers)?;
+    let (mut record, edges) =
+        convert::make_record(engine, introspector, &packed, &markers)?;
+    record.add_text(edges);
 
-    let mut node = ParagraphNode::new(id, text.into(), location);
-    node.lang = lang;
+    let mut text = RichText::plain(text);
+    text.lang = lang;
+    let node = ParagraphNode::new(id, text, location);
 
     Ok((node, record))
 }

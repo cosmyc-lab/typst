@@ -21,19 +21,20 @@ use typst_library::model::{BibliographyElem, FootnoteElem, RenderedEntry, Works}
 use uuid::Uuid;
 
 use crate::emit::ancestry::Ancestry;
-use crate::emit::convert::ConvertContext;
+use crate::emit::convert::{ConvertContext, Synthetic};
 use crate::emit::extract::extract_text;
 use crate::emit::refs::find_node_mut;
-use crate::model::{BibEntry, CiteRef, Footnote, FootnoteRef};
+use crate::model::{BibEntry, CiteRef, Footnote, FootnoteRef, RichText, TextSlot};
 
 /// Build the footnote pool into `ctx.footnotes` and the marker-location →
 /// pool-id map into `ctx.footnote_loc_to_id`, then attach a `FootnoteRef`
-/// to every node that carries a footnote marker.
+/// to every text that carries a footnote marker.
 ///
 /// Only declaration footnotes become pool entries; a `#footnote(<label>)`
 /// re-reference reuses the original's pool id, so several markers point at
 /// one entry. Pool order is the introspector's document order; each entry's
-/// `label` is the rendered footnote ordinal and `text` is the flat body.
+/// `label` is the rendered footnote ordinal, and its `children` are one
+/// paragraph holding the flat body, on the page of the declaration marker.
 ///
 /// A footnote declared inside a PDF artifact is decorative (cnd-sdk spec §2):
 /// it gets no pool entry, so neither its own marker nor a kept re-reference
@@ -67,15 +68,19 @@ pub fn resolve_footnotes(
         }
         let id = *ctx.footnote_loc_to_id.entry(own_loc).or_insert_with(Uuid::new_v4);
         if !ctx.footnotes.iter().any(|f| f.id == id) {
-            let text =
-                footnote.body_content().map(extract_text).unwrap_or_default().into();
+            let text = footnote.body_content().map(extract_text).unwrap_or_default();
             let numbering = footnote.numbering.get_ref(styles);
             let label = counter
                 .display_at(engine, own_loc, styles, numbering, footnote.span())
                 .ok()
                 .map(|num| extract_text(&num).into())
                 .unwrap_or_default();
-            ctx.footnotes.push(Footnote { id, label, text });
+            // The content node is not a node of the body: its record only
+            // gives it the page of the declaration marker.
+            let mut synthetic = Synthetic::new(Some(own_loc));
+            let children = vec![synthetic.paragraph(RichText::plain(text))];
+            ctx.records.extend(synthetic.records);
+            ctx.footnotes.push(Footnote { id, label, children });
         }
     }
 
@@ -154,7 +159,7 @@ pub fn build_bibliography_pool(
             let bib_entry = BibEntry {
                 id,
                 label: label.resolve().to_string(),
-                formatted: Some(rendered_string(entry)),
+                formatted: Some(RichText::plain(rendered_string(entry))),
                 type_: raw.get("type").and_then(|v| v.as_str()).map(str::to_string),
                 authors: source
                     .authors()
@@ -193,8 +198,8 @@ fn rendered_string(entry: &RenderedEntry) -> String {
     }
 }
 
-/// `(source node, footnote pool entry, the marker's text span)`.
-type FootnoteEdge = (Uuid, Uuid, Option<(i64, i64)>);
+/// `(source node, source text, footnote pool entry, the marker's text span)`.
+type FootnoteEdge = (Uuid, TextSlot, Uuid, Option<(i64, i64)>);
 
 /// Resolve every node's citation markers to `CiteRef` edges pointing at the
 /// bibliography pool. A key with no pool entry is dropped silently. The
@@ -205,35 +210,43 @@ type FootnoteEdge = (Uuid, Uuid, Option<(i64, i64)>);
 /// A citation written inside a PDF artifact is decorative (cnd-sdk spec §2)
 /// and yields no edge.
 pub fn resolve_cite_edges(ctx: &mut ConvertContext, ancestry: &Ancestry) {
-    let mut edges: Vec<(Uuid, CiteRef)> = Vec::new();
+    let mut edges: Vec<(Uuid, TextSlot, CiteRef)> = Vec::new();
     for (node_id, record) in ctx.records_sorted() {
-        for marker in &record.cite_markers {
-            if ancestry.is_artifact(marker.loc) {
-                continue;
-            }
-            // The edge names its target by label now, but the lookup still
-            // gates it: a `@key` with no bibliography entry must not
-            // produce an unresolvable `cites` edge.
-            if ctx.bib_key_to_id.contains_key(&marker.key) {
-                let suppressed = marker.form.as_deref() == Some("none");
-                let text_span =
-                    if suppressed { None } else { marker.span.map(|(s, e)| vec![s, e]) };
-                edges.push((
-                    node_id,
-                    CiteRef {
-                        label: marker.key.resolve().to_string(),
-                        text_span,
-                        form: marker.form.clone(),
-                        supplement: marker.supplement.clone(),
-                    },
-                ));
+        for text in &record.texts {
+            for marker in &text.cite_markers {
+                if ancestry.is_artifact(marker.loc) {
+                    continue;
+                }
+                // The edge names its target by label now, but the lookup
+                // still gates it: a `@key` with no bibliography entry must
+                // not produce an unresolvable `cites` edge.
+                if ctx.bib_key_to_id.contains_key(&marker.key) {
+                    let suppressed = marker.form.as_deref() == Some("none");
+                    let text_span = if suppressed {
+                        None
+                    } else {
+                        marker.span.map(|(s, e)| vec![s, e])
+                    };
+                    edges.push((
+                        node_id,
+                        text.slot,
+                        CiteRef {
+                            label: marker.key.resolve().to_string(),
+                            text_span,
+                            form: marker.form.clone(),
+                            supplement: marker.supplement.clone(),
+                        },
+                    ));
+                }
             }
         }
     }
 
-    for (node_id, cite) in edges {
-        if let Some(node) = find_node_mut(&mut ctx.roots, node_id) {
-            let cites = node.cites_mut();
+    for (node_id, slot, cite) in edges {
+        if let Some(text) =
+            find_node_mut(&mut ctx.roots, node_id).and_then(|node| node.text_mut(slot))
+        {
+            let cites = &mut text.cites;
             // Keep meaningful variants (same work, different supplement/form/
             // position) but drop exact duplicates.
             if !cites.contains(&cite) {
@@ -243,7 +256,7 @@ pub fn resolve_cite_edges(ctx: &mut ConvertContext, ancestry: &Ancestry) {
     }
 }
 
-/// Attach a `FootnoteRef` to each node for every footnote marker captured
+/// Attach a `FootnoteRef` to each text for every footnote marker captured
 /// in its record, carrying the marker's text span. A miss (location not a
 /// footnote) is dropped. Dedup is by the full edge (id + span), so two
 /// markers of the same note in one node become two positioned entries.
@@ -253,21 +266,25 @@ fn resolve_footnote_edges(ctx: &mut ConvertContext) {
 
     let mut edges: Vec<FootnoteEdge> = Vec::new();
     for (node_id, record) in ctx.records_sorted() {
-        for (marker_loc, span) in &record.footnote_locs {
-            if let Some(pool_id) = ctx.footnote_loc_to_id.get(marker_loc).copied() {
-                edges.push((node_id, pool_id, *span));
+        for text in &record.texts {
+            for (marker_loc, span) in &text.footnote_locs {
+                if let Some(pool_id) = ctx.footnote_loc_to_id.get(marker_loc).copied() {
+                    edges.push((node_id, text.slot, pool_id, *span));
+                }
             }
         }
     }
 
-    for (node_id, pool_id, span) in edges {
+    for (node_id, slot, pool_id, span) in edges {
         // A footnote pool entry always carries a label (its rendered
         // ordinal), so this lookup cannot fail; skipping rather than
         // unwrapping keeps an unresolvable edge from ever being emitted.
         let Some(label) = labels.get(&pool_id).cloned() else { continue };
         let reference = FootnoteRef { label, text_span: span.map(|(s, e)| vec![s, e]) };
-        if let Some(node) = find_node_mut(&mut ctx.roots, node_id) {
-            let footnotes = node.footnotes_mut();
+        if let Some(text) =
+            find_node_mut(&mut ctx.roots, node_id).and_then(|node| node.text_mut(slot))
+        {
+            let footnotes = &mut text.footnotes;
             if !footnotes.contains(&reference) {
                 footnotes.push(reference);
             }

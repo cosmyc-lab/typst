@@ -44,12 +44,12 @@ impl CndDocument {
         &self.nodes
     }
 
-    /// Bibliography pool (proposal 0004). Empty until pool collection lands.
+    /// Bibliography pool (proposal 0004).
     pub fn bibliography(&self) -> &[BibEntry] {
         &self.bibliography
     }
 
-    /// Footnote pool (proposal 0004). Empty until pool collection lands.
+    /// Footnote pool (proposal 0004).
     pub fn footnotes(&self) -> &[Footnote] {
         &self.footnotes
     }
@@ -129,11 +129,11 @@ impl Output for CndDocument {
         )?;
         pools::resolve_cite_edges(&mut ctx, &ancestry);
 
-        let footnotes = ctx.footnotes.clone();
-        let bibliography = ctx.bibliography.clone();
+        let mut footnotes = ctx.footnotes;
+        let bibliography = ctx.bibliography;
         let mut nodes = ctx.roots;
         let mut assigner = LocationAssigner::new(introspector.clone(), ctx.records);
-        assigner.assign_all(&mut nodes);
+        assigner.assign_all(&mut nodes, &mut footnotes);
 
         Ok(Self {
             info,
@@ -200,8 +200,6 @@ pub fn cnd_from_document(
         source: Some(source),
         doc: doc_metadata_from_info(document.info()),
         nodes: document.nodes().to_vec(),
-        // Pools are populated by a later increment (footnote/bibliography
-        // collection); always-present empty vecs satisfy the contract.
         bibliography: document.bibliography().to_vec(),
         footnotes: document.footnotes().to_vec(),
     }
@@ -223,6 +221,9 @@ fn doc_metadata_from_info(info: &DocumentInfo) -> DocMetadata {
             Smart::Custom(locale) => Some(locale.rfc_3066().into()),
             Smart::Auto => None,
         },
+        status: None,
+        version: None,
+        extra: std::collections::BTreeMap::default(),
     }
 }
 
