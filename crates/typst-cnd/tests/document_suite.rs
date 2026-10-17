@@ -5537,7 +5537,7 @@ fn every_05_node_type_and_mark_kind_is_emitted() {
         match node {
             CndNode::List(list) => item = Some(edges(&list.items[0].children)),
             CndNode::Table(table) => {
-                cell = Some(edges(&table.cells.last().unwrap().children))
+                cell = Some(edges(&table.cells.last().unwrap().children));
             }
             _ => {}
         }
