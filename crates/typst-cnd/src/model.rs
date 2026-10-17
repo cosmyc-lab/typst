@@ -4,15 +4,25 @@
 //! is shared as code across languages (ADR 0019). Agreement is proved by
 //! emitting a CND and running it through the SDK's `validate()`, not by
 //! construction.
+//!
+//! Every default-valued field is omitted on output, as the reference writer
+//! (`Cnd.to_json`) does: `[]`, `{}` and `null`, `false` for `ordered` and
+//! `is_header`, `1` for `rowspan` and `colspan` (spec §6, *Defaults*).
+//! Required fields are always written, even when empty (`heading_path`).
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// The `links` family (ADR 0024, cnd-sdk) is a 0.4.0 format change: this is
-/// the only machine-readable signal a consumer has for whether a CND may
-/// carry `links` at all (a reindex gate, or a converter's decision whether
-/// to render a links section).
-pub const CND_VERSION: &str = "0.4.0";
+pub use crate::rich_text::{
+    CiteRef, FootnoteRef, LinkRef, NodeRef, Numbering, RawSource, RichText,
+};
+
+/// The format version this producer emits. 0.5.0 moves the link families
+/// from nodes onto texts and gives every container block-node children
+/// (cnd-sdk ADR 0027); there is no 0.4 output.
+pub const CND_VERSION: &str = "0.5.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,12 +35,11 @@ pub struct Cnd {
     pub source: Option<SourceInfo>,
     pub doc: DocMetadata,
     pub nodes: Vec<CndNode>,
-    /// Bibliography pool — target of `cites` edges. Always present (never
-    /// null); empty when the document cites nothing (proposal 0004).
-    #[serde(default)]
+    /// Bibliography pool — target of `cites` edges (proposal 0004).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bibliography: Vec<BibEntry>,
-    /// Footnote pool — target of `footnotes` edges. Always present.
-    #[serde(default)]
+    /// Footnote pool — target of `footnotes` edges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footnotes: Vec<Footnote>,
 }
 
@@ -38,25 +47,35 @@ pub struct Cnd {
 #[serde(rename_all = "snake_case")]
 pub struct DocDate {
     pub year: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub month: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub day: Option<i32>,
 }
 
+/// Bibliographic metadata for the work. `status` and `version` are what the
+/// author declares on the document; `extra` holds any other title-page
+/// metadata, its keys never repeating a field name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct DocMetadata {
     pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<DocDate>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, String>,
 }
 
 /// The input artifact this CND was built from — deliberately separate from
@@ -72,25 +91,8 @@ pub struct SourceInfo {
     #[serde(rename = "type")]
     pub type_: String,
     pub hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
-}
-
-/// The producer's verbatim source for a node, with its language. A bare
-/// string dropped the one thing a consumer needs in order to decide whether
-/// to attempt a parse: which language the content is in.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct RawSource {
-    pub format: String,
-    pub value: String,
-}
-
-impl RawSource {
-    /// Every `raw` this producer emits is Typst source, by construction.
-    pub fn typst(value: impl Into<String>) -> Self {
-        Self { format: "typst".into(), value: value.into() }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,19 +105,37 @@ pub struct NodeLocation {
     pub page: i32,
 }
 
+// The variants differ in size because the node types do; boxing the larger
+// ones would put a `Box` in every pattern over the model for a saving that
+// does not matter at document scale.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CndNode {
     Heading(HeadingNode),
     Paragraph(ParagraphNode),
-    Table(TableNode),
     Quote(QuoteNode),
     Code(CodeNode),
     Math(MathNode),
-    Figure(FigureNode),
     Image(ImageNode),
+    Figure(FigureNode),
+    Admonition(AdmonitionNode),
     List(ListNode),
     Terms(TermsNode),
+    Table(TableNode),
+    Layout(LayoutNode),
+}
+
+/// One text of a node, as `CndNode::text_mut` addresses it. `Term(i)` is
+/// the term of the `i`-th item of a term list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextSlot {
+    Text,
+    Caption,
+    Description,
+    Attribution,
+    Title,
+    Term(usize),
 }
 
 impl CndNode {
@@ -127,14 +147,16 @@ impl CndNode {
         match self {
             Self::Heading(n) => &n.base,
             Self::Paragraph(n) => &n.base,
-            Self::Table(n) => &n.base,
             Self::Quote(n) => &n.base,
             Self::Code(n) => &n.base,
             Self::Math(n) => &n.base,
-            Self::Figure(n) => &n.base,
             Self::Image(n) => &n.base,
+            Self::Figure(n) => &n.base,
+            Self::Admonition(n) => &n.base,
             Self::List(n) => &n.base,
             Self::Terms(n) => &n.base,
+            Self::Table(n) => &n.base,
+            Self::Layout(n) => &n.base,
         }
     }
 
@@ -142,14 +164,16 @@ impl CndNode {
         match self {
             Self::Heading(n) => &mut n.base,
             Self::Paragraph(n) => &mut n.base,
-            Self::Table(n) => &mut n.base,
             Self::Quote(n) => &mut n.base,
             Self::Code(n) => &mut n.base,
             Self::Math(n) => &mut n.base,
-            Self::Figure(n) => &mut n.base,
             Self::Image(n) => &mut n.base,
+            Self::Figure(n) => &mut n.base,
+            Self::Admonition(n) => &mut n.base,
             Self::List(n) => &mut n.base,
             Self::Terms(n) => &mut n.base,
+            Self::Table(n) => &mut n.base,
+            Self::Layout(n) => &mut n.base,
         }
     }
 
@@ -157,158 +181,160 @@ impl CndNode {
         &mut self.base_mut().location
     }
 
-    pub fn refs_mut(&mut self) -> &mut Vec<NodeRef> {
-        &mut self.base_mut().refs
-    }
-
-    pub fn cites_mut(&mut self) -> &mut Vec<CiteRef> {
-        &mut self.base_mut().cites
-    }
-
-    pub fn footnotes_mut(&mut self) -> &mut Vec<FootnoteRef> {
-        &mut self.base_mut().footnotes
-    }
-
-    pub fn links_mut(&mut self) -> &mut Vec<NodeLink> {
-        &mut self.base_mut().links
-    }
-
-    /// Nodes with their own reading-flow children: headings and figure
-    /// wrappers. A figure's children keep their own `location` — nothing is
-    /// inherited from the wrapper (ADR 0010) — but they still need to be
-    /// reachable for metadata application and location assignment.
-    pub fn children_mut(&mut self) -> Option<&mut Vec<CndNode>> {
-        match self {
-            Self::Heading(n) => Some(&mut n.children),
-            Self::Figure(n) => Some(&mut n.children),
+    /// The node's text in `slot`, if the node has that slot and it is set.
+    pub fn text_mut(&mut self, slot: TextSlot) -> Option<&mut RichText> {
+        match (self, slot) {
+            (Self::Heading(n), TextSlot::Text) => Some(&mut n.text),
+            (Self::Paragraph(n), TextSlot::Text) => Some(&mut n.text),
+            (Self::Quote(n), TextSlot::Attribution) => n.attribution.as_mut(),
+            (Self::Figure(n), TextSlot::Caption) => n.caption.as_mut(),
+            (Self::Figure(n), TextSlot::Description) => n.description.as_mut(),
+            (Self::Admonition(n), TextSlot::Title) => n.title.as_mut(),
+            (Self::Terms(n), TextSlot::Term(i)) => {
+                n.items.get_mut(i).map(|item| &mut item.term)
+            }
             _ => None,
+        }
+    }
+
+    /// The node's own texts in spec order (cnd-sdk `texts_of`); never a
+    /// nested node's.
+    pub fn texts(&self) -> Vec<&RichText> {
+        match self {
+            Self::Heading(n) => vec![&n.text],
+            Self::Paragraph(n) => vec![&n.text],
+            Self::Quote(n) => n.attribution.iter().collect(),
+            Self::Figure(n) => n.caption.iter().chain(n.description.iter()).collect(),
+            Self::Admonition(n) => n.title.iter().collect(),
+            Self::Terms(n) => n.items.iter().map(|item| &item.term).collect(),
+            Self::Code(_)
+            | Self::Math(_)
+            | Self::Image(_)
+            | Self::List(_)
+            | Self::Table(_)
+            | Self::Layout(_) => Vec::new(),
+        }
+    }
+
+    /// Every list of nested nodes, in document order: `children`, each
+    /// `items[i].children` or each `cells[i].children` (cnd-sdk
+    /// `child_slots`).
+    pub fn child_lists(&self) -> Vec<&[CndNode]> {
+        match self {
+            Self::Heading(n) => vec![&n.children],
+            Self::Quote(n) => vec![&n.children],
+            Self::Figure(n) => vec![&n.children],
+            Self::Admonition(n) => vec![&n.children],
+            Self::List(n) => {
+                n.items.iter().map(|item| item.children.as_slice()).collect()
+            }
+            Self::Terms(n) => {
+                n.items.iter().map(|item| item.children.as_slice()).collect()
+            }
+            Self::Table(n) => {
+                n.cells.iter().map(|cell| cell.children.as_slice()).collect()
+            }
+            Self::Layout(n) => {
+                n.cells.iter().map(|cell| cell.children.as_slice()).collect()
+            }
+            Self::Paragraph(_) | Self::Code(_) | Self::Math(_) | Self::Image(_) => {
+                Vec::new()
+            }
+        }
+    }
+
+    /// Mutable twin of [`CndNode::child_lists`].
+    pub fn child_lists_mut(&mut self) -> Vec<&mut Vec<CndNode>> {
+        match self {
+            Self::Heading(n) => vec![&mut n.children],
+            Self::Quote(n) => vec![&mut n.children],
+            Self::Figure(n) => vec![&mut n.children],
+            Self::Admonition(n) => vec![&mut n.children],
+            Self::List(n) => n.items.iter_mut().map(|item| &mut item.children).collect(),
+            Self::Terms(n) => n.items.iter_mut().map(|item| &mut item.children).collect(),
+            Self::Table(n) => n.cells.iter_mut().map(|cell| &mut cell.children).collect(),
+            Self::Layout(n) => {
+                n.cells.iter_mut().map(|cell| &mut cell.children).collect()
+            }
+            Self::Paragraph(_) | Self::Code(_) | Self::Math(_) | Self::Image(_) => {
+                Vec::new()
+            }
         }
     }
 }
 
-/// Forward cross-reference edge, keyed by the target's label (ADR 0017,
-/// superseding the `{id, label}` form of ADR 0002). `label` resolves in the
-/// `nodes` tree.
-///
-/// An edge keys on the label rather than the id because an id is not
-/// durable across builds (ADR 0015) — this producer mints a fresh `uuid4`
-/// on every run, so an edge carrying one would expire immediately. The
-/// label lives in the Typst source and survives.
-///
-/// `text_span` is an optional `[start, end)` codepoint offset marking where
-/// the reference marker sits in the containing node's rendered text; named
-/// `text_span` to pin the coordinate space (ADR 0013).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct NodeRef {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text_span: Option<Vec<i64>>,
-}
-
-impl NodeRef {
-    pub fn new(label: impl Into<String>) -> Self {
-        Self { label: label.into(), text_span: None }
+/// Visit every node of `nodes` in pre-order (reading order), entering every
+/// child slot of every container.
+pub fn walk<'a>(nodes: &'a [CndNode], f: &mut impl FnMut(&'a CndNode)) {
+    for node in nodes {
+        f(node);
+        for list in node.child_lists() {
+            walk(list, f);
+        }
     }
 }
 
-/// Forward citation edge; `label` resolves in the `bibliography` pool
-/// (proposal 0004). `form` mirrors Typst's citation form; `text_span` as on
-/// `NodeRef` (ADR 0013).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct CiteRef {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text_span: Option<Vec<i64>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub form: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub supplement: Option<String>,
+/// Mutable twin of [`walk`]: `f` sees a node before its children.
+pub fn walk_mut(nodes: &mut [CndNode], f: &mut impl FnMut(&mut CndNode)) {
+    for node in nodes {
+        f(node);
+        for list in node.child_lists_mut() {
+            walk_mut(list, f);
+        }
+    }
 }
 
-/// Forward footnote edge; `label` resolves in the `footnotes` pool.
-/// `text_span` as on `NodeRef` (ADR 0013).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct FootnoteRef {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text_span: Option<Vec<i64>>,
-}
-
-/// Forward hyperlink edge (ADR 0024, cnd-sdk): `href` is the URL string the
-/// marker points at. Unlike `NodeRef`/`CiteRef`/`FootnoteRef`, `links` has
-/// no resolution domain — an `href` is never invalid for naming something
-/// the CND does not carry. `text_span` as on `NodeRef` (ADR 0013).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct NodeLink {
-    pub href: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text_span: Option<Vec<i64>>,
-}
-
-/// Footnote pool entry — flat supporting text keyed by its rendered
-/// ordinal `label` (proposal 0004).
+/// Footnote pool entry — target of `footnotes` edges, keyed by its rendered
+/// ordinal `label`. Its content is block nodes: real nodes, kept out of the
+/// body walk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Footnote {
     pub id: Uuid,
     pub label: String,
-    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<CndNode>,
 }
 
 /// Bibliography pool entry — target of `cites` edges. `formatted` is the
-/// reference string as displayed in the built document; a curated typed
-/// subset is lifted alongside it, and the full source entry is carried
-/// losslessly as structured JSON in `fields` — named `fields` rather than
-/// `raw` because `raw` means `{format, value}` on nodes (spec §5.1).
+/// reference as displayed in the built document; a curated typed subset is
+/// lifted alongside it, and the full source entry is carried losslessly as
+/// structured JSON in `fields` — named `fields` rather than `raw` because
+/// `raw` means `{format, value}` on nodes (spec §5.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct BibEntry {
     pub id: Uuid,
     pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub formatted: Option<String>,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formatted: Option<RichText>,
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub type_: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doi: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Full source entry (Hayagriva) as structured JSON — always present.
-    #[serde(default = "default_json_object")]
+    /// Full source entry (Hayagriva) as structured JSON.
+    #[serde(default = "default_json_object", skip_serializing_if = "is_empty_object")]
     pub fields: serde_json::Value,
 }
 
+/// Shared fields for every node. The link families live on the node's
+/// texts (`RichText`), not here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct NodeBase {
     pub id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// Forward cross-reference edges (ADR 0008). The reverse index is
-    /// derived on demand by the SDK (`Cnd.incoming`), never
-    /// serialized — no `refs_from`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub refs: Vec<NodeRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cites: Vec<CiteRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub footnotes: Vec<FootnoteRef>,
-    /// Forward hyperlink edges (ADR 0024, cnd-sdk) — a fourth, href-keyed
-    /// forward family alongside `refs`/`cites`/`footnotes`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub links: Vec<NodeLink>,
     /// A plain `serde_json::Map`, not a `HashMap`: without `serde_json`'s
     /// `preserve_order` feature (never enabled in this workspace — it would
     /// change map ordering for every crate in the build), `Map` is backed
@@ -319,128 +345,85 @@ pub struct NodeBase {
     /// same document would produce a textually different CND on every run.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub state_metadata: serde_json::Map<String, serde_json::Value>,
+    /// Always set: this producer is paginated, so every node has a page.
     pub location: NodeLocation,
 }
 
+/// Section heading; the section's content is in `children`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HeadingNode {
     #[serde(flatten)]
     pub base: NodeBase,
     pub level: i32,
-    /// The counter value as resolved and displayed ("2.1.1"), never the
-    /// pattern and never the counter-label word (spec §6). `None` for an
-    /// unnumbered heading — an empty string would be a third state the
-    /// format does not have.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub number: Option<String>,
-    /// The word displayed in front of `number` ("Figure", "Tabelle"), as
-    /// Typst resolved it for the document's language — its `supplement`
-    /// (spec §6, proposal 0010). Kept beside `number` rather than fused
-    /// into it: for an author-defined `kind` Typst has no localized name
-    /// and requires the author to supply this, so nothing else in the CND
-    /// encodes it. Named `counter_label` because `supplement` already
-    /// means a citation locator in this format.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub counter_label: Option<String>,
-    pub text: String,
+    /// The counter as displayed ("2.1.1"); `None` for an unnumbered heading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numbering: Option<Numbering>,
+    pub text: RichText,
     pub heading_path: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<CndNode>,
 }
 
+/// A paragraph: the leaf that carries prose.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ParagraphNode {
     #[serde(flatten)]
     pub base: NodeBase,
-    pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lang: Option<String>,
+    pub text: RichText,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct TableCell {
-    pub row: i32,
-    pub col: i32,
-    #[serde(default = "default_one", skip_serializing_if = "is_one")]
-    pub rowspan: i32,
-    #[serde(default = "default_one", skip_serializing_if = "is_one")]
-    pub colspan: i32,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_header: bool,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TableKind {
-    #[default]
-    Table,
-    Grid,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct TableNode {
-    #[serde(flatten)]
-    pub base: NodeBase,
-    #[serde(default, skip_serializing_if = "is_table_kind")]
-    pub kind: TableKind,
-    /// "data" | "content" hint for text rendering (cnd-sdk's
-    /// `cnd.core.node_text` "inline"/"auto" modes) — set from a
-    /// `content_kind:` argument on the Typst-side table wrapper, threaded
-    /// through the generic `cnd.metadata` state (see `emit/table.rs`'s
-    /// `content_kind_from_metadata`). `None` when the author never tagged it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cells: Vec<TableCell>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw: Option<RawSource>,
-}
-
+/// Block quotation; its body is block nodes in `children`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct QuoteNode {
     #[serde(flatten)]
     pub base: NodeBase,
-    pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attribution: Option<String>,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub block: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lang: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<RichText>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<CndNode>,
 }
 
+/// Code block, verbatim. `title` is the label an author gives a listing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CodeNode {
     #[serde(flatten)]
     pub base: NodeBase,
     pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub block: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
+/// Block equation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct MathNode {
     #[serde(flatten)]
     pub base: NodeBase,
     pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<RawSource>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub number: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub counter_label: Option<String>,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub block: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numbering: Option<Numbering>,
+}
+
+/// Leaf image content. A bare image outside any figure is an `ImageNode`
+/// with no wrapper; a captioned image is an `ImageNode` inside a
+/// `FigureNode`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ImageNode {
+    #[serde(flatten)]
+    pub base: NodeBase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt: Option<String>,
 }
 
 /// Captioned/numbered float wrapper — never a content carrier (ADR 0010).
@@ -455,44 +438,48 @@ pub struct MathNode {
 pub struct FigureNode {
     #[serde(flatten)]
     pub base: NodeBase,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub caption: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub number: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub counter_label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<RichText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<RichText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numbering: Option<Numbering>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<CndNode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<RawSource>,
 }
 
-/// Leaf image content. A bare image outside any figure is an `ImageNode`
-/// with no wrapper; a captioned image is an `ImageNode` inside a
-/// `FigureNode`.
+/// A callout ("Note", "Warning"); `kind` is an open vocabulary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ImageNode {
+pub struct AdmonitionNode {
     #[serde(flatten)]
     pub base: NodeBase,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alt: Option<String>,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<RichText>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<CndNode>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One list entry. Its content is block nodes; a nested list is a `list`
+/// node with its own `ordered`. `checked` is `None` for an item that is
+/// not a task-list checkbox, and is never inferred.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ListItem {
-    pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub children: Vec<ListItem>,
+    pub children: Vec<CndNode>,
 }
 
+/// Bullet (`ordered: false`) or numbered (`ordered: true`) list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ListNode {
@@ -500,45 +487,74 @@ pub struct ListNode {
     pub base: NodeBase,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ordered: bool,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub tight: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<ListItem>,
 }
 
-/// Single term/description pair of a definition list. Flat text, no id,
-/// not ref-targetable — same shape as `ListItem`/`TableCell`.
+/// One term and its definition (block nodes in `children`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct TermItem {
-    pub term: String,
-    pub description: String,
+    pub term: RichText,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<CndNode>,
 }
 
-/// Definition list (Typst `/ term: description` items) — proposal 0004.
+/// Definition list (Typst `/ term: description` items).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct TermsNode {
     #[serde(flatten)]
     pub base: NodeBase,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub tight: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<TermItem>,
 }
 
-impl TermsNode {
-    pub fn new(id: Uuid, location: NodeLocation) -> Self {
-        Self {
-            base: NodeBase::new(id, location),
-            tight: true,
-            items: Vec::new(),
-        }
-    }
+/// One cell of a `table` or a `layout`; its content is block nodes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct Cell {
+    pub row: i32,
+    pub col: i32,
+    #[serde(default = "default_one", skip_serializing_if = "is_one")]
+    pub rowspan: i32,
+    #[serde(default = "default_one", skip_serializing_if = "is_one")]
+    pub colspan: i32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_header: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<CndNode>,
+}
+
+/// A table whose rows and columns carry meaning. `kind` ("data",
+/// "content") comes from the author only; `None` means unstated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TableNode {
+    #[serde(flatten)]
+    pub base: NodeBase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cells: Vec<Cell>,
+}
+
+/// A grid used for arrangement only; position carries no relation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LayoutNode {
+    #[serde(flatten)]
+    pub base: NodeBase,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cells: Vec<Cell>,
 }
 
 fn default_json_object() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
+}
+
+fn is_empty_object(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
 fn default_one() -> i32 {
@@ -552,29 +568,11 @@ fn is_one(v: &i32) -> bool {
     *v == 1
 }
 
-fn default_true() -> bool {
-    true
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_true(v: &bool) -> bool {
-    *v
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_table_kind(kind: &TableKind) -> bool {
-    *kind == TableKind::Table
-}
-
 impl NodeBase {
     pub fn new(id: Uuid, location: NodeLocation) -> Self {
         Self {
             id,
             label: None,
-            refs: Vec::new(),
-            cites: Vec::new(),
-            footnotes: Vec::new(),
-            links: Vec::new(),
             state_metadata: serde_json::Map::new(),
             location,
         }
@@ -585,16 +583,15 @@ impl HeadingNode {
     pub fn new(
         id: Uuid,
         level: i32,
-        number: Option<String>,
-        text: String,
+        numbering: Option<Numbering>,
+        text: RichText,
         heading_path: Vec<String>,
         location: NodeLocation,
     ) -> Self {
         Self {
             base: NodeBase::new(id, location),
             level,
-            number,
-            counter_label: None,
+            numbering,
             text,
             heading_path,
             children: Vec::new(),
@@ -603,35 +600,28 @@ impl HeadingNode {
 }
 
 impl ParagraphNode {
-    pub fn new(id: Uuid, text: String, location: NodeLocation) -> Self {
-        Self {
-            base: NodeBase::new(id, location),
-            text,
-            lang: None,
-        }
-    }
-}
-
-impl TableNode {
-    pub fn new(id: Uuid, location: NodeLocation) -> Self {
-        Self {
-            base: NodeBase::new(id, location),
-            kind: TableKind::Table,
-            content_kind: None,
-            cells: Vec::new(),
-            raw: None,
-        }
+    pub fn new(id: Uuid, text: RichText, location: NodeLocation) -> Self {
+        Self { base: NodeBase::new(id, location), text }
     }
 }
 
 impl QuoteNode {
-    pub fn new(id: Uuid, text: String, location: NodeLocation) -> Self {
+    pub fn new(id: Uuid, location: NodeLocation) -> Self {
         Self {
             base: NodeBase::new(id, location),
-            text,
             attribution: None,
-            block: true,
-            lang: None,
+            children: Vec::new(),
+        }
+    }
+}
+
+impl AdmonitionNode {
+    pub fn new(id: Uuid, kind: String, location: NodeLocation) -> Self {
+        Self {
+            base: NodeBase::new(id, location),
+            kind,
+            title: None,
+            children: Vec::new(),
         }
     }
 }
@@ -642,7 +632,7 @@ impl CodeNode {
             base: NodeBase::new(id, location),
             text,
             lang: None,
-            block: true,
+            title: None,
         }
     }
 }
@@ -653,23 +643,7 @@ impl MathNode {
             base: NodeBase::new(id, location),
             text,
             raw: None,
-            number: None,
-            counter_label: None,
-            block: true,
-        }
-    }
-}
-
-impl FigureNode {
-    pub fn new(id: Uuid, location: NodeLocation) -> Self {
-        Self {
-            base: NodeBase::new(id, location),
-            caption: None,
-            number: None,
-            counter_label: None,
-            kind: None,
-            children: Vec::new(),
-            raw: None,
+            numbering: None,
         }
     }
 }
@@ -684,13 +658,54 @@ impl ImageNode {
     }
 }
 
+impl FigureNode {
+    pub fn new(id: Uuid, location: NodeLocation) -> Self {
+        Self {
+            base: NodeBase::new(id, location),
+            kind: None,
+            caption: None,
+            description: None,
+            numbering: None,
+            children: Vec::new(),
+            raw: None,
+        }
+    }
+}
+
 impl ListNode {
     pub fn new(id: Uuid, location: NodeLocation) -> Self {
         Self {
             base: NodeBase::new(id, location),
             ordered: false,
-            tight: true,
             items: Vec::new(),
+        }
+    }
+}
+
+impl TermsNode {
+    pub fn new(id: Uuid, location: NodeLocation) -> Self {
+        Self {
+            base: NodeBase::new(id, location),
+            items: Vec::new(),
+        }
+    }
+}
+
+impl TableNode {
+    pub fn new(id: Uuid, location: NodeLocation) -> Self {
+        Self {
+            base: NodeBase::new(id, location),
+            kind: None,
+            cells: Vec::new(),
+        }
+    }
+}
+
+impl LayoutNode {
+    pub fn new(id: Uuid, location: NodeLocation) -> Self {
+        Self {
+            base: NodeBase::new(id, location),
+            cells: Vec::new(),
         }
     }
 }

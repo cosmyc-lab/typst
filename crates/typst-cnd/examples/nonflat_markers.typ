@@ -2,9 +2,8 @@
 
 = Lists with markers
 
-A marker inside a list item still produces its edge, but with a null text
-span (the list's text is a concatenation of item strings, not a single
-string the offsets index into):
+A marker inside a list item produces its edge on the paragraph of that
+item, with a text span over the rendered marker, like any paragraph:
 
 - A plain first item.
 - An item carrying a footnote.#footnote[Note attached inside a list item.]

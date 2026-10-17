@@ -10,20 +10,26 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use typst_cnd::{
-    Cnd, CndDocument, CndNode, ListNode, cnd_from_document, cnd_to_json,
+    Cnd, CndDocument, CndNode, ListItem, ListNode, RichText, cnd_from_document,
+    cnd_to_json, walk,
     world::{CndWorld, built_at_now, source_info},
 };
 
+/// Node counts over the whole tree: every slot of every container (a list
+/// item's paragraph, a nested list, a cell's paragraph) is counted.
 #[derive(Debug, Default)]
 pub struct NodeStats {
+    pub nodes: usize,
     pub headings: usize,
     pub paragraphs: usize,
     pub tables: usize,
+    pub layouts: usize,
     pub quotes: usize,
     pub code: usize,
     pub math: usize,
     pub figures: usize,
     pub images: usize,
+    pub admonitions: usize,
     pub lists: usize,
     pub terms: usize,
     pub max_heading_level: i32,
@@ -36,7 +42,6 @@ pub struct NodeStats {
 pub struct TableStats {
     pub with_caption: usize,
     pub with_fig_number: usize,
-    pub with_raw_typst: usize,
     pub with_label: usize,
 }
 
@@ -69,151 +74,142 @@ pub fn cnd_for_example(name: &str) -> Cnd {
     cnd_from_document(&doc, source_info(&world), built_at_now())
 }
 
-pub fn heading_texts(nodes: &[CndNode]) -> Vec<String> {
+/// Every node of the tree in reading order, every slot entered.
+pub fn all_nodes(nodes: &[CndNode]) -> Vec<&CndNode> {
     let mut out = Vec::new();
-    fn walk(nodes: &[CndNode], out: &mut Vec<String>) {
-        for node in nodes {
-            if let CndNode::Heading(h) = node {
-                out.push(h.text.clone());
-                walk(&h.children, out);
-            }
-        }
-    }
-    walk(nodes, &mut out);
+    walk(nodes, &mut |node| out.push(node));
     out
 }
 
+/// Every node of the CND: the body, then the content of every footnote.
+pub fn all_nodes_full(cnd: &Cnd) -> Vec<&CndNode> {
+    let mut out = all_nodes(&cnd.nodes);
+    for note in &cnd.footnotes {
+        out.extend(all_nodes(&note.children));
+    }
+    out
+}
+
+/// Every text of every node in `nodes`, in reading order.
+pub fn all_texts(nodes: &[CndNode]) -> Vec<&RichText> {
+    all_nodes(nodes).into_iter().flat_map(|node| node.texts()).collect()
+}
+
+/// The value of the first paragraph among `nodes` (a slot's content), or
+/// `""` when there is none.
+pub fn first_paragraph(nodes: &[CndNode]) -> &str {
+    nodes
+        .iter()
+        .find_map(|node| match node {
+            CndNode::Paragraph(p) => Some(p.text.value.as_str()),
+            _ => None,
+        })
+        .unwrap_or("")
+}
+
+/// A list item's own text: the value of its paragraph.
+pub fn item_text(item: &ListItem) -> &str {
+    first_paragraph(&item.children)
+}
+
+/// The lists nested directly in a list item.
+pub fn nested_lists(item: &ListItem) -> Vec<&ListNode> {
+    item.children
+        .iter()
+        .filter_map(|node| match node {
+            CndNode::List(list) => Some(list),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The items of the lists nested in a list item, in order.
+pub fn nested_items(item: &ListItem) -> Vec<&ListItem> {
+    nested_lists(item)
+        .into_iter()
+        .flat_map(|list| list.items.iter())
+        .collect()
+}
+
+/// The paragraph values of a footnote's content, joined by a space.
+pub fn footnote_text(note: &typst_cnd::Footnote) -> String {
+    all_nodes(&note.children)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Paragraph(p) => Some(p.text.value.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn heading_texts(nodes: &[CndNode]) -> Vec<String> {
+    all_nodes(nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Heading(h) => Some(h.text.value.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn walk_nodes(nodes: &[CndNode], stats: &mut NodeStats) {
-    for node in nodes {
+    walk(nodes, &mut |node| {
+        stats.nodes += 1;
         stats.ids.insert(node.id());
+        stats.pages.insert(node.base().location.page);
+        if let Some(label) = &node.base().label {
+            stats.labels.insert(label.clone());
+        }
         match node {
             CndNode::Heading(h) => {
                 stats.headings += 1;
                 stats.max_heading_level = stats.max_heading_level.max(h.level);
-                stats.pages.insert(h.base.location.page);
-                if let Some(label) = &h.base.label {
-                    stats.labels.insert(label.clone());
-                }
-                walk_nodes(&h.children, stats);
             }
-            CndNode::Paragraph(p) => {
-                stats.paragraphs += 1;
-                stats.pages.insert(p.base.location.page);
-                if let Some(label) = &p.base.label {
-                    stats.labels.insert(label.clone());
-                }
-            }
-            CndNode::Table(t) => {
-                stats.tables += 1;
-                stats.pages.insert(t.base.location.page);
-                if let Some(label) = &t.base.label {
-                    stats.labels.insert(label.clone());
-                }
-            }
-            CndNode::Quote(q) => {
-                stats.quotes += 1;
-                stats.pages.insert(q.base.location.page);
-                if let Some(label) = &q.base.label {
-                    stats.labels.insert(label.clone());
-                }
-            }
-            CndNode::Code(c) => {
-                stats.code += 1;
-                stats.pages.insert(c.base.location.page);
-                if let Some(label) = &c.base.label {
-                    stats.labels.insert(label.clone());
-                }
-            }
-            CndNode::Math(m) => {
-                stats.math += 1;
-                stats.pages.insert(m.base.location.page);
-                if let Some(label) = &m.base.label {
-                    stats.labels.insert(label.clone());
-                }
-            }
-            CndNode::Figure(f) => {
-                stats.figures += 1;
-                stats.pages.insert(f.base.location.page);
-                if let Some(label) = &f.base.label {
-                    stats.labels.insert(label.clone());
-                }
-                walk_nodes(&f.children, stats);
-            }
-            CndNode::Image(img) => {
-                stats.images += 1;
-                stats.pages.insert(img.base.location.page);
-                if let Some(label) = &img.base.label {
-                    stats.labels.insert(label.clone());
-                }
-            }
-            CndNode::List(l) => {
-                stats.lists += 1;
-                stats.pages.insert(l.base.location.page);
-                if let Some(label) = &l.base.label {
-                    stats.labels.insert(label.clone());
-                }
-            }
-            CndNode::Terms(t) => {
-                stats.terms += 1;
-                stats.pages.insert(t.base.location.page);
-                if let Some(label) = &t.base.label {
-                    stats.labels.insert(label.clone());
-                }
-            }
+            CndNode::Paragraph(_) => stats.paragraphs += 1,
+            CndNode::Table(_) => stats.tables += 1,
+            CndNode::Layout(_) => stats.layouts += 1,
+            CndNode::Quote(_) => stats.quotes += 1,
+            CndNode::Code(_) => stats.code += 1,
+            CndNode::Math(_) => stats.math += 1,
+            CndNode::Figure(_) => stats.figures += 1,
+            CndNode::Image(_) => stats.images += 1,
+            CndNode::Admonition(_) => stats.admonitions += 1,
+            CndNode::List(_) => stats.lists += 1,
+            CndNode::Terms(_) => stats.terms += 1,
         }
-    }
+    });
 }
 
-/// Table stats. A captioned table's caption/number/label now live on the
-/// wrapping `FigureNode` (ADR 0010), not on the `TableNode` itself — this
-/// walk attributes them accordingly instead of reading removed fields.
+/// Stats of the tabular nodes. A captioned table's caption/number/label
+/// live on the wrapping `FigureNode` (ADR 0010); a grid in a figure is a
+/// `layout`, the 0.5 form of the former grid-kind table, and counts here as
+/// it did then.
 pub fn table_stats(nodes: &[CndNode]) -> TableStats {
     let mut stats = TableStats::default();
-    fn walk(nodes: &[CndNode], stats: &mut TableStats) {
-        for node in nodes {
-            match node {
-                CndNode::Table(table) => {
-                    if table.raw.as_ref().is_some_and(|r| !r.value.is_empty()) {
-                        stats.with_raw_typst += 1;
+    walk(nodes, &mut |node| match node {
+        CndNode::Table(table) if table.base.label.is_some() => stats.with_label += 1,
+        CndNode::Figure(figure) => {
+            let has_caption =
+                figure.caption.as_ref().is_some_and(|c| !c.value.is_empty());
+            let has_fig_number =
+                figure.numbering.as_ref().is_some_and(|n| !n.value.is_empty());
+            for child in &figure.children {
+                if matches!(child, CndNode::Table(_) | CndNode::Layout(_)) {
+                    if has_caption {
+                        stats.with_caption += 1;
                     }
-                    if table.base.label.is_some() {
+                    if has_fig_number {
+                        stats.with_fig_number += 1;
+                    }
+                    if figure.base.label.is_some() {
                         stats.with_label += 1;
                     }
                 }
-                CndNode::Figure(figure) => {
-                    let has_caption =
-                        figure.caption.as_ref().is_some_and(|c| !c.is_empty());
-                    let has_fig_number =
-                        figure.number.as_ref().is_some_and(|n| !n.is_empty());
-                    for child in &figure.children {
-                        if let CndNode::Table(table) = child {
-                            if has_caption {
-                                stats.with_caption += 1;
-                            }
-                            if has_fig_number {
-                                stats.with_fig_number += 1;
-                            }
-                            if table.raw.as_ref().is_some_and(|r| !r.value.is_empty()) {
-                                stats.with_raw_typst += 1;
-                            }
-                            if figure.base.label.is_some() {
-                                stats.with_label += 1;
-                            }
-                        }
-                    }
-                }
-                CndNode::Heading(h) => walk(&h.children, stats),
-                CndNode::Paragraph(_)
-                | CndNode::Quote(_)
-                | CndNode::Code(_)
-                | CndNode::Math(_)
-                | CndNode::Image(_)
-                | CndNode::List(_)
-                | CndNode::Terms(_) => {}
             }
         }
-    }
-    walk(nodes, &mut stats);
+        _ => {}
+    });
     stats
 }
 
@@ -234,17 +230,7 @@ pub fn assert_cnd_contract(cnd: &Cnd) {
 pub fn assert_unique_ids(nodes: &[CndNode]) {
     let mut stats = NodeStats::default();
     walk_nodes(nodes, &mut stats);
-    let total = stats.headings
-        + stats.paragraphs
-        + stats.tables
-        + stats.quotes
-        + stats.code
-        + stats.math
-        + stats.figures
-        + stats.images
-        + stats.lists
-        + stats.terms;
-    assert_eq!(stats.ids.len(), total, "duplicate node ids detected");
+    assert_eq!(stats.ids.len(), stats.nodes, "duplicate node ids detected");
 }
 
 /// Slice a string by `[start, end)` Unicode code-point offsets — the
@@ -255,45 +241,27 @@ pub fn codepoint_slice(text: &str, span: &[i64]) -> String {
     chars[span[0] as usize..span[1] as usize].iter().collect()
 }
 
-/// Number of nodes whose forward `refs` name `target` — the derived
+/// Number of nodes whose texts' forward `refs` name `target` — the derived
 /// incoming-edge count (ADR 0008 removed the materialized `refs_from`; the
 /// SDK computes this via `Cnd.incoming`). Keyed by label, since that is
 /// what an edge carries (ADR 0017).
 pub fn incoming_count(nodes: &[CndNode], target: &str) -> usize {
-    fn walk(nodes: &[CndNode], target: &str, count: &mut usize) {
-        for node in nodes {
-            if node.base().refs.iter().any(|reference| reference.label == target) {
-                *count += 1;
-            }
-            match node {
-                CndNode::Heading(h) => walk(&h.children, target, count),
-                CndNode::Figure(f) => walk(&f.children, target, count),
-                _ => {}
-            }
-        }
-    }
-    let mut count = 0;
-    walk(nodes, target, &mut count);
-    count
+    all_nodes(nodes)
+        .into_iter()
+        .filter(|node| {
+            node.texts()
+                .iter()
+                .any(|text| text.refs.iter().any(|reference| reference.label == target))
+        })
+        .count()
 }
 
 /// Collect every node label in the tree.
 pub fn node_labels(nodes: &[CndNode]) -> HashSet<String> {
-    fn walk(nodes: &[CndNode], out: &mut HashSet<String>) {
-        for node in nodes {
-            if let Some(label) = &node.base().label {
-                out.insert(label.clone());
-            }
-            match node {
-                CndNode::Heading(h) => walk(&h.children, out),
-                CndNode::Figure(f) => walk(&f.children, out),
-                _ => {}
-            }
-        }
-    }
-    let mut out = HashSet::new();
-    walk(nodes, &mut out);
-    out
+    all_nodes(nodes)
+        .into_iter()
+        .filter_map(|node| node.base().label.clone())
+        .collect()
 }
 
 /// Every forward `refs` edge must name a label some node carries (ADR
@@ -301,10 +269,9 @@ pub fn node_labels(nodes: &[CndNode]) -> HashSet<String> {
 /// `refs_from` (ADR 0008), and the SDK derives incoming edges on demand.
 pub fn assert_refs_resolve(nodes: &[CndNode]) {
     let labels = node_labels(nodes);
-
-    fn check(nodes: &[CndNode], labels: &HashSet<String>) {
-        for node in nodes {
-            for reference in &node.base().refs {
+    for node in all_nodes(nodes) {
+        for text in node.texts() {
+            for reference in &text.refs {
                 assert!(
                     labels.contains(&reference.label),
                     "refs target @{} from {} resolves to no node",
@@ -312,39 +279,25 @@ pub fn assert_refs_resolve(nodes: &[CndNode]) {
                     node.id()
                 );
             }
-            match node {
-                CndNode::Heading(h) => check(&h.children, labels),
-                CndNode::Figure(f) => check(&f.children, labels),
-                _ => {}
-            }
         }
     }
-    check(nodes, &labels);
 }
 
-/// Labels are globally unique across nodes and both pools (ADR 0017) — the
-/// invariant that lets an edge name its target by label alone. Typst itself
-/// permits duplicate labels (it only errors on ambiguous *resolution*), so
-/// this is a real thing a document can violate, not a formality.
+/// Labels are globally unique across nodes, footnote content and both pools
+/// (ADR 0017) — the invariant that lets an edge name its target by label
+/// alone. Typst itself permits duplicate labels (it only errors on ambiguous
+/// *resolution*), so this is a real thing a document can violate, not a
+/// formality.
 pub fn assert_labels_globally_unique(cnd: &Cnd) {
     let mut seen: HashSet<String> = HashSet::new();
     let mut claim = |label: &str, owner: String| {
         assert!(seen.insert(label.to_string()), "duplicate label @{label} on {owner}");
     };
-
-    fn walk(nodes: &[CndNode], claim: &mut impl FnMut(&str, String)) {
-        for node in nodes {
-            if let Some(label) = &node.base().label {
-                claim(label, format!("node {}", node.id()));
-            }
-            match node {
-                CndNode::Heading(h) => walk(&h.children, claim),
-                CndNode::Figure(f) => walk(&f.children, claim),
-                _ => {}
-            }
+    for node in all_nodes_full(cnd) {
+        if let Some(label) = &node.base().label {
+            claim(label, format!("node {}", node.id()));
         }
     }
-    walk(&cnd.nodes, &mut claim);
     for entry in &cnd.bibliography {
         claim(&entry.label, format!("bibliography entry {}", entry.id));
     }
@@ -353,7 +306,7 @@ pub fn assert_labels_globally_unique(cnd: &Cnd) {
     }
 }
 
-/// Every `cites`/`footnotes` edge on a node must resolve to a real pool
+/// Every `cites`/`footnotes` edge on a text must resolve to a real pool
 /// entry, and pool-entry ids must be globally unique and disjoint from
 /// node ids (proposal 0004 invariants).
 pub fn assert_pool_refs_resolve(cnd: &Cnd) {
@@ -367,43 +320,33 @@ pub fn assert_pool_refs_resolve(cnd: &Cnd) {
     // Each family resolves in its OWN domain — existence is not enough,
     // because labels are unique document-wide, so a `cites` edge naming a
     // footnote would still resolve to something (spec §5).
-    fn walk(
-        nodes: &[CndNode],
-        footnote_labels: &HashSet<&str>,
-        bib_labels: &HashSet<&str>,
-    ) {
-        for node in nodes {
-            for reference in &node.base().footnotes {
+    let nodes = all_nodes_full(cnd);
+    for node in &nodes {
+        for text in node.texts() {
+            for reference in &text.footnotes {
                 assert!(
                     footnote_labels.contains(reference.label.as_str()),
                     "footnote edge @{} does not resolve in the footnotes pool",
                     reference.label
                 );
             }
-            for citation in &node.base().cites {
+            for citation in &text.cites {
                 assert!(
                     bib_labels.contains(citation.label.as_str()),
                     "cite edge @{} does not resolve in the bibliography pool",
                     citation.label
                 );
             }
-            match node {
-                CndNode::Heading(h) => walk(&h.children, footnote_labels, bib_labels),
-                CndNode::Figure(f) => walk(&f.children, footnote_labels, bib_labels),
-                _ => {}
-            }
         }
     }
-    walk(&cnd.nodes, &footnote_labels, &bib_labels);
 
     // Pool ids are unique and disjoint from each other and from node ids.
-    let mut node_ids = NodeStats::default();
-    walk_nodes(&cnd.nodes, &mut node_ids);
+    let node_ids: HashSet<uuid::Uuid> = nodes.iter().map(|node| node.id()).collect();
     assert_eq!(footnote_ids.len(), cnd.footnotes.len(), "duplicate footnote ids");
     assert_eq!(bib_ids.len(), cnd.bibliography.len(), "duplicate bib ids");
     assert!(footnote_ids.is_disjoint(&bib_ids), "footnote/bib ids overlap");
     assert!(
-        footnote_ids.is_disjoint(&node_ids.ids) && bib_ids.is_disjoint(&node_ids.ids),
+        footnote_ids.is_disjoint(&node_ids) && bib_ids.is_disjoint(&node_ids),
         "pool ids overlap node ids"
     );
 }
@@ -423,23 +366,9 @@ pub fn label_exists(nodes: &[CndNode], label: &str) -> bool {
 }
 
 pub fn find_by_label<'a>(nodes: &'a [CndNode], label: &str) -> Option<&'a CndNode> {
-    for node in nodes {
-        let node_label = node.base().label.as_deref();
-        if node_label == Some(label) {
-            return Some(node);
-        }
-        if let CndNode::Heading(h) = node
-            && let Some(found) = find_by_label(&h.children, label)
-        {
-            return Some(found);
-        }
-        if let CndNode::Figure(f) = node
-            && let Some(found) = find_by_label(&f.children, label)
-        {
-            return Some(found);
-        }
-    }
-    None
+    all_nodes(nodes)
+        .into_iter()
+        .find(|node| node.base().label.as_deref() == Some(label))
 }
 
 pub fn all_example_files() -> Vec<PathBuf> {
@@ -457,26 +386,30 @@ pub fn all_example_files() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Collect paragraph texts in depth-first cnd order (reading order).
+/// The paragraphs of the reading flow, in order: those of the body and of
+/// its sections, read through layouts. A grid used for arrangement is a
+/// `layout` whose cells hold its blocks, in reading order, so its
+/// paragraphs are read where the grid sits — as they were when grids were
+/// flattened. A table's, a list's or a quote's paragraphs are not part of
+/// the flow: what these tests pin is the reading flow, and that the text a
+/// container carries is not *also* emitted as a paragraph of the flow.
 pub fn paragraph_texts_in_order(nodes: &[CndNode]) -> Vec<String> {
     let mut out = Vec::new();
-    fn walk(nodes: &[CndNode], out: &mut Vec<String>) {
+    fn flow(nodes: &[CndNode], out: &mut Vec<String>) {
         for node in nodes {
             match node {
-                CndNode::Paragraph(p) => out.push(p.text.clone()),
-                CndNode::Heading(h) => walk(&h.children, out),
-                CndNode::Table(_)
-                | CndNode::Quote(_)
-                | CndNode::Code(_)
-                | CndNode::Math(_)
-                | CndNode::Figure(_)
-                | CndNode::Image(_)
-                | CndNode::List(_)
-                | CndNode::Terms(_) => {}
+                CndNode::Paragraph(p) => out.push(p.text.value.clone()),
+                CndNode::Heading(h) => flow(&h.children, out),
+                CndNode::Layout(l) => {
+                    for cell in &l.cells {
+                        flow(&cell.children, out);
+                    }
+                }
+                _ => {}
             }
         }
     }
-    walk(nodes, &mut out);
+    flow(nodes, &mut out);
     out
 }
 
@@ -509,25 +442,62 @@ pub fn tags_under_heading(nodes: &[CndNode], label: &str) -> Vec<String> {
     paragraph_tags_in_order(&heading.children)
 }
 
-/// Collect list nodes in depth-first cnd order.
+/// Every list node in reading order, nested lists included.
 pub fn find_lists(nodes: &[CndNode]) -> Vec<&ListNode> {
-    let mut out = Vec::new();
-    fn walk<'a>(nodes: &'a [CndNode], out: &mut Vec<&'a ListNode>) {
-        for node in nodes {
-            match node {
-                CndNode::List(list) => out.push(list),
-                CndNode::Heading(h) => walk(&h.children, out),
-                CndNode::Paragraph(_)
-                | CndNode::Table(_)
-                | CndNode::Quote(_)
-                | CndNode::Code(_)
-                | CndNode::Math(_)
-                | CndNode::Figure(_)
-                | CndNode::Image(_)
-                | CndNode::Terms(_) => {}
-            }
-        }
+    all_nodes(nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::List(list) => Some(list),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The lists not nested in another list's item, in reading order.
+pub fn outer_lists(nodes: &[CndNode]) -> Vec<&ListNode> {
+    let lists = find_lists(nodes);
+    let nested: HashSet<uuid::Uuid> = lists
+        .iter()
+        .flat_map(|list| list.items.iter())
+        .flat_map(nested_lists)
+        .map(|list| list.base.id)
+        .collect();
+    lists
+        .into_iter()
+        .filter(|list| !nested.contains(&list.base.id))
+        .collect()
+}
+
+/// A node's `type`, as the format names it.
+pub fn node_type(node: &CndNode) -> &'static str {
+    match node {
+        CndNode::Heading(_) => "heading",
+        CndNode::Paragraph(_) => "paragraph",
+        CndNode::Quote(_) => "quote",
+        CndNode::Code(_) => "code",
+        CndNode::Math(_) => "math",
+        CndNode::Image(_) => "image",
+        CndNode::Figure(_) => "figure",
+        CndNode::Admonition(_) => "admonition",
+        CndNode::List(_) => "list",
+        CndNode::Terms(_) => "terms",
+        CndNode::Table(_) => "table",
+        CndNode::Layout(_) => "layout",
     }
-    walk(nodes, &mut out);
-    out
+}
+
+/// The types of `nodes`, in order.
+pub fn node_types(nodes: &[CndNode]) -> Vec<&'static str> {
+    nodes.iter().map(node_type).collect()
+}
+
+/// The values of the paragraphs among `nodes` (not nested ones), in order.
+pub fn paragraph_values(nodes: &[CndNode]) -> Vec<&str> {
+    nodes
+        .iter()
+        .filter_map(|node| match node {
+            CndNode::Paragraph(p) => Some(p.text.value.as_str()),
+            _ => None,
+        })
+        .collect()
 }

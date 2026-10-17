@@ -1,3 +1,4 @@
+pub mod admonition;
 pub mod ancestry;
 pub mod code;
 pub mod convert;
