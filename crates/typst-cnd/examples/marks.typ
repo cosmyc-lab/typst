@@ -28,6 +28,16 @@ Join *a**b* here.
 
 Read the #link("https://example.com")[`api`] docs.
 
+Styles: #strike[gone], #highlight[lit], H#sub[2]O and #underline[under].
+
+// An equation written in a function's body: its source is the function's,
+// not this call's, so the text is this instance read from its content.
+#let sq(a) = $#a^2$
+#let ee = $x + y$
+Calls: #sq[y] and #ee here.
+
+Inserted $#[x] + 1$ content.
+
 #pdf.artifact[★] $w$
 
 $z$

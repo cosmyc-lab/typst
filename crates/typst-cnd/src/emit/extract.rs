@@ -1,3 +1,5 @@
+use std::ops::{ControlFlow, Range};
+
 use ecow::EcoString;
 use typst_library::World;
 use typst_library::engine::Engine;
@@ -5,7 +7,7 @@ use typst_library::foundations::{
     Content, Label, NativeElement, PlainText, StyleChain, Value,
 };
 use typst_library::introspection::{Location, Tag, TagElem};
-use typst_library::math::EquationElem;
+use typst_library::math::{AttachElem, EquationElem, FracElem, RootElem};
 use typst_library::model::{
     ArtifactElem, CitationForm, CiteElem, Destination, EmphElem, EnumElem, FigureElem,
     FootnoteElem, HeadingElem, LinkElem, LinkMarker, LinkTarget, ListElem, PdfMarkerTag,
@@ -15,7 +17,7 @@ use typst_library::text::{
     HighlightElem, LinebreakElem, RawElem, StrikeElem, SubElem, SuperElem, UnderlineElem,
 };
 use typst_library::visualize::ImageElem;
-use typst_syntax::Span;
+use typst_syntax::{FileId, Span};
 
 use crate::rich_text::{
     CODE, EMPH, HIGHLIGHT, MATH, Mark, RawSource, STRIKE, STRONG, SUB, SUP, UNDERLINE,
@@ -30,31 +32,156 @@ use crate::rich_text::{
 /// once from the synthesized `RawLine`, once from the `TextElem` inside
 /// `RawLine.body`).
 ///
-/// With no source at hand, an inline equation contributes the text its
-/// realization walks to, which is none.
+/// With no source at hand, an inline equation contributes its linear form
+/// ([`math_linear`]).
 pub fn extract_text(content: &Content) -> EcoString {
     extract_rich(content, &no_source).value.into()
 }
 
+/// The Typst source a span covers: its file, its byte range there and the
+/// text verbatim.
+#[derive(Debug, Clone)]
+pub struct SpanSource {
+    pub file: FileId,
+    pub range: Range<usize>,
+    pub text: String,
+}
+
+/// How a walk reads the source of a span.
+pub type SourceLookup<'a> = &'a dyn Fn(Span) -> Option<SpanSource>;
+
 /// A source lookup that never finds anything.
-pub fn no_source(_: Span) -> Option<String> {
+pub fn no_source(_: Span) -> Option<SpanSource> {
     None
 }
 
-/// The Typst source `span` covers, verbatim, read from the engine's world.
-/// `None` for a detached span or a file the world cannot give back.
-pub fn source_text(engine: &Engine, span: Span) -> Option<String> {
-    let id = span.id()?;
-    let source = engine.world.source(id).ok()?;
-    let node = source.find(span)?;
-    source.text().get(node.range()).map(str::to_owned)
+/// The Typst source `span` covers, read from the engine's world. `None` for
+/// a detached span or a file the world cannot give back.
+pub fn source_text(engine: &Engine, span: Span) -> Option<SpanSource> {
+    let file = span.id()?;
+    let source = engine.world.source(file).ok()?;
+    let range = source.find(span)?.range();
+    let text = source.text().get(range.clone())?.to_owned();
+    Some(SpanSource { file, range, text })
 }
 
-/// The source of an inline equation without its `$` delimiters, trimmed.
-/// `None` when `text` is not a `$…$` equation (an equation built in code).
-fn math_source(text: &str) -> Option<String> {
-    let inner = text.strip_prefix('$')?.strip_suffix('$')?;
-    Some(inner.trim().to_owned())
+/// The source of this inline equation instance, without its `$` delimiters
+/// and trimmed.
+///
+/// `None` when the source does not describe this instance: an equation
+/// built in code (no `$…$`), or one whose body holds content written
+/// outside its own source range. That is an equation in a function's body
+/// filled with an argument (`#let sq(a) = $#a^2$`, called as `#sq[y]`):
+/// its source is `#a^2`, while the page shows `y^2`.
+fn instance_source(
+    equation: &Content,
+    body: &Content,
+    lookup: SourceLookup<'_>,
+) -> Option<String> {
+    let own = lookup(equation.span())?;
+    let inner = own.text.strip_prefix('$')?.strip_suffix('$')?.trim().to_owned();
+    let foreign = body.traverse(&mut |element| {
+        let span = element.span();
+        if span.is_detached() {
+            return ControlFlow::Continue(());
+        }
+        match lookup(span) {
+            Some(src)
+                if src.file == own.file
+                    && own.range.start <= src.range.start
+                    && src.range.end <= own.range.end =>
+            {
+                ControlFlow::Continue(())
+            }
+            _ => ControlFlow::Break(()),
+        }
+    });
+    foreign.is_continue().then_some(inner)
+}
+
+/// A linear, readable form of an unrealized equation body, for an equation
+/// whose source is not this instance's: its text and symbols in order, an
+/// attachment as `base_b^t`, a fraction as `num/denom` and a root as
+/// `√x`, any part longer than one character in parentheses (`y^2`,
+/// `(a+b)/2`). It is not Typst source, so a mark over it carries no `raw`.
+pub fn math_linear(body: &Content) -> String {
+    let mut out = String::new();
+    linearize(body, &mut out);
+    out.trim().to_owned()
+}
+
+fn linearize(content: &Content, out: &mut String) {
+    let materialized = StyleChain::default();
+    if let Some(attach) = content.to_packed::<AttachElem>() {
+        let part = |field: Option<Content>| field.as_ref().map(linear_part);
+        let tl = part(attach.tl.get_cloned(materialized));
+        let bl = part(attach.bl.get_cloned(materialized));
+        let t = part(
+            attach
+                .t
+                .get_cloned(materialized)
+                .or(attach.tr.get_cloned(materialized)),
+        );
+        let b = part(
+            attach
+                .b
+                .get_cloned(materialized)
+                .or(attach.br.get_cloned(materialized)),
+        );
+        for (mark, part) in [('_', bl), ('^', tl)] {
+            if let Some(part) = part {
+                out.push(mark);
+                out.push_str(&part);
+            }
+        }
+        linearize(&attach.base, out);
+        for (mark, part) in [('_', b), ('^', t)] {
+            if let Some(part) = part {
+                out.push(mark);
+                out.push_str(&part);
+            }
+        }
+        return;
+    }
+    if let Some(frac) = content.to_packed::<FracElem>() {
+        out.push_str(&linear_part(&frac.num));
+        out.push('/');
+        out.push_str(&linear_part(&frac.denom));
+        return;
+    }
+    if let Some(root) = content.to_packed::<RootElem>() {
+        out.push('√');
+        out.push_str(&linear_part(&root.radicand));
+        return;
+    }
+    if let Some(textable) = content.with::<dyn PlainText>() {
+        let mut text = EcoString::new();
+        textable.plain_text(&mut text);
+        out.push_str(&text);
+        return;
+    }
+    for (_, value) in content.fields() {
+        linearize_value(value, out);
+    }
+}
+
+fn linearize_value(value: Value, out: &mut String) {
+    match value {
+        Value::Content(c) => linearize(&c, out),
+        Value::Array(arr) => {
+            for v in arr {
+                linearize_value(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// One operand of an attachment, fraction or root, in parentheses when it
+/// is longer than one character.
+fn linear_part(content: &Content) -> String {
+    let text = math_linear(content);
+    if text.chars().count() > 1 { format!("({text})") } else { text }
 }
 
 /// Whether the text realized inside `content` was all excluded — every word
@@ -65,10 +192,7 @@ fn math_source(text: &str) -> Option<String> {
 /// at all this is `false`, so a paragraph that never held text keeps
 /// whatever handling it had before exclusion existed. An inline equation
 /// counts as text: its source, read through `source`.
-pub fn is_emptied_by_exclusion(
-    content: &Content,
-    source: &dyn Fn(Span) -> Option<String>,
-) -> bool {
+pub fn is_emptied_by_exclusion(content: &Content, source: SourceLookup<'_>) -> bool {
     let mut out = EcoString::new();
     let mut ctx = MarkerCtx { source: Some(source), ..MarkerCtx::default() };
     walk(content, &mut out, &mut ctx);
@@ -259,10 +383,7 @@ pub(crate) fn link_dest(target: &LinkTarget) -> Option<LinkDest> {
 /// equation's text is its Typst source, read through `source`, with the
 /// realized formula suppressed; its mark carries that source as `raw`
 /// (spec §4.1). Marks and spans come back canonical.
-pub fn extract_rich(
-    content: &Content,
-    source: &dyn Fn(Span) -> Option<String>,
-) -> Extracted {
+pub fn extract_rich(content: &Content, source: SourceLookup<'_>) -> Extracted {
     let mut out = EcoString::new();
     let mut ctx = MarkerCtx { source: Some(source), ..MarkerCtx::default() };
     walk(content, &mut out, &mut ctx);
@@ -328,7 +449,7 @@ pub fn extract_rich(
 #[derive(Default)]
 struct MarkerCtx<'a> {
     /// Where an inline equation's source is read from.
-    source: Option<&'a dyn Fn(Span) -> Option<String>>,
+    source: Option<SourceLookup<'a>>,
     /// Code-point position in `out` so far.
     pos: i64,
     /// Open mark frames, by their element's location.
@@ -545,17 +666,25 @@ fn open_mark(inner: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
         });
     let start = ctx.pos;
     let mut raw = None;
-    if kind == MATH
-        && let Some(source) = ctx.source
-        && let Some(text) = source(inner.span()).as_deref().and_then(math_source)
-    {
+    // An inline equation's text is its source when that source is this
+    // instance's, its linear form otherwise: the formula never vanishes.
+    if let Some(equation) = inner.to_packed::<EquationElem>() {
+        let source = ctx
+            .source
+            .and_then(|lookup| instance_source(inner, &equation.body, lookup));
+        let text = match source {
+            Some(text) => {
+                raw = Some(RawSource::typst(text.clone()));
+                text
+            }
+            None => math_linear(&equation.body),
+        };
         out.push_str(&text);
         ctx.pos += text.chars().count() as i64;
         if !text.is_empty() {
             ctx.collapse_space = false;
         }
         ctx.math.push(loc);
-        raw = Some(RawSource::typst(text));
     }
     if !in_marker {
         ctx.open_marks.push(MarkFrame { loc, kind, start, raw });

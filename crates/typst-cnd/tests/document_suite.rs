@@ -4405,6 +4405,55 @@ fn inline_math_after_an_artifact_is_kept() {
 }
 
 #[test]
+fn strike_highlight_sub_underline_are_marks() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = paragraph_text(&cnd, "Styles:");
+    assert_eq!(mark_slices(text, typst_cnd::STRIKE), ["gone"]);
+    assert_eq!(mark_slices(text, typst_cnd::HIGHLIGHT), ["lit"]);
+    assert_eq!(mark_slices(text, typst_cnd::SUB), ["2"]);
+    assert_eq!(mark_slices(text, typst_cnd::UNDERLINE), ["under"]);
+}
+
+/// The math marks of `text`: (covered text, raw source).
+fn math_marks(text: &RichText) -> Vec<(String, Option<String>)> {
+    text.marks
+        .iter()
+        .filter(|m| m.kind == typst_cnd::MATH)
+        .map(|m| {
+            (
+                codepoint_slice(&text.value, &[m.start, m.end]),
+                m.raw.as_ref().map(|raw| raw.value.clone()),
+            )
+        })
+        .collect()
+}
+
+/// An equation in a parameterized function's body has the function's
+/// source, not this call's: the text is read from this instance instead,
+/// with no `raw`. A parameterless one is its own source.
+#[test]
+fn math_from_a_function_is_this_instance() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = paragraph_text(&cnd, "Calls:");
+    assert!(!text.value.contains("#a"), "{:?}", text.value);
+    assert_eq!(text.value, "Calls: y^2 and x + y here.");
+    assert_eq!(
+        math_marks(text),
+        [("y^2".to_string(), None), ("x + y".to_string(), Some("x + y".to_string()))]
+    );
+}
+
+#[test]
+fn math_with_inserted_content_keeps_its_source() {
+    let cnd = cnd_for_example("marks.typ");
+    let text = paragraph_text(&cnd, "Inserted");
+    assert_eq!(
+        math_marks(text),
+        [("#[x] + 1".to_string(), Some("#[x] + 1".to_string()))]
+    );
+}
+
+#[test]
 fn author_superscript_is_a_sup_mark() {
     let cnd = cnd_for_example("marks.typ");
     let text = paragraph_text(&cnd, "The area");
