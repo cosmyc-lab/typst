@@ -1489,6 +1489,7 @@ fn example_files_exist() {
         "table_kinds.typ",
         "figure_description.typ",
         "ref_exact_targets.typ",
+        "math_refs.typ",
     ] {
         assert!(example_path(name).is_file(), "missing example file: {name}");
     }
@@ -4730,6 +4731,9 @@ fn figure_alt_is_description() {
     assert!(plain.description.is_none(), "{:?}", plain.description);
     let CndNode::Image(image) = &plain.children[0] else { panic!("an image") };
     assert_eq!(image.alt.as_deref(), Some("Cover art"));
+    // A blank `alt` describes nothing.
+    let blank = figure_by_label(&cnd, "fig-blank");
+    assert!(blank.description.is_none(), "{:?}", blank.description);
 }
 
 /// Every table of `table_kinds.typ`, in reading order, figures entered.
@@ -4798,10 +4802,12 @@ fn table_kind_hint_never_leaks() {
 #[test]
 fn ref_never_lands_on_an_unlabelled_target() {
     // Over every example: an edge names a label a node carries, and no
-    // heading holds an edge, since no example writes a reference in a
-    // heading's own text.
+    // heading holds an edge, since no example but `math_refs.typ` writes a
+    // reference in a heading's own text (that one is pinned in
+    // `refs_written_in_a_heading_or_caption_sit_there`).
     for path in all_example_files() {
         let name = path.file_name().and_then(|n| n.to_str()).expect("name");
+        let refs_in_headings = name == "math_refs.typ";
         let cnd = cnd_for_example(name);
         let nodes = all_nodes_full(&cnd);
         let carries = |label: &str| {
@@ -4817,7 +4823,9 @@ fn ref_never_lands_on_an_unlabelled_target() {
                     );
                 }
             }
-            if let CndNode::Heading(heading) = node {
+            if let CndNode::Heading(heading) = node
+                && !refs_in_headings
+            {
                 assert!(
                     heading.text.refs.is_empty(),
                     "{name}: heading {:?} holds {:?}",
@@ -4876,4 +4884,86 @@ fn ref_never_lands_on_an_unlabelled_target() {
         refs(&paragraph.text),
         [("fig-plain".to_string(), "Table\u{a0}1".to_string())]
     );
+}
+
+/// Every `(label, span)` of a text's `refs`.
+fn ref_pairs(text: &RichText) -> Vec<(&str, Option<Vec<i64>>)> {
+    text.refs
+        .iter()
+        .map(|r| (r.label.as_str(), r.text_span.clone()))
+        .collect()
+}
+
+/// Every `(label, span)` of a text's `cites`.
+fn cite_pairs(text: &RichText) -> Vec<(&str, Option<Vec<i64>>)> {
+    text.cites
+        .iter()
+        .map(|c| (c.label.as_str(), c.text_span.clone()))
+        .collect()
+}
+
+#[test]
+fn edges_in_inline_math_sit_on_their_text() {
+    let cnd = cnd_for_example("math_refs.typ");
+    let target = find_heading(&cnd.nodes, "Target");
+    let paragraph = paragraph_at(&target.children, 0);
+    assert!(paragraph.text.value.starts_with("Inline math"), "{:?}", paragraph.text);
+    // Span-less: a span may not reach into the atomic math mark.
+    assert_eq!(ref_pairs(&paragraph.text), [("sec-target", None)]);
+    assert_eq!(cite_pairs(&paragraph.text), [("knuth", None)]);
+
+    // In a caption, the same.
+    let figure = figure_by_label(&cnd, "fig-math");
+    let caption = figure.caption.as_ref().expect("a caption");
+    assert_eq!(ref_pairs(caption), [("sec-target", None)]);
+
+    // In a term, on the term only.
+    let terms = find_terms(&cnd.nodes);
+    let item = &terms[0].items[0];
+    assert_eq!(ref_pairs(&item.term), [("sec-target", None)]);
+    let definition = paragraph_at(&item.children, 0);
+    assert!(definition.text.refs.is_empty(), "{:?}", definition.text.refs);
+
+    // A block equation is a math node: no edge, and no copy of its reference
+    // anywhere else: every edge to `sec-target` is one of the three above,
+    // or the heading that names it.
+    let holders: Vec<_> = all_nodes_full(&cnd)
+        .into_iter()
+        .flat_map(|node| {
+            node.texts()
+                .into_iter()
+                .filter(|text| text.refs.iter().any(|r| r.label == "sec-target"))
+                .map(move |text| (node_type(node), text.value.clone()))
+        })
+        .collect();
+    assert_eq!(
+        holders,
+        [
+            ("paragraph", paragraph.text.value.clone()),
+            ("figure", caption.value.clone()),
+            ("terms", item.term.value.clone()),
+            ("heading", "Section naming".to_string()),
+        ]
+    );
+    let after = paragraph_at(&target.children, 2);
+    assert_eq!(after.text.value, "After the block equation.");
+    assert!(after.text.refs.is_empty(), "{:?}", after.text.refs);
+}
+
+#[test]
+fn refs_written_in_a_heading_or_caption_sit_there() {
+    let cnd = cnd_for_example("math_refs.typ");
+    let heading = find_heading(&cnd.nodes, "Section naming");
+    assert_eq!(ref_pairs(&heading.text), [("sec-target", None)]);
+    let figure = figure_by_label(&cnd, "fig-naming");
+    let caption = figure.caption.as_ref().expect("a caption");
+    assert_eq!(ref_pairs(caption), [("fig-math", None)]);
+    // Nothing else refers to `fig-math`.
+    let count = all_nodes_full(&cnd)
+        .into_iter()
+        .flat_map(|node| node.texts())
+        .flat_map(|text| &text.refs)
+        .filter(|r| r.label == "fig-math")
+        .count();
+    assert_eq!(count, 1);
 }

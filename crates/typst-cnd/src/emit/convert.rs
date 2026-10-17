@@ -789,6 +789,7 @@ fn realized_edges(content: &Content) -> TextRecord {
             MarkerKind::Link(dest) if !text.link_targets.contains(&dest) => {
                 text.link_targets.push(dest);
             }
+            MarkerKind::MathCite(cite) => text.cite_markers.push(math_cite_marker(&cite)),
             _ => {}
         }
     }
@@ -1227,6 +1228,7 @@ pub fn make_record(
             MarkerKind::Link(dest) => {
                 link_markers.push((dest.clone(), marker.span));
             }
+            MarkerKind::MathCite(_) => {}
         }
     }
 
@@ -1240,6 +1242,13 @@ pub fn make_record(
     let mut cite_markers = collect_cite_markers(content);
     for cite in &mut cite_markers {
         cite.span = cite.loc.and_then(|loc| cite_span.get(&loc).copied());
+    }
+    // A citation in an inline equation has no tags: the walk reads it from
+    // the equation's body (`extract::math_edges`).
+    for marker in markers {
+        if let MarkerKind::MathCite(cite) = &marker.kind {
+            cite_markers.push(math_cite_marker(cite));
+        }
     }
 
     let state_metadata = match location {
@@ -1258,6 +1267,18 @@ pub fn make_record(
         link_markers,
     };
     Ok((record, text))
+}
+
+/// The marker of a citation written in an inline equation: no location, no
+/// span (see `extract::math_edges`).
+fn math_cite_marker(cite: &Packed<CiteElem>) -> CiteMarker {
+    CiteMarker {
+        key: cite.key,
+        loc: None,
+        form: extract::citation_form_str(cite.form.get(StyleChain::default())),
+        supplement: extract::cite_supplement(cite),
+        span: None,
+    }
 }
 
 /// Collect citation markers (location + form/supplement) occurring in

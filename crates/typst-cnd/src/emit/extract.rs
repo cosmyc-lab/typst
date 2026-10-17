@@ -347,6 +347,10 @@ pub enum MarkerKind {
     Cite(Location),
     /// Footnote; payload is the marker's own location.
     Footnote(Location),
+    /// Citation written inside an inline equation. The equation is realized
+    /// as one opaque formula, so the citation has no tags, no location and
+    /// no span: it is read from the equation's body as authored.
+    MathCite(Packed<CiteElem>),
     /// `LinkElem` (ADR 0024, cnd-sdk); payload is the narrowed destination
     /// (see [`LinkDest`]). The marker's own `Tag::Start`/`Tag::End` bracket
     /// the whole link body, so this is captured like `Cite`/`Footnote`
@@ -717,10 +721,51 @@ fn open_mark(inner: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
     let mut raw = None;
     if let Some(equation) = inner.to_packed::<EquationElem>() {
         raw = push_equation(inner, &equation.body, out, ctx);
+        math_edges(&equation.body, ctx);
         ctx.math.push(loc);
     }
     if !in_marker {
         ctx.open_marks.push(MarkFrame { loc, kind, start, raw });
+    }
+}
+
+/// Keep the references and citations written in an inline equation's
+/// `body` as edges of the text holding it. An inline equation is realized
+/// as one opaque formula, which renders their text but leaves no marker to
+/// span: each edge has no span, which a span reaching into the atomic
+/// `math` mark could not express anyway (spec §4.1 rule 4).
+///
+/// Met as authored ([`label_text`]), they join the text's bare references
+/// and citations. Realized, a reference is a span-less marker and a
+/// citation a [`MarkerKind::MathCite`]. One written in a term is the
+/// term's, never the description paragraph's.
+fn math_edges(body: &Content, ctx: &mut MarkerCtx<'_>) {
+    if !ctx.bare && (!ctx.term_labels.is_empty() || !ctx.artifacts.is_empty()) {
+        return;
+    }
+    let mut refs = Vec::new();
+    let mut cites = Vec::new();
+    traverse_kept(body, &mut |element| {
+        if let Some(reference) = element.to_packed::<RefElem>() {
+            refs.push(reference.clone());
+        } else if let Some(cite) = element.to_packed::<CiteElem>() {
+            cites.push(cite.clone());
+        }
+    });
+    if ctx.bare {
+        ctx.bare_refs.extend(refs);
+        ctx.bare_cites.extend(cites);
+        return;
+    }
+    for reference in refs {
+        ctx.done.push(ExtractedMarker {
+            kind: MarkerKind::Ref(reference.target),
+            span: None,
+        });
+    }
+    for cite in cites {
+        ctx.done
+            .push(ExtractedMarker { kind: MarkerKind::MathCite(cite), span: None });
     }
 }
 
@@ -801,6 +846,7 @@ fn walk_bare(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) ->
     let mut raw = None;
     if let Some(equation) = content.to_packed::<EquationElem>() {
         raw = push_equation(content, &equation.body, out, ctx);
+        math_edges(&equation.body, ctx);
     } else if let Some(textable) = content.with::<dyn PlainText>() {
         push_plain(textable, out, ctx);
     } else {

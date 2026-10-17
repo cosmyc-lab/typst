@@ -47,8 +47,12 @@ pub fn from_figure(
     node.kind = figure_kind(&figure, styles);
     // Typst's `alt` is the text equivalent of the figure's visual, which is
     // what the description is (cnd-sdk spec §6.7). An image's own `alt`
-    // stays on the image.
-    node.description = figure.alt.get_cloned(styles).map(RichText::plain);
+    // stays on the image. A blank `alt` describes nothing.
+    node.description = figure
+        .alt
+        .get_cloned(styles)
+        .filter(|alt| !alt.trim().is_empty())
+        .map(RichText::plain);
     if drawing {
         node.raw = convert::source_text(engine, figure.body.span()).map(RawSource::typst);
     }

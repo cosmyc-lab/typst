@@ -16,3 +16,9 @@
 ) <fig-plain>
 
 The shares are in @fig-shares.
+
+#figure(
+  image("newsletter/newsletter-cover.png", width: 3cm),
+  alt: "  ",
+  caption: [Blank alt],
+) <fig-blank>
