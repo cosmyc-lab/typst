@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::emit::convert::ConvertContext;
 use crate::emit::extract::LinkDest;
-use crate::model::{CndNode, LinkRef, NodeRef, TextSlot};
+use crate::model::{LinkRef, NodeRef, TextSlot};
 
 /// `(source node, source text, target node, the label the marker names —
 /// none for a location destination —, the marker's text span)`.
@@ -60,13 +60,27 @@ pub fn resolve_refs(ctx: &mut ConvertContext, introspector: &dyn Introspector) {
 /// target by the label it carries, and is dropped when it carries none:
 /// there is nothing to name it by.
 fn set_refs(ctx: &mut ConvertContext, edges: Vec<RefEdge>) {
-    for (source, slot, target, marker_label, span) in edges {
-        let Some(label) = node_label(ctx, target) else { continue };
-        if marker_label.is_some_and(|marker| marker != label) {
-            continue;
+    let labels = ctx.node_labels();
+    let refs: Vec<(Uuid, TextSlot, NodeRef)> = edges
+        .into_iter()
+        .filter_map(|(source, slot, target, marker_label, span)| {
+            let label = labels.get(&target)?.clone();
+            if marker_label.is_some_and(|marker| marker != label) {
+                return None;
+            }
+            let text_span = span.map(|(s, e)| vec![s, e]);
+            Some((source, slot, NodeRef { label, text_span }))
+        })
+        .collect();
+    ctx.edit_texts(refs, |text, reference| {
+        // Dedup by target label (one edge per target per node); the first
+        // occurrence — the primary, span-carrying path — wins. Labels are
+        // globally unique (ADR 0017), so this is the same dedup the target
+        // id used to give.
+        if !text.refs.iter().any(|known| known.label == reference.label) {
+            text.refs.push(reference);
         }
-        set_ref(ctx, source, slot, label, span);
-    }
+    });
 }
 
 /// Resolve `LinkElem` markers (ADR 0024, cnd-sdk) into `links` and `refs`
@@ -115,12 +129,13 @@ pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) 
         }
     }
 
-    for (source_id, slot, href, span) in links {
-        if let Some(text) = ctx.node_mut(source_id).and_then(|node| node.text_mut(slot)) {
-            text.links
-                .push(LinkRef { href, text_span: normalize_link_span(span) });
-        }
-    }
+    let links = links
+        .into_iter()
+        .map(|(source_id, slot, href, span)| {
+            (source_id, slot, LinkRef { href, text_span: normalize_link_span(span) })
+        })
+        .collect();
+    ctx.edit_texts(links, |text, link| text.links.push(link));
 
     set_refs(ctx, ref_edges);
 }
@@ -194,50 +209,6 @@ fn resolve_label(
         return None;
     }
     ctx.location_to_id.get(&location).copied()
-}
-
-fn node_label(ctx: &ConvertContext, id: Uuid) -> Option<String> {
-    let mut label = None;
-    ctx.walk_all(&mut |node| {
-        if node.id() == id {
-            label = node.base().label.clone();
-        }
-    });
-    label
-}
-
-fn set_ref(
-    ctx: &mut ConvertContext,
-    source: Uuid,
-    slot: TextSlot,
-    label: String,
-    span: Option<(i64, i64)>,
-) {
-    if let Some(text) = ctx.node_mut(source).and_then(|node| node.text_mut(slot)) {
-        let refs = &mut text.refs;
-        // Dedup by target label (one edge per target per node); the first
-        // occurrence — the primary, span-carrying path — wins. Labels are
-        // globally unique (ADR 0017), so this is the same dedup the target
-        // id used to give.
-        if !refs.iter().any(|reference| reference.label == label) {
-            refs.push(NodeRef { label, text_span: span.map(|(s, e)| vec![s, e]) });
-        }
-    }
-}
-
-/// The node with `id`, in any slot of the tree.
-pub fn find_node_mut(nodes: &mut [CndNode], id: Uuid) -> Option<&mut CndNode> {
-    for node in nodes {
-        if node.id() == id {
-            return Some(node);
-        }
-        for list in node.child_lists_mut() {
-            if let Some(found) = find_node_mut(list, id) {
-                return Some(found);
-            }
-        }
-    }
-    None
 }
 
 /// Build label lookup from records and labelled introspector elements.

@@ -263,14 +263,46 @@ impl ConvertContext {
         records
     }
 
-    /// The node with `id`, in the body or in a footnote's content.
-    pub fn node_mut(&mut self, id: Uuid) -> Option<&mut CndNode> {
-        if let Some(node) = crate::emit::refs::find_node_mut(&mut self.roots, id) {
-            return Some(node);
+    /// Apply each edit to the text `slot` of the node with that id, in the
+    /// body or in a footnote's content, in one walk of the tree. The edits
+    /// of one text are applied in the order given; an edit whose node or
+    /// text is missing is dropped.
+    pub fn edit_texts<E>(
+        &mut self,
+        edits: Vec<(Uuid, TextSlot, E)>,
+        mut apply: impl FnMut(&mut RichText, E),
+    ) {
+        if edits.is_empty() {
+            return;
         }
-        self.footnotes
-            .iter_mut()
-            .find_map(|note| crate::emit::refs::find_node_mut(&mut note.children, id))
+        let mut by_node: rustc_hash::FxHashMap<Uuid, Vec<(TextSlot, E)>> =
+            rustc_hash::FxHashMap::default();
+        for (id, slot, edit) in edits {
+            by_node.entry(id).or_default().push((slot, edit));
+        }
+        let mut visit = |node: &mut CndNode| {
+            let Some(edits) = by_node.remove(&node.id()) else { return };
+            for (slot, edit) in edits {
+                if let Some(text) = node.text_mut(slot) {
+                    apply(text, edit);
+                }
+            }
+        };
+        crate::model::walk_mut(&mut self.roots, &mut visit);
+        for note in &mut self.footnotes {
+            crate::model::walk_mut(&mut note.children, &mut visit);
+        }
+    }
+
+    /// The label of every labelled node, by id, footnote content included.
+    pub fn node_labels(&self) -> rustc_hash::FxHashMap<Uuid, String> {
+        let mut labels = rustc_hash::FxHashMap::default();
+        self.walk_all(&mut |node| {
+            if let Some(label) = &node.base().label {
+                labels.insert(node.id(), label.clone());
+            }
+        });
+        labels
     }
 
     /// Visit every node: the body, then each footnote's content.
@@ -793,11 +825,7 @@ fn apply_label_langs(
             langs.push((id, TextSlot::Attribution, lang));
         }
     }
-    for (id, slot, lang) in langs {
-        if let Some(text) = ctx.node_mut(id).and_then(|node| node.text_mut(slot)) {
-            text.lang = Some(lang.into());
-        }
-    }
+    ctx.edit_texts(langs, |text, lang| text.lang = Some(lang.into()));
 }
 
 /// Give each block quote's attribution the citations and footnotes of the

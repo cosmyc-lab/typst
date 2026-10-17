@@ -290,16 +290,14 @@ pub fn resolve_cite_edges(ctx: &mut ConvertContext, ancestry: &Ancestry) {
         }
     }
 
-    for (node_id, slot, cite) in edges {
-        if let Some(text) = ctx.node_mut(node_id).and_then(|node| node.text_mut(slot)) {
-            let cites = &mut text.cites;
-            // Keep meaningful variants (same work, different supplement/form/
-            // position) but drop exact duplicates.
-            if !cites.contains(&cite) {
-                cites.push(cite);
-            }
+    ctx.edit_texts(edges, |text, cite| {
+        let cites = &mut text.cites;
+        // Keep meaningful variants (same work, different supplement/form/
+        // position) but drop exact duplicates.
+        if !cites.contains(&cite) {
+            cites.push(cite);
         }
-    }
+    });
 }
 
 /// Attach a `FootnoteRef` to each text for every footnote marker captured
@@ -321,17 +319,21 @@ fn resolve_footnote_edges(ctx: &mut ConvertContext) {
         }
     }
 
-    for (node_id, slot, pool_id, span) in edges {
-        // A footnote pool entry always carries a label (its rendered
-        // ordinal), so this lookup cannot fail; skipping rather than
-        // unwrapping keeps an unresolvable edge from ever being emitted.
-        let Some(label) = labels.get(&pool_id).cloned() else { continue };
-        let reference = FootnoteRef { label, text_span: span.map(|(s, e)| vec![s, e]) };
-        if let Some(text) = ctx.node_mut(node_id).and_then(|node| node.text_mut(slot)) {
-            let footnotes = &mut text.footnotes;
-            if !footnotes.contains(&reference) {
-                footnotes.push(reference);
-            }
+    // A footnote pool entry always carries a label (its rendered ordinal),
+    // so this lookup cannot fail; skipping rather than unwrapping keeps an
+    // unresolvable edge from ever being emitted.
+    let references: Vec<(Uuid, TextSlot, FootnoteRef)> = edges
+        .into_iter()
+        .filter_map(|(node_id, slot, pool_id, span)| {
+            let label = labels.get(&pool_id).cloned()?;
+            let text_span = span.map(|(s, e)| vec![s, e]);
+            Some((node_id, slot, FootnoteRef { label, text_span }))
+        })
+        .collect();
+    ctx.edit_texts(references, |text, reference| {
+        let footnotes = &mut text.footnotes;
+        if !footnotes.contains(&reference) {
+            footnotes.push(reference);
         }
-    }
+    });
 }
