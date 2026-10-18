@@ -5,6 +5,7 @@
 //! column-major for LTR text — top-to-bottom within a column, then the next
 //! column to the right.
 
+use rustc_hash::FxHashMap;
 use typst_library::foundations::Selector;
 use typst_library::introspection::{Introspector, Location};
 use typst_library::layout::Abs;
@@ -20,17 +21,19 @@ struct ReadingKey {
 }
 
 /// Sort `(location, content)` pairs in reading order for paged documents.
+///
+/// An element the introspector does not know (a grid) is placed by its
+/// entry in `anchors`, the first element laid out inside it, just before
+/// that element.
 pub fn sort_by_reading_order(
     items: &mut [(Location, typst_library::foundations::Content)],
     introspector: &dyn Introspector,
     doc_selector: &Selector,
+    anchors: &FxHashMap<Location, Location>,
 ) {
-    items.sort_by(|(loc_a, _), (loc_b, _)| {
-        reading_key(introspector, doc_selector, *loc_a).cmp(&reading_key(
-            introspector,
-            doc_selector,
-            *loc_b,
-        ))
+    items.sort_by_cached_key(|(location, _)| match anchors.get(location) {
+        Some(anchor) => (reading_key(introspector, doc_selector, *anchor), 0),
+        None => (reading_key(introspector, doc_selector, *location), 1),
     });
 }
 

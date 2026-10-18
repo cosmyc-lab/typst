@@ -14,7 +14,7 @@ use typst_library::introspection::Introspector;
 use uuid::Uuid;
 
 use crate::emit::convert::NodeRecord;
-use crate::model::{CndNode, NodeLocation};
+use crate::model::{CndNode, Footnote, NodeLocation};
 
 /// Placeholder location filled in later by [`LocationAssigner`].
 pub fn placeholder_location() -> NodeLocation {
@@ -35,7 +35,8 @@ impl LocationAssigner {
         Self { introspector, records }
     }
 
-    pub fn assign_all(&mut self, nodes: &mut [CndNode]) {
+    /// Give every node of `nodes` and of the footnote pool its page.
+    pub fn assign_all(&mut self, nodes: &mut [CndNode], footnotes: &mut [Footnote]) {
         let locations: rustc_hash::FxHashMap<Uuid, NodeLocation> = self
             .records
             .iter()
@@ -47,6 +48,9 @@ impl LocationAssigner {
             })
             .collect();
         assign_locations(nodes, &locations);
+        for footnote in footnotes {
+            assign_locations(&mut footnote.children, &locations);
+        }
     }
 }
 
@@ -54,15 +58,9 @@ fn assign_locations(
     nodes: &mut [CndNode],
     locations: &rustc_hash::FxHashMap<Uuid, NodeLocation>,
 ) {
-    for node in nodes {
+    crate::model::walk_mut(nodes, &mut |node| {
         if let Some(base) = locations.get(&node.id()) {
             *node.location_mut() = base.clone();
         }
-
-        match node {
-            CndNode::Heading(n) => assign_locations(&mut n.children, locations),
-            CndNode::Figure(n) => assign_locations(&mut n.children, locations),
-            _ => {}
-        }
-    }
+    });
 }

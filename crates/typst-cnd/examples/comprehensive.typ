@@ -1,3 +1,4 @@
+#import "vendor/cnd.typ"
 #set text(lang: "fr")
 #set heading(numbering: "1")
 #set figure(numbering: "1")

@@ -1,3 +1,4 @@
+#import "vendor/cnd.typ"
 #set text(lang: "en")
 #set heading(numbering: "1.1")
 // The counter pattern carries the value only; the displayed word comes

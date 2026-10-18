@@ -3,11 +3,17 @@
 use comemo::Track;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
-use typst_library::foundations::{Repr, Value};
+use typst_library::foundations::{Dict, Repr, Value};
 use typst_library::introspection::Location;
-use typst_library::introspection::{Introspector, state_value_at};
+use typst_library::introspection::{Introspector, State, state_value_at};
 
-use crate::cnd::metadata_state;
+/// The state an authoring package writes node metadata into: the
+/// `cnd.metadata` key, a dictionary (`#cnd.metadata.update(..)`). The key
+/// is the whole contract; a state with the same key and initial value is
+/// the same state wherever it is created.
+fn metadata_state() -> State {
+    State::new("cnd.metadata".into(), Value::Dict(Dict::new()))
+}
 
 /// Read accumulated CND metadata at a document location.
 ///

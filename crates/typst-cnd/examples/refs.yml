@@ -15,3 +15,10 @@ jones2022:
   author: Jones, Alan
   date: 2022
   publisher: Example Press
+
+knuth:
+  type: book
+  title: Literate Programming
+  author: Knuth, Donald
+  date: 1992
+  publisher: Example Press

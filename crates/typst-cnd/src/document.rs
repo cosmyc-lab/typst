@@ -1,14 +1,19 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ecow::eco_vec;
+use ecow::{EcoString, eco_vec};
 use typst_layout::{PagedDocument, PagedIntrospector, layout_document};
 use typst_library::diag::{SourceResult, error};
 use typst_library::engine::Engine;
 use typst_library::format::DocumentFormatOptions;
-use typst_library::foundations::{Content, Datetime, Output, Smart, StyleChain, Target};
+use typst_library::foundations::{
+    Content, Datetime, Label, Output, Selector, Smart, StyleChain, Target, Value,
+};
 use typst_library::introspection::Introspector;
 use typst_library::model::{Document, DocumentInfo};
+use typst_library::text::Locale;
 use typst_syntax::Span;
+use typst_utils::PicoStr;
 
 use crate::emit::ancestry::Ancestry;
 use crate::emit::convert::{self, ConvertContext};
@@ -22,6 +27,8 @@ use crate::model::{
 #[derive(Debug, Clone)]
 pub struct CndDocument {
     info: DocumentInfo,
+    /// The document's language (see [`doc_lang`]).
+    lang: EcoString,
     nodes: Vec<crate::model::CndNode>,
     bibliography: Vec<BibEntry>,
     footnotes: Vec<Footnote>,
@@ -40,16 +47,21 @@ impl CndDocument {
         &self.info
     }
 
+    /// The document's language, as an RFC 3066 tag (`doc.lang`).
+    pub fn lang(&self) -> &str {
+        &self.lang
+    }
+
     pub fn nodes(&self) -> &[crate::model::CndNode] {
         &self.nodes
     }
 
-    /// Bibliography pool (proposal 0004). Empty until pool collection lands.
+    /// Bibliography pool (proposal 0004).
     pub fn bibliography(&self) -> &[BibEntry] {
         &self.bibliography
     }
 
-    /// Footnote pool (proposal 0004). Empty until pool collection lands.
+    /// Footnote pool (proposal 0004).
     pub fn footnotes(&self) -> &[Footnote] {
         &self.footnotes
     }
@@ -87,6 +99,7 @@ impl Output for CndDocument {
         let paged = layout_document(engine, content, styles)?;
         let introspector = paged.introspector().clone();
         let info = paged.info().clone();
+        let lang = doc_lang(&info, styles);
         let options = paged.options().clone();
 
         // Containment is read off the laid-out frames: `Introspector::query`
@@ -99,7 +112,7 @@ impl Output for CndDocument {
             introspector.as_ref(),
             content,
             styles,
-            &info,
+            lang.clone(),
             &ancestry,
         )?;
         ctx.artifact_locations = ancestry.artifact_locations().clone();
@@ -109,7 +122,7 @@ impl Output for CndDocument {
         // Bibliography pool must precede cross-reference resolution so a
         // `@key` citation (a RefElem) is kept out of the `refs` index.
         pools::build_bibliography_pool(engine, introspector.as_ref(), &mut ctx)?;
-        refs::resolve_refs(&mut ctx, introspector.as_ref(), content);
+        refs::resolve_refs(&mut ctx, introspector.as_ref());
 
         // `links` (ADR 0024, cnd-sdk): a label/location `LinkElem` folds
         // into the same `refs` edges above; needs `ctx.label_to_id`/
@@ -120,23 +133,18 @@ impl Output for CndDocument {
         // markers were captured per node during conversion (as introspection
         // tags, since the realized flow keeps only rendered markers); resolve
         // them to FootnoteRef/CiteRef edges against the pools.
-        pools::resolve_footnotes(
-            engine,
-            introspector.as_ref(),
-            styles,
-            &ancestry,
-            &mut ctx,
-        )?;
+        pools::resolve_footnotes(engine, introspector.as_ref(), &ancestry, &mut ctx)?;
         pools::resolve_cite_edges(&mut ctx, &ancestry);
 
-        let footnotes = ctx.footnotes.clone();
-        let bibliography = ctx.bibliography.clone();
+        let mut footnotes = ctx.footnotes;
+        let bibliography = ctx.bibliography;
         let mut nodes = ctx.roots;
         let mut assigner = LocationAssigner::new(introspector.clone(), ctx.records);
-        assigner.assign_all(&mut nodes);
+        assigner.assign_all(&mut nodes, &mut footnotes);
 
         Ok(Self {
             info,
+            lang,
             nodes,
             bibliography,
             footnotes,
@@ -156,7 +164,7 @@ fn realize_and_convert(
     introspector: &dyn Introspector,
     _content: &Content,
     styles: StyleChain,
-    info: &DocumentInfo,
+    doc_lang: EcoString,
     ancestry: &Ancestry,
 ) -> SourceResult<ConvertContext> {
     let mut ctx = ConvertContext::default();
@@ -164,17 +172,21 @@ fn realize_and_convert(
         engine,
         introspector,
         styles,
-        doc_lang_from_info(info),
+        doc_lang,
         ancestry,
         &mut ctx,
     )?;
     Ok(ctx)
 }
 
-fn doc_lang_from_info(info: &DocumentInfo) -> Option<ecow::EcoString> {
+/// The document's language: the locale the author set for it (Typst reads
+/// it from the text language set before any content), or else the text
+/// locale at the document's root, which is Typst's default (`en`) when
+/// nothing sets one. Every text inherits it (spec §4.1).
+fn doc_lang(info: &DocumentInfo, styles: StyleChain) -> EcoString {
     match info.locale {
-        Smart::Custom(locale) => Some(locale.rfc_3066()),
-        Smart::Auto => None,
+        Smart::Custom(locale) => locale.rfc_3066(),
+        Smart::Auto => Locale::get_in(styles).rfc_3066(),
     }
 }
 
@@ -198,17 +210,74 @@ pub fn cnd_from_document(
         cnd_version: CND_VERSION.into(),
         built_at,
         source: Some(source),
-        doc: doc_metadata_from_info(document.info()),
+        doc: doc_metadata_from_info(
+            document.info(),
+            document.lang(),
+            doc_markers(document.introspector().as_ref()),
+        ),
         nodes: document.nodes().to_vec(),
-        // Pools are populated by a later increment (footnote/bibliography
-        // collection); always-present empty vecs satisfy the contract.
         bibliography: document.bibliography().to_vec(),
         footnotes: document.footnotes().to_vec(),
     }
 }
 
-fn doc_metadata_from_info(info: &DocumentInfo) -> DocMetadata {
-    use ecow::EcoString;
+/// The label of the marker `cnd.document` writes.
+const DOCUMENT_MARKER: &str = "cnd-document";
+
+/// The `DocMetadata` fields an `extra` key may not repeat (spec §3).
+const RESERVED_KEYS: [&str; 9] = [
+    "title",
+    "authors",
+    "date",
+    "keywords",
+    "description",
+    "lang",
+    "status",
+    "version",
+    "extra",
+];
+
+/// What the author declared with `cnd.document`: `status`, `version` and
+/// `extra`, read off the `<cnd-document>` markers in document order.
+///
+/// A later marker overrides an earlier one key by key. A non-string
+/// `extra` value is dropped, and so is a key naming a `DocMetadata` field
+/// (spec §3: the field, not `extra`, holds it).
+pub fn doc_markers(
+    introspector: &dyn Introspector,
+) -> (Option<String>, Option<String>, BTreeMap<String, String>) {
+    let mut status = None;
+    let mut version = None;
+    let mut extra = BTreeMap::new();
+    let Some(label) = Label::new(PicoStr::intern(DOCUMENT_MARKER)) else {
+        return (status, version, extra);
+    };
+    for elem in introspector.query(&Selector::Label(label)) {
+        let Ok(Value::Dict(marker)) = elem.get_by_name("value") else { continue };
+        if let Some(Value::Str(value)) = marker.get("status").ok().cloned() {
+            status = Some(value.to_string());
+        }
+        if let Some(Value::Str(value)) = marker.get("version").ok().cloned() {
+            version = Some(value.to_string());
+        }
+        if let Some(Value::Dict(pairs)) = marker.get("extra").ok().cloned() {
+            for (key, value) in &pairs {
+                if let Value::Str(value) = value
+                    && !RESERVED_KEYS.contains(&key.as_str())
+                {
+                    extra.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+    }
+    (status, version, extra)
+}
+
+fn doc_metadata_from_info(
+    info: &DocumentInfo,
+    lang: &str,
+    (status, version, extra): (Option<String>, Option<String>, BTreeMap<String, String>),
+) -> DocMetadata {
     DocMetadata {
         title: info
             .title
@@ -219,10 +288,10 @@ fn doc_metadata_from_info(info: &DocumentInfo) -> DocMetadata {
         date: doc_date_from_info(info),
         keywords: info.keywords.iter().map(|k| k.clone().into()).collect(),
         description: info.description.clone().map(Into::into),
-        lang: match info.locale {
-            Smart::Custom(locale) => Some(locale.rfc_3066().into()),
-            Smart::Auto => None,
-        },
+        lang: Some(lang.into()),
+        status,
+        version,
+        extra,
     }
 }
 

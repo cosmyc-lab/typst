@@ -13,28 +13,161 @@
 //! exact ancestry. Only whether a nested paragraph is part of the enclosing
 //! one needs a second signal; [`covering_par`] states it.
 //!
+//! The same walk finds each element's *slot*: the body of the innermost
+//! container it is laid out in (a list item, a term's description, a table
+//! cell, a quote, a figure, a footnote entry), see [`Ancestry::slot_of`].
+//! The tags that open them:
+//!
+//! - a list or enum item's body: `PdfMarkerTag` of kind `ListItemBody`. The
+//!   item elements' own tags are no help: the first item's wraps the whole
+//!   list, the others are empty. For a tight item whose body is a single
+//!   paragraph the nesting is inverted (`par > ListItemBody > text`): that
+//!   paragraph is the item's.
+//! - a term's description: `PdfMarkerTag` of kind `TermsItemBody`, which also
+//!   holds the term (`TermsItemLabel`) and the separator (an artifact);
+//! - a table or grid cell: the `TableCell` / `GridCell` tag, which carries
+//!   the cell's resolved `x` and `y`. A header or footer that repeats on
+//!   each page is tagged again, with new locations: only the first copy of
+//!   each position is the cell's slot, so the repeated copies' content has
+//!   no owner and is dropped. A row laid out across several pages (a cell
+//!   too tall for one) is drawn differently: each cell's tags open and close
+//!   with nothing between them, and the cell's content follows them, laid
+//!   out in the table itself, on every page the row spans. That content
+//!   belongs to the row's cell whose column it is drawn in. Only a body
+//!   row counts: a repeated copy of a header or footer cell, or the first
+//!   copy of a footer cell, drawn between two pages of the row, is never
+//!   taken for it even when it holds nothing;
+//! - a block quote, a figure, a footnote entry: the element's own tag. An
+//!   inline quote opens no slot: it is text of the paragraph around it. A
+//!   footnote entry is printed at the bottom of the page; its number is a
+//!   `Label` marker inside its first paragraph, which that paragraph's text
+//!   leaves out (see `extract`). A note is drawn in a frame of its own,
+//!   whose logical parent is the footnote; a note too long for its page
+//!   continues in another such frame on the next page. What is open in a
+//!   note's frames is the note's own, kept across pages apart from the
+//!   flow (see [`NoteStacks`]);
+//! - an admonition's body: no element. The authoring package brackets it
+//!   between two `metadata` markers (see `emit::admonition`), whose tags
+//!   open and close back to back, so the slot is a *bracket*: it opens at
+//!   the start marker and stays open, across pages, until the end marker.
+//!   Brackets nest like any slot, and a container that closes closes the
+//!   brackets opened inside it. The printed title is absorbed: the node
+//!   carries it.
+//!
 //! [`Feature::CndSemantics`]: typst_library::Feature::CndSemantics
 
 use std::cell::OnceCell;
 use std::ops::ControlFlow;
 
+use ecow::EcoString;
 use rustc_hash::{FxHashMap, FxHashSet};
 use typst_library::WorldExt;
 use typst_library::engine::Engine;
 use typst_library::foundations::{
-    Content, Element, NativeElement, SequenceElem, StyleChain,
+    Content, NativeElement, SequenceElem, Smart, StyleChain,
 };
 use typst_library::introspection::{Introspector, Location, Tag};
-use typst_library::layout::{Frame, FrameItem, GroupItem, PlaceElem};
+use typst_library::layout::{Frame, FrameItem, GridCell, GridElem, GroupItem, PlaceElem};
 use typst_library::math::EquationElem;
 use typst_library::model::{
-    ArtifactElem, BibliographyElem, EnumElem, FigureElem, FootnoteEntry, HeadingElem,
-    ListElem, OutlineElem, ParElem, ParbreakElem, QuoteElem, TableElem, TermsElem,
+    ArtifactElem, BibliographyElem, EnumElem, FigureCaption, FigureElem, FootnoteEntry,
+    HeadingElem, ListElem, OutlineElem, ParElem, ParbreakElem, PdfMarkerTag,
+    PdfMarkerTagKind, QuoteElem, TableCell, TableCellKind, TableElem, TermsElem,
 };
-use typst_library::text::RawElem;
+use typst_library::text::{Locale, RawElem};
+use typst_library::visualize::ImageElem;
 use typst_syntax::{FileId, Span};
 
-use crate::emit::extract;
+use crate::emit::{admonition, extract};
+
+/// The body of a container, which holds the nodes laid out in it. Each is
+/// keyed by the location of the tag that opens it (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SlotKey {
+    /// A list or enum item's body (`ListItemBody`).
+    Item(Location),
+    /// A term's description (`TermsItemBody`).
+    TermDescription(Location),
+    /// A table or grid cell.
+    Cell(Location),
+    /// A quote's body.
+    QuoteBody(Location),
+    /// A figure's body.
+    FigureBody(Location),
+    /// A footnote's entry, printed at the bottom of the page.
+    FootnoteBody(Location),
+    /// An admonition's body, bracketed by the start marker at this location
+    /// and the end marker after it.
+    AdmonitionBody(Location),
+}
+
+/// What kind of container a [`SlotKey`] is the body of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SlotKind {
+    Item,
+    TermDescription,
+    Cell,
+    QuoteBody,
+    FigureBody,
+    FootnoteBody,
+    AdmonitionBody,
+}
+
+impl SlotKey {
+    pub fn kind(&self) -> SlotKind {
+        match self {
+            Self::Item(_) => SlotKind::Item,
+            Self::TermDescription(_) => SlotKind::TermDescription,
+            Self::Cell(_) => SlotKind::Cell,
+            Self::QuoteBody(_) => SlotKind::QuoteBody,
+            Self::FigureBody(_) => SlotKind::FigureBody,
+            Self::FootnoteBody(_) => SlotKind::FootnoteBody,
+            Self::AdmonitionBody(_) => SlotKind::AdmonitionBody,
+        }
+    }
+
+    /// The location of the tag that opens this slot.
+    pub fn location(&self) -> Location {
+        match self {
+            Self::Item(location)
+            | Self::TermDescription(location)
+            | Self::Cell(location)
+            | Self::QuoteBody(location)
+            | Self::FigureBody(location)
+            | Self::FootnoteBody(location)
+            | Self::AdmonitionBody(location) => *location,
+        }
+    }
+
+    /// The slot that the tag `inner` opens, if any.
+    fn opened_by(inner: &Content, location: Location) -> Option<Self> {
+        let elem = inner.elem();
+        if let Some(marker) = inner.to_packed::<PdfMarkerTag>() {
+            match marker.kind {
+                PdfMarkerTagKind::ListItemBody => Some(Self::Item(location)),
+                PdfMarkerTagKind::TermsItemBody => Some(Self::TermDescription(location)),
+                _ => None,
+            }
+        } else if elem == TableCell::ELEM || elem == GridCell::ELEM {
+            Some(Self::Cell(location))
+        } else if let Some(quote) = inner.to_packed::<QuoteElem>() {
+            // Only a block quote is a node. An inline one is text of its
+            // paragraph: what is laid out in it stays in the slot around it.
+            // The element is materialized, so `block` holds its realized
+            // value (see `extract::is_excluded_scope`).
+            quote
+                .block
+                .get(StyleChain::default())
+                .then_some(Self::QuoteBody(location))
+        } else if elem == FigureElem::ELEM {
+            Some(Self::FigureBody(location))
+        } else if elem == FootnoteEntry::ELEM {
+            Some(Self::FootnoteBody(location))
+        } else {
+            None
+        }
+    }
+}
 
 /// Which of a laid-out element's ancestors matter to the emit pipeline.
 #[derive(Debug, Default)]
@@ -48,15 +181,58 @@ pub struct Ancestry {
     /// footers, page decorations), which Typst's accessibility model already
     /// marks as "not document content".
     in_artifact: FxHashSet<Location>,
-    /// Elements that sit inside a container the emit pipeline turns into a
-    /// node of its own — a list, a table, a code block, an equation. Such a
-    /// node renders its own children, so a paragraph found inside one is that
-    /// container's content seen a second time. Only a container that the
-    /// element is written in counts (see [`Open::encloses`]).
-    in_container: FxHashSet<Location>,
-    /// Elements whose text is carried by an enclosing node, so that a list
-    /// among them is not a node of its own. See [`list_scope`].
-    list_carried: FxHashSet<Location>,
+    /// Each element's innermost slot, see [`Ancestry::slot_of`].
+    slots: FxHashMap<Location, SlotKey>,
+    /// Each list's, enum's or term list's item slots, in order.
+    item_slots: FxHashMap<Location, Vec<SlotKey>>,
+    /// Each table's or grid's cell slots, by the cell's `(x, y)` position.
+    cell_slots: FxHashMap<Location, FxHashMap<(usize, usize), SlotKey>>,
+    /// While walking: each table's or grid's last row whose cells' tags
+    /// closed with nothing between them — a row laid out across pages —
+    /// with those cells and their locations (see [`innermost_slot`]).
+    fragment_cells: FxHashMap<Location, (usize, Vec<(SlotKey, Location)>)>,
+    /// Elements laid out in such a row, with the row's cells: which one
+    /// holds each is settled by position once the walk is done.
+    pending_fragments: Vec<(Location, Vec<(SlotKey, Location)>)>,
+    /// Elements laid out inside something that already carries their text,
+    /// see [`Ancestry::is_absorbed`].
+    absorbed: FxHashSet<Location>,
+    /// Every grid, in layout order (see [`Ancestry::grids`]).
+    grids: Vec<(Location, Content)>,
+    /// The locations in `grids`.
+    grid_locations: FxHashSet<Location>,
+    /// Each grid's anchor (see [`Ancestry::grids`]).
+    grid_anchors: FxHashMap<Location, Location>,
+    /// The figures whose body has an element laid out in it that may become
+    /// a node (see [`Ancestry::is_drawing`]).
+    figures_with_nodes: FxHashSet<Location>,
+    /// The figures whose body has such an element inside a `place` that
+    /// does not float, written in the body: a positioned drawing.
+    figures_with_placed_nodes: FxHashSet<Location>,
+    /// The figures whose body holds decorative content (an artifact): such
+    /// a body is never kept as `raw`, which would carry its words.
+    figures_with_artifacts: FxHashSet<Location>,
+    /// While walking: the grids laid out in a figure's body that have no
+    /// anchor yet, with that figure and whether they sit in a `place`.
+    grids_in_figures: FxHashMap<Location, (Location, bool)>,
+    /// The footnotes that have a printed entry, by the footnote's location.
+    printed_notes: FxHashSet<Location>,
+    /// What is open in each note's frames (see [`NoteStacks`]).
+    note_stacks: NoteStacks,
+    /// For each element made of text (see [`is_text_node`]), the locales
+    /// its glyphs are set in, with how many glyphs each, in the order met.
+    locales: FxHashMap<Location, Vec<(Locale, usize)>>,
+    /// The scope a label text is laid out in, by the container that owns
+    /// it: a figure's caption by the figure, a term by its description's
+    /// slot (see [`Ancestry::label_lang_of`]).
+    label_scopes: FxHashMap<Location, Location>,
+    /// The start markers that an end marker closed: the admonitions.
+    admonitions: FxHashSet<Location>,
+    /// The start markers laid out inside a paragraph, with that paragraph.
+    admonitions_in_par: FxHashMap<Location, Location>,
+    /// The start markers whose printed title an enclosing paragraph
+    /// renders.
+    covered_titles: FxHashSet<Location>,
 }
 
 impl Ancestry {
@@ -71,6 +247,12 @@ impl Ancestry {
         }
         let floats = Floats::new(found);
         let places = FloatPlaces::of(paged);
+        for elem in paged.introspector().query(&FootnoteEntry::ELEM.select()) {
+            let Some(entry) = elem.to_packed::<FootnoteEntry>() else { continue };
+            if let Some(note) = entry.note.location() {
+                ancestry.printed_notes.insert(note);
+            }
+        }
         let mut stack: Vec<Open> = Vec::new();
         for page in paged.pages() {
             walk(
@@ -83,7 +265,102 @@ impl Ancestry {
                 &mut ancestry,
             );
         }
+        ancestry.settle_fragments(paged.introspector().as_ref());
+        ancestry.settle_brackets();
         ancestry
+    }
+
+    /// Give what was laid out after a start marker that no end marker
+    /// closed — one written by hand, or cut off by the container it was
+    /// written in — the slot that marker itself sits in: such a marker
+    /// brackets nothing (see [`Ancestry::is_admonition`]).
+    fn settle_brackets(&mut self) {
+        let unpaired = |slot: &SlotKey| {
+            slot.kind() == SlotKind::AdmonitionBody
+                && !self.admonitions.contains(&slot.location())
+        };
+        let stray: Vec<(Location, SlotKey)> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| unpaired(slot))
+            .map(|(location, slot)| (*location, *slot))
+            .collect();
+        // Each is settled against the slots as the walk left them, so the
+        // order they come in does not matter.
+        let mut settled = Vec::with_capacity(stray.len());
+        for (location, mut slot) in stray {
+            // Up through every unpaired marker it sits in; markers are
+            // finitely nested, the bound only guards a cycle.
+            let mut outer = None;
+            for _ in 0..64 {
+                match self.slots.get(&slot.location()) {
+                    Some(next) if unpaired(next) => slot = *next,
+                    found => {
+                        outer = found.copied();
+                        break;
+                    }
+                }
+            }
+            settled.push((location, outer));
+        }
+        for (location, outer) in settled {
+            match outer {
+                Some(slot) => self.slots.insert(location, slot),
+                None => self.slots.remove(&location),
+            };
+        }
+    }
+
+    /// Whether the start marker at `location` opens an admonition: an end
+    /// marker closed it.
+    pub fn is_admonition(&self, location: Location) -> bool {
+        self.admonitions.contains(&location)
+    }
+
+    /// Whether the admonition at `location` is laid out in an inline `box`
+    /// whose paragraph renders it, title included: its start marker sits
+    /// in a paragraph, and its printed title, if any, is part of one. Its
+    /// body then routes nothing (see `convert`).
+    pub fn is_boxed_admonition(&self, location: Location, has_title: bool) -> bool {
+        self.admonitions_in_par.contains_key(&location)
+            && (!has_title || self.covered_titles.contains(&location))
+    }
+
+    /// Give each element laid out in a row that spans pages the cell whose
+    /// column it is drawn in: the cell starting furthest right at or before
+    /// the element. A grid, which the introspector does not place, is
+    /// placed by its anchor (see [`Ancestry::grids`]).
+    fn settle_fragments(&mut self, introspector: &dyn Introspector) {
+        let x = |location: Location| {
+            introspector
+                .position(location)
+                .map(|position| position.as_paged_or_default().point.x)
+        };
+        for (location, cells) in std::mem::take(&mut self.pending_fragments) {
+            // A slot set after the fragment was queued is not a cell's: a
+            // tight item's paragraph belongs to its item, whatever column
+            // the item is drawn in.
+            let still_cell = self
+                .slots
+                .get(&location)
+                .is_some_and(|slot| cells.iter().any(|(cell, _)| cell == slot));
+            if !still_cell {
+                continue;
+            }
+            let Some(own) =
+                x(self.grid_anchors.get(&location).copied().unwrap_or(location))
+            else {
+                continue;
+            };
+            let column = cells
+                .iter()
+                .filter_map(|(slot, cell)| Some((*slot, x(*cell)?)))
+                .filter(|(_, start)| start.to_pt() <= own.to_pt() + 0.01)
+                .max_by(|(_, a), (_, b)| a.to_pt().total_cmp(&b.to_pt()));
+            if let Some((slot, _)) = column {
+                self.slots.insert(location, slot);
+            }
+        }
     }
 
     /// The paragraph this one is part of, if any.
@@ -103,87 +380,217 @@ impl Ancestry {
         &self.in_artifact
     }
 
-    /// Whether `location` sits inside a container that is emitted as its own
-    /// node — a list item's marker and body, a table cell, the lines of a code
-    /// block, an equation's numbering.
-    pub fn is_in_emitted_container(&self, location: Location) -> bool {
-        self.in_container.contains(&location)
+    /// The innermost slot enclosing the element at `location`: the body of
+    /// the container whose node holds it.
+    ///
+    /// Only a container the element is written in counts (see
+    /// [`Open::encloses`]): a float drawn inside a container it is not
+    /// written in does not join it. A float's body drawn before the slot it
+    /// is written in opens — on an earlier page, while the list is open
+    /// around it — takes the slot open where its `place` is written.
+    pub fn slot_of(&self, location: Location) -> Option<SlotKey> {
+        self.slots.get(&location).copied()
     }
 
-    /// Whether a list at `location` has its text carried by an enclosing
-    /// node — a list, an enum, a definition list, a quote, or the footnote
-    /// pool — and so is not a node of its own.
-    pub fn is_list_carried(&self, location: Location) -> bool {
-        self.list_carried.contains(&location)
+    /// The item slots of the list, enum or term list at `location`, in the
+    /// order its items are laid out.
+    pub fn item_slots(&self, location: Location) -> &[SlotKey] {
+        self.item_slots.get(&location).map_or(&[], Vec::as_slice)
+    }
+
+    /// The slot of the cell at column `x`, row `y` of the table or grid at
+    /// `owner`: the first laid-out copy of that cell.
+    pub fn cell_slot(&self, owner: Location, x: usize, y: usize) -> Option<SlotKey> {
+        self.cell_slots.get(&owner)?.get(&(x, y)).copied()
+    }
+
+    /// How many distinct cells of the table or grid at `owner` were laid
+    /// out.
+    pub fn cell_slot_count(&self, owner: Location) -> usize {
+        self.cell_slots.get(&owner).map_or(0, FxHashMap::len)
+    }
+
+    /// Every grid of the document, in layout order, with its anchor: the
+    /// first element laid out inside it that the introspector knows and
+    /// that may become a node (see [`is_node_kind`]).
+    ///
+    /// A grid is not `Locatable`, so unless it is labelled the introspector
+    /// does not know it: it gives the grid no page, no state and no place
+    /// in reading order. Its anchor stands in for it there. A grid whose
+    /// anchor is `None` holds nothing that becomes a node.
+    pub fn grids(&self) -> impl Iterator<Item = (Location, &Content, Option<Location>)> {
+        self.grids.iter().map(|(location, grid)| {
+            (*location, grid, self.grid_anchors.get(location).copied())
+        })
+    }
+
+    /// Whether the element at `location` is laid out inside something that
+    /// carries its text already, or that carries none: a list item's marker
+    /// (`ListItemLabel`), a term (`TermsItemLabel`), a footnote's number (a
+    /// `Label` marker), a heading, a code block, an equation, the outline,
+    /// the bibliography, or an artifact. A paragraph found there is never a
+    /// node.
+    pub fn is_absorbed(&self, location: Location) -> bool {
+        self.absorbed.contains(&location) || self.is_artifact(location)
+    }
+
+    /// Note that an element that may become a node is laid out in the body
+    /// of the figure at `figure`, inside a `place` that does not float,
+    /// written in the body, when `placed`.
+    fn note_figure_node(&mut self, figure: Location, placed: bool) {
+        self.figures_with_nodes.insert(figure);
+        if placed {
+            self.figures_with_placed_nodes.insert(figure);
+        }
+    }
+
+    /// The language of the text the element at `location` lays out: the
+    /// locale most of its glyphs are set in, the first met on a tie. `None`
+    /// for an element that lays out no glyph, or that is not made of text.
+    ///
+    /// Realization keeps no style chain with a paragraph, so the locale is
+    /// read where layout recorded it, on each run of glyphs.
+    ///
+    /// This differs on purpose from the PDF export's tagging, where a
+    /// group takes the language of its first child. A CND text has one
+    /// `lang` for the whole of it, and a foreign phrase inside it is not
+    /// modeled (spec §4.1): the language most of the text is in describes
+    /// it, where the first run would let a paragraph opening on a quoted
+    /// foreign word take that word's language. The tie-break keeps the
+    /// result deterministic.
+    pub fn lang_of(&self, location: Location) -> Option<EcoString> {
+        let mut best: Option<(Locale, usize)> = None;
+        for &(locale, count) in self.locales.get(&location)? {
+            if best.is_none_or(|(_, most)| count > most) {
+                best = Some((locale, count));
+            }
+        }
+        best.map(|(locale, _)| locale.rfc_3066())
+    }
+
+    /// The language of the label text owned by `owner` (see
+    /// [`Ancestry::lang_of`]): the caption of the figure at `owner`, or the
+    /// term of the description slot at `owner`.
+    pub fn label_lang_of(&self, owner: Location) -> Option<EcoString> {
+        self.lang_of(*self.label_scopes.get(&owner)?)
+    }
+
+    /// Whether the figure at `figure` is a drawing (cnd-sdk spec §6.7): its
+    /// body lays out no element that may become a node (a `rect`, a line, a
+    /// canvas of shapes; an empty paragraph does not count), or an element
+    /// laid out in it sits inside a `place` that does not float, written in
+    /// the body — a diagram, or a helper that positions labels. Its content
+    /// is then its source, not the scattered pieces lifted out of it.
+    ///
+    /// A body holding decorative content and no node is not a drawing: its
+    /// source would carry the decoration's words.
+    pub fn is_drawing(&self, figure: Location) -> bool {
+        self.figures_with_placed_nodes.contains(&figure)
+            || (!self.figures_with_nodes.contains(&figure)
+                && !self.figures_with_artifacts.contains(&figure))
     }
 }
 
-/// Whether a paragraph laid out inside `elem` is a second copy of text the
-/// document already carries elsewhere. Layout-only containers — a bare
-/// `grid`, a `block`, a `place` — are deliberately absent: they produce no
-/// node, so their paragraphs are the only carrier of that text.
-///
-/// Two kinds qualify. Most are emitted as a node that renders its own
-/// content, so a paragraph inside is that content seen twice. The outline is
-/// the exception: it is emitted as nothing at all, and every entry repeats a
-/// heading that is already a node of its own — navigation furniture.
-fn is_emitted_container(elem: Element) -> bool {
-    elem == HeadingElem::ELEM
+/// Whether a paragraph laid out inside `inner` is absorbed (see
+/// [`Ancestry::is_absorbed`]). Artifacts are left to [`DrawScope`]: what is
+/// open around a float's body has nothing to do with it.
+fn absorbs(inner: &Content) -> bool {
+    if let Some(marker) = inner.to_packed::<PdfMarkerTag>() {
+        return matches!(
+            marker.kind,
+            PdfMarkerTagKind::ListItemLabel
+                | PdfMarkerTagKind::TermsItemLabel
+                | PdfMarkerTagKind::Label
+        );
+    }
+    let elem = inner.elem();
+    // An admonition's printed title, which its node carries.
+    admonition::is_title(inner)
+        || elem == HeadingElem::ELEM
+        || elem == RawElem::ELEM
+        || elem == EquationElem::ELEM
+        || elem == OutlineElem::ELEM
+        || elem == BibliographyElem::ELEM
+        // A figure's caption, which the figure node carries.
+        || elem == FigureCaption::ELEM
+}
+
+/// Whether `inner` owns item slots: a list, an enum or a term list.
+fn owns_items(inner: &Content) -> bool {
+    let elem = inner.elem();
+    elem == ListElem::ELEM || elem == EnumElem::ELEM || elem == TermsElem::ELEM
+}
+
+/// Whether `inner` is of a kind that the emit pipeline may turn into a node
+/// (the elements `convert` queries, and an admonition's start marker).
+fn is_node_kind(inner: &Content) -> bool {
+    let elem = inner.elem();
+    admonition::marker(inner) == Some(admonition::Marker::Start)
+        || elem == ParElem::ELEM
+        || elem == HeadingElem::ELEM
+        || elem == TableElem::ELEM
+        || elem == FigureElem::ELEM
         || elem == QuoteElem::ELEM
+        || elem == RawElem::ELEM
+        || elem == EquationElem::ELEM
         || elem == ListElem::ELEM
         || elem == EnumElem::ELEM
         || elem == TermsElem::ELEM
-        || elem == RawElem::ELEM
-        || elem == EquationElem::ELEM
-        || elem == FigureElem::ELEM
-        || elem == TableElem::ELEM
-        // A footnote's rendered entry at the bottom of the page: its text is
-        // carried by the `footnotes` pool, which every marker refers to.
-        || elem == FootnoteEntry::ELEM
-        // Likewise a rendered bibliography entry, whose text the
-        // `bibliography` pool carries. With the default title the entries are
-        // swallowed by the generated heading's source range; with
-        // `title: none` — a hand-written "= References" — nothing catches
-        // them and each entry leaks as two paragraphs.
-        || elem == BibliographyElem::ELEM
-        // Table of contents.
-        || elem == OutlineElem::ELEM
+        || elem == ImageElem::ELEM
 }
 
-/// What an element does to the text of a list laid out inside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ListScope {
-    /// Nothing: the decision is up to an element further out.
-    Transparent,
-    /// It carries the list's text: a list or an enum (as an item's
-    /// children), a definition list (a description's text), a quote (its
-    /// text), a footnote entry (the `footnotes` pool).
-    Carrier,
-    /// It ends the search, and the list is a node of its own. A figure keeps
-    /// only its caption, so a list inside it is that text's only carrier.
-    Barrier,
+/// Whether `inner` owns cell slots: a table or a grid.
+/// Whether `inner` is a block raw or a block equation: a node of its own,
+/// with no slot.
+fn is_block_leaf(inner: &Content) -> bool {
+    if let Some(raw) = inner.to_packed::<RawElem>() {
+        return raw.block.get(StyleChain::default());
+    }
+    inner
+        .to_packed::<EquationElem>()
+        .is_some_and(|equation| equation.block.get(StyleChain::default()))
 }
 
-/// The nearest enclosing element that is not transparent decides whether a
-/// list is carried: a list inside a figure inside a list item is the
-/// figure's, not the item's.
-///
-/// Only elements that enclose the list in the source count (see
-/// [`Open::encloses`]): a float's body is drawn away from its tags, possibly
-/// while a list written elsewhere is still open around it.
-fn list_scope(inner: &Content) -> ListScope {
+fn owns_cells(inner: &Content) -> bool {
     let elem = inner.elem();
-    if elem == ListElem::ELEM
-        || elem == EnumElem::ELEM
-        || elem == TermsElem::ELEM
-        || elem == QuoteElem::ELEM
-        || elem == FootnoteEntry::ELEM
-    {
-        ListScope::Carrier
-    } else if elem == FigureElem::ELEM {
-        ListScope::Barrier
+    elem == TableElem::ELEM || elem == GridElem::ELEM
+}
+
+/// The first non-gutter row of a table's or grid's footer, read from the
+/// grid the element resolved.
+fn footer_start(inner: &Content) -> Option<usize> {
+    let grid = if let Some(table) = inner.to_packed::<TableElem>() {
+        table.grid.as_ref()?
+    } else if let Some(grid) = inner.to_packed::<GridElem>() {
+        grid.grid.as_ref()?
     } else {
-        ListScope::Transparent
+        return None;
+    };
+    let footer = grid.footer.as_ref()?;
+    // With gutters, rows and gutter rows alternate.
+    Some(if grid.has_gutter { footer.start.div_ceil(2) } else { footer.start })
+}
+
+/// Whether a table cell says it is a footer cell.
+fn is_footer_cell(inner: &Content) -> bool {
+    inner.to_packed::<TableCell>().is_some_and(|cell| {
+        matches!(
+            cell.kind.get(StyleChain::default()),
+            Smart::Custom(TableCellKind::Footer)
+        )
+    })
+}
+
+/// The resolved `(x, y)` position of a table or grid cell. The tag holds the
+/// materialized cell, whose position the grid resolved.
+fn cell_position(inner: &Content) -> Option<(usize, usize)> {
+    let styles = StyleChain::default();
+    if let Some(cell) = inner.to_packed::<TableCell>() {
+        Some((cell.x.get(styles).custom()?, cell.y.get(styles).custom()?))
+    } else if let Some(cell) = inner.to_packed::<GridCell>() {
+        Some((cell.x.get(styles).custom()?, cell.y.get(styles).custom()?))
+    } else {
+        None
     }
 }
 
@@ -193,6 +600,35 @@ fn is_float(inner: &Content) -> bool {
     inner
         .to_packed::<PlaceElem>()
         .is_some_and(|place| place.float.get(StyleChain::default()))
+}
+
+/// Whether `inner` is a `place` that does not float: content positioned at
+/// a fixed point of its container.
+fn is_placed(inner: &Content) -> bool {
+    inner
+        .to_packed::<PlaceElem>()
+        .is_some_and(|place| !place.float.get(StyleChain::default()))
+}
+
+/// Whether a `place` that does not float, written in the body of the
+/// figure at `figure`, is open deeper on `stack` than the figure itself. A
+/// `place` written around the figure — by a show rule
+/// (`show figure: it => place(center, it)`), say — is laid out inside it
+/// too, but is not written in its body, so it does not count. When the
+/// body's source range is unknown, any such `place` counts.
+fn is_placed_in(stack: &[Open], figure: Location) -> bool {
+    let Some(index) = stack.iter().rposition(|open| open.location == figure) else {
+        return false;
+    };
+    let body = stack[index].body_range;
+    stack[index + 1..].iter().any(|open| {
+        open.is_placed
+            && match (body, open.range) {
+                (Some(body), Some(place)) => contains(body, place),
+                (Some(_), None) => false,
+                (None, _) => true,
+            }
+    })
 }
 
 /// What identifies a float's body once it is drawn away from its tags.
@@ -212,6 +648,11 @@ struct Float {
     /// The elements open where the `place` is written: what it really sits
     /// in, unlike what is open where its body is drawn.
     ancestors: FxHashSet<Location>,
+    /// The innermost slot open where the `place` is written.
+    slot: Option<SlotKey>,
+    /// The `place` itself: the logical parent of the group its body is
+    /// drawn in.
+    location: Option<Location>,
 }
 
 impl Float {
@@ -252,7 +693,7 @@ impl Float {
 fn floats(
     frame: &Frame,
     engine: &Engine,
-    open: &mut Vec<Location>,
+    open: &mut Vec<(Location, Option<SlotKey>)>,
     out: &mut Vec<Float>,
 ) {
     for (_, item) in frame.items() {
@@ -266,22 +707,45 @@ fn floats(
                         range: float_range(engine, inner),
                         body: body_spans(&place.body),
                         text: paragraphs_text(&place.body),
-                        ancestors: open.iter().copied().collect(),
+                        ancestors: open.iter().map(|(location, _)| *location).collect(),
+                        slot: open.iter().rev().find_map(|(_, slot)| *slot),
+                        location: inner.location(),
                     });
                 }
-                if let Some(location) = inner.location() {
-                    open.push(location);
+                let Some(location) = inner.location() else { continue };
+                // An admonition's bracket, as in `walk`.
+                match admonition::marker(inner) {
+                    Some(admonition::Marker::Start) => {
+                        open.push((location, Some(SlotKey::AdmonitionBody(location))));
+                    }
+                    Some(admonition::Marker::End) => {
+                        if let Some(index) =
+                            open.iter().rposition(|(_, slot)| is_bracket(*slot))
+                        {
+                            open.remove(index);
+                        }
+                    }
+                    None => open.push((location, SlotKey::opened_by(inner, location))),
                 }
             }
-            // As in `walk`, pop to the matching start.
+            // As in `walk`, pop to the matching start; a bracket is closed by
+            // its end marker only.
             FrameItem::Tag(Tag::End(location, ..)) => {
-                if let Some(index) = open.iter().rposition(|open| open == location) {
+                if let Some(index) = open
+                    .iter()
+                    .rposition(|(open, slot)| open == location && !is_bracket(*slot))
+                {
                     open.truncate(index);
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Whether `slot` is an admonition's bracket.
+fn is_bracket(slot: Option<SlotKey>) -> bool {
+    slot.is_some_and(|slot| slot.kind() == SlotKind::AdmonitionBody)
 }
 
 /// The document's floats, indexed so that a paragraph or a tag is only
@@ -297,6 +761,8 @@ struct Floats {
     /// The floats whose text has each word (a maximal run of letters and
     /// digits) in it.
     by_word: FxHashMap<String, Vec<usize>>,
+    /// Each float, by its `place`'s location.
+    by_location: FxHashMap<Location, usize>,
 }
 
 /// A float's source range in [`Floats::by_start`].
@@ -345,7 +811,12 @@ impl Floats {
                 entry.reach = reach;
             }
         }
-        Self { all, by_span, by_start, by_word }
+        let by_location = all
+            .iter()
+            .enumerate()
+            .filter_map(|(index, float)| Some((float.location?, index)))
+            .collect();
+        Self { all, by_span, by_start, by_word, by_location }
     }
 
     /// The floats whose body holds the element written at `span`.
@@ -435,7 +906,7 @@ fn float_range(engine: &Engine, place: &Content) -> Option<SourceRange> {
 /// helper defined in the preamble, `#let aside(x) = place(…)[Aside: #x]`,
 /// holds spans both there and at its call, and a paragraph written in between
 /// shares none of them.
-fn body_spans(body: &Content) -> FxHashSet<Span> {
+pub(crate) fn body_spans(body: &Content) -> FxHashSet<Span> {
     let mut spans = FxHashSet::default();
     let _ = body.traverse(&mut |element| {
         let span = element.span();
@@ -463,6 +934,37 @@ fn paragraphs_text(body: &Content) -> String {
         .join(" ")
 }
 
+/// What is open in each printed note's frames, by the footnote's location.
+///
+/// A note is drawn in a frame of its own at the bottom of the page, while
+/// the paragraph holding its marker — and whatever else of the flow — is
+/// still open. A note too long for its page continues in another frame on
+/// the next page, with no entry tag: its entry, and a list broken with it,
+/// opened on the first page. So each note's frames are walked with a stack
+/// of their own, kept from one frame to the next: the flow's tags neither
+/// enclose the note's content nor close what the note left open, and the
+/// rest of a note continues inside its entry.
+#[derive(Default)]
+struct NoteStacks(FxHashMap<Location, Vec<Open>>);
+
+impl NoteStacks {
+    fn take(&mut self, note: Location) -> Vec<Open> {
+        self.0.remove(&note).unwrap_or_default()
+    }
+
+    fn keep(&mut self, note: Location, stack: Vec<Open>) {
+        if !stack.is_empty() {
+            self.0.insert(note, stack);
+        }
+    }
+}
+
+impl std::fmt::Debug for NoteStacks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoteStacks").field("open", &self.0.len()).finish()
+    }
+}
+
 /// A tag that is currently open while walking the frames.
 struct Open {
     location: Location,
@@ -473,8 +975,41 @@ struct Open {
     /// `None` for non-paragraphs.
     par: Option<OpenPar>,
     is_artifact: bool,
-    is_container: bool,
-    list_scope: ListScope,
+    /// The slot this element opens, if any.
+    slot: Option<SlotKey>,
+    /// Whether this is an admonition's bracket (see the module docs): no
+    /// end tag of its own closes it, its end marker does.
+    bracket: bool,
+    /// For an admonition's printed title, the admonition's start marker.
+    title_of: Option<Location>,
+    /// Whether a paragraph inside it is absorbed (see [`absorbs`]).
+    absorbs: bool,
+    /// Whether it owns item slots (see [`owns_items`]).
+    owns_items: bool,
+    /// Whether it owns cell slots (see [`owns_cells`]).
+    owns_cells: bool,
+    /// For a table or grid, the first row of its footer (see
+    /// [`footer_start`]).
+    footer_start: Option<usize>,
+    /// For a cell, whether it may hold the content of a row laid out across
+    /// pages: a body cell, the first copy at its position.
+    is_body_cell: bool,
+    /// Whether it is a grid, which needs an anchor (see [`Ancestry::grids`]).
+    is_grid: bool,
+    /// Whether it is a `place` that does not float (see [`is_placed`]).
+    is_placed: bool,
+    /// For such a `place`, where it is written.
+    range: Option<SourceRange>,
+    /// For a figure, where its body is written (see [`is_placed_in`]).
+    body_range: Option<SourceRange>,
+    /// For a paragraph laid out in a figure's body, that figure: whether
+    /// the paragraph routes a node is settled once its glyphs are counted.
+    figure_par: Option<Location>,
+    /// For a cell, the table or grid it is a cell of, and its position.
+    cell_owner: Option<Location>,
+    cell_position: Option<(usize, usize)>,
+    /// Whether some element opened inside it.
+    had_child: bool,
     /// Glyph runs drawn for this paragraph inside / outside artifact-marked
     /// content. A paragraph all of whose glyphs are drawn inside an artifact
     /// is page furniture, whichever way the two tags happen to nest.
@@ -484,6 +1019,10 @@ struct Open {
     /// a heading, a list, a term list, a quote — so that drawing all of its
     /// text inside artifacts makes it decorative (see [`is_text_node`]).
     is_text_node: bool,
+    /// Whether the locales of the glyphs laid out in it are counted (see
+    /// [`Ancestry::lang_of`]): an element made of text, or a label text's
+    /// scope (see [`label_owner`]).
+    counts_locale: bool,
 }
 
 /// An open paragraph, as [`covering_par`] needs it.
@@ -547,6 +1086,30 @@ impl OpenPar {
     fn text(&self) -> &str {
         self.text.get_or_init(|| normalized_text(&self.content))
     }
+}
+
+/// The container owning the label text `inner` opens, if it opens one: a
+/// figure's caption is owned by the figure, a term by its description's
+/// slot, which also holds it, an admonition's printed title by its start
+/// marker.
+fn label_owner(inner: &Content, stack: &[Open]) -> Option<Location> {
+    let owner = |kind: SlotKind| {
+        stack
+            .iter()
+            .rev()
+            .find(|open| open.slot.is_some_and(|slot| slot.kind() == kind))
+            .map(|open| open.location)
+    };
+    if inner.elem() == FigureCaption::ELEM {
+        return owner(SlotKind::FigureBody);
+    }
+    if admonition::is_title(inner) {
+        return owner(SlotKind::AdmonitionBody);
+    }
+    let marker = inner.to_packed::<PdfMarkerTag>()?;
+    (marker.kind == PdfMarkerTagKind::TermsItemLabel)
+        .then(|| owner(SlotKind::TermDescription))
+        .flatten()
 }
 
 /// Whether `inner` becomes a node made of text alone. When every glyph such
@@ -663,28 +1226,38 @@ impl FloatPlaces {
 ///
 /// A float's body is not drawn between its `place` tags but in a group of its
 /// own, at the top or bottom of the page, which layout marks with the float
-/// as its logical parent ([`FrameParent`]). Inside that group, what is open
+/// as its logical parent (`FrameParent`). Inside that group, what is open
 /// on the stack from the page's flow — a long artifact still open across the
 /// page break, say — has nothing to do with the body: the body is decorative
 /// exactly when its `place` was written inside an artifact (see
-/// [`decorative_floats`]), or when an artifact opens inside the body itself.
+/// [`FloatPlaces`]), or when an artifact opens inside the body itself.
 #[derive(Debug, Clone, Copy)]
 struct DrawScope {
     /// Inside the body of a float written inside an artifact.
     decorative: bool,
     /// The stack depth where the current float body starts; `0` in the flow.
     base: usize,
+    /// The float whose body this is, as an index into the document's
+    /// floats; `None` in the flow.
+    float: Option<usize>,
 }
 
 impl DrawScope {
-    const FLOW: Self = Self { decorative: false, base: 0 };
+    const FLOW: Self = Self { decorative: false, base: 0, float: None };
 
     /// The scope of a group's content: a float's body starts afresh.
-    fn enter(self, group: &GroupItem, places: &FloatPlaces, depth: usize) -> Self {
+    fn enter(
+        self,
+        group: &GroupItem,
+        places: &FloatPlaces,
+        floats: &Floats,
+        depth: usize,
+    ) -> Self {
         match group.parent {
             Some(parent) if places.all.contains(&parent.location) => Self {
                 decorative: places.decorative.contains(&parent.location),
                 base: depth,
+                float: floats.by_location.get(&parent.location).copied(),
             },
             _ => self,
         }
@@ -711,47 +1284,141 @@ fn walk(
         match item {
             // Depth-first keeps the tag stream in document order.
             FrameItem::Group(group) => {
-                let scope = scope.enter(group, places, stack.len());
-                walk(&group.frame, engine, floats, places, scope, stack, ancestry);
+                let scope = scope.enter(group, places, floats, stack.len());
+                match group.parent {
+                    // A note's frame: what is open around it is the flow's,
+                    // not the note's (see `NoteStacks`).
+                    Some(parent) if ancestry.printed_notes.contains(&parent.location) => {
+                        let mut own = ancestry.note_stacks.take(parent.location);
+                        let scope = DrawScope {
+                            decorative: scope.decorative,
+                            base: 0,
+                            float: None,
+                        };
+                        walk(
+                            &group.frame,
+                            engine,
+                            floats,
+                            places,
+                            scope,
+                            &mut own,
+                            ancestry,
+                        );
+                        ancestry.note_stacks.keep(parent.location, own);
+                    }
+                    _ => {
+                        walk(
+                            &group.frame,
+                            engine,
+                            floats,
+                            places,
+                            scope,
+                            stack,
+                            ancestry,
+                        );
+                    }
+                }
             }
-            FrameItem::Tag(Tag::Start(inner, _)) => {
+            FrameItem::Tag(Tag::Start(inner, flags)) => {
                 let Some(location) = inner.location() else { continue };
                 let is_par = inner.elem() == ParElem::ELEM;
-                let in_floats = floats.holding(inner.span()).to_vec();
-
-                let par = is_par.then(|| {
-                    let mut par = OpenPar {
-                        range: content_range(engine, inner),
-                        content: inner.clone(),
-                        text: OnceCell::new(),
-                        floats: Vec::new(),
-                        floats_by_source: Vec::new(),
-                        body_of: Vec::new(),
-                    };
-                    for index in floats.candidates(&par) {
-                        let float = &floats.all[index];
-                        let by_range = float.holds_by_range(&par);
-                        let by_text = float.holds_by_text(&par);
-                        if by_range || by_text {
-                            par.floats.push(index);
-                        }
-                        let sure = by_range || (by_text && par.range.is_none());
-                        if sure {
-                            par.floats_by_source.push(index);
-                        }
-                        // Traversing the paragraph is the costly test, and
-                        // rarely needed: last.
-                        if sure
-                            && by_text
-                            && (par.range.is_none() || float.holds_in_body(&par))
+                if inner.elem() == GridElem::ELEM
+                    && ancestry.grid_locations.insert(location)
+                {
+                    ancestry.grids.push((location, inner.clone()));
+                }
+                if flags.introspectable && is_node_kind(inner) {
+                    for open in stack.iter().filter(|open| open.is_grid) {
+                        ancestry.grid_anchors.entry(open.location).or_insert(location);
+                        // A grid becomes a node once it has an anchor.
+                        if let Some((figure, placed)) =
+                            ancestry.grids_in_figures.remove(&open.location)
                         {
-                            par.body_of.push(index);
+                            ancestry.note_figure_node(figure, placed);
                         }
                     }
-                    par
-                });
+                }
+                let bracket = admonition::marker(inner);
+                if bracket == Some(admonition::Marker::End)
+                    && let Some(start) = close_bracket(stack)
+                {
+                    ancestry.admonitions.insert(start);
+                }
+                // An admonition laid out inside a paragraph: in an inline
+                // `box`, whose paragraph may render all of it.
+                if bracket == Some(admonition::Marker::Start)
+                    && let Some(par) = stack.get(scope.base..).and_then(|open| {
+                        open.iter().rev().find(|open| open.par.is_some())
+                    })
+                {
+                    ancestry.admonitions_in_par.insert(location, par.location);
+                }
+                let opens = match bracket {
+                    Some(admonition::Marker::Start) => {
+                        Some(SlotKey::AdmonitionBody(location))
+                    }
+                    _ => SlotKey::opened_by(inner, location),
+                };
+                let mut in_floats = floats.holding(inner.span()).to_vec();
+                // An admonition marker's span is in the authoring package,
+                // the same for every call: like a layout marker, it sits
+                // where its parent does — or, first in a float's body, where
+                // nothing of the body is open yet, in that float.
+                if bracket.is_some() {
+                    in_floats = match scope.float {
+                        Some(float) if stack.len() <= scope.base => vec![float],
+                        _ => stack
+                            .get(scope.base..)
+                            .and_then(<[Open]>::last)
+                            .map(|open| open.floats.clone())
+                            .unwrap_or_default(),
+                    };
+                }
+                // A marker is made by layout, often with no span of its own:
+                // it sits wherever what made it does. An item's body sits
+                // where its list does, any other marker where its parent does.
+                if inner.is::<PdfMarkerTag>() && in_floats.is_empty() {
+                    let maker = match opens {
+                        Some(SlotKey::Item(_) | SlotKey::TermDescription(_)) => {
+                            stack.iter().rev().find(|open| open.owns_items)
+                        }
+                        _ => stack.last(),
+                    };
+                    if let Some(maker) = maker {
+                        in_floats = maker.floats.clone();
+                    }
+                }
+
+                let par = is_par.then(|| open_par(engine, floats, inner));
                 if let Some(par) = &par
                     && let Some(parent) = covering_par(stack, par)
+                {
+                    ancestry.covered_by_par.insert(location, parent);
+                    // An admonition's printed title that an enclosing
+                    // paragraph renders.
+                    if let Some(admonition) =
+                        stack.iter().rev().find_map(|open| open.title_of)
+                    {
+                        ancestry.covered_titles.insert(admonition);
+                    }
+                }
+                // A list, a table, a grid, a block quote, a block raw or a
+                // block equation in an inline `box` is laid out inside the
+                // line of the paragraph that holds it, which renders its
+                // text: the same test as for a box's paragraph. A block
+                // quote whose own show rule boxes it (`show quote: it =>
+                // box(it.body)`) is not: the paragraph holds the quote's
+                // tags, and its text leaves the quote out (see
+                // `extract::is_excluded_scope`).
+                let is_quote = matches!(opens, Some(SlotKey::QuoteBody(_)));
+                if (owns_items(inner)
+                    || owns_cells(inner)
+                    || is_quote
+                    || is_block_leaf(inner))
+                    && stack.iter().any(|open| open.par.is_some())
+                    && let Some(parent) =
+                        covering_par(stack, &open_par(engine, floats, inner))
+                    && !(is_quote && holds_tag_of(stack, parent, location))
                 {
                     ancestry.covered_by_par.insert(location, parent);
                 }
@@ -760,41 +1427,189 @@ fn walk(
                 }
                 if stack
                     .iter()
-                    .any(|open| open.is_container && open.encloses(floats, &in_floats))
+                    .any(|open| open.absorbs && open.encloses(floats, &in_floats))
                 {
-                    ancestry.in_container.insert(location);
+                    ancestry.absorbed.insert(location);
                 }
-                if stack
-                    .iter()
-                    .rev()
-                    .filter(|open| open.encloses(floats, &in_floats))
-                    .map(|open| open.list_scope)
-                    .find(|scope| *scope != ListScope::Transparent)
-                    == Some(ListScope::Carrier)
-                {
-                    ancestry.list_carried.insert(location);
+                let mut figure_par = None;
+                match innermost_slot(stack, floats, &in_floats, location) {
+                    Some(Found::Slot(slot)) => {
+                        ancestry.slots.insert(location, slot);
+                        if let SlotKey::FigureBody(figure) = slot {
+                            if ancestry.in_artifact.contains(&location) {
+                                ancestry.figures_with_artifacts.insert(figure);
+                            } else if !ancestry.absorbed.contains(&location) {
+                                let placed = is_placed_in(stack, figure);
+                                let node = flags.introspectable && is_node_kind(inner);
+                                let covered =
+                                    ancestry.covered_by_par.contains_key(&location);
+                                // A label placed in a box is part of the
+                                // box's paragraph, yet still a positioned
+                                // piece of a drawing.
+                                if node && placed {
+                                    ancestry.figures_with_placed_nodes.insert(figure);
+                                }
+                                if covered {
+                                    // Its text is the covering paragraph's.
+                                } else if is_par {
+                                    // Settled when it ends: an empty one
+                                    // routes nothing.
+                                    figure_par = Some(figure);
+                                } else if node {
+                                    ancestry.note_figure_node(figure, placed);
+                                } else if inner.elem() == GridElem::ELEM {
+                                    // Settled when the grid finds its anchor.
+                                    ancestry
+                                        .grids_in_figures
+                                        .insert(location, (figure, placed));
+                                }
+                            }
+                        }
+                    }
+                    Some(Found::InTable(owner)) => {
+                        if let Some((_, cells)) = ancestry.fragment_cells.get(&owner)
+                            && let Some((slot, _)) = cells.last()
+                        {
+                            ancestry.slots.insert(location, *slot);
+                            if cells.len() > 1 {
+                                ancestry
+                                    .pending_fragments
+                                    .push((location, cells.clone()));
+                            }
+                        }
+                    }
+                    None => {}
                 }
 
+                let slot = opens;
+                let cell_owner = match slot {
+                    Some(SlotKey::Cell(_)) => stack
+                        .iter()
+                        .rev()
+                        .find(|open| open.owns_cells)
+                        .map(|open| open.location),
+                    _ => None,
+                };
+                if let Some(slot) = slot
+                    && let Some(owner) = cell_owner
+                    && let Some(position) = cell_position(inner)
+                {
+                    // The first copy of a position is the cell; a repeated
+                    // header's or footer's copies are not.
+                    ancestry
+                        .cell_slots
+                        .entry(owner)
+                        .or_default()
+                        .entry(position)
+                        .or_insert(slot);
+                }
+                if let Some(slot) = slot
+                    && matches!(slot, SlotKey::Item(_) | SlotKey::TermDescription(_))
+                {
+                    // An item's body belongs to the innermost list around it:
+                    // the list's own layout makes the tag, so no float can be
+                    // drawn in between.
+                    if let Some(owner) = stack.iter().rev().find(|open| open.owns_items) {
+                        ancestry.item_slots.entry(owner.location).or_default().push(slot);
+                    }
+                    // A tight item's single paragraph opens around its body:
+                    // that paragraph is the item's.
+                    if let Some(parent) = stack.last()
+                        && parent.par.is_some()
+                    {
+                        ancestry.slots.insert(parent.location, slot);
+                    }
+                }
+
+                // A cell may hold a broken row's content only if it is the
+                // cell at its position (not a repeated copy) and not in a
+                // footer, whose first copy is drawn below the row's first
+                // page.
+                let is_body_cell = match (slot, cell_owner, cell_position(inner)) {
+                    (Some(slot), Some(owner), Some((x, y))) => {
+                        let footer = stack
+                            .iter()
+                            .rev()
+                            .find(|open| open.location == owner)
+                            .and_then(|open| open.footer_start)
+                            .is_some_and(|start| y >= start)
+                            || is_footer_cell(inner);
+                        !footer && ancestry.cell_slot(owner, x, y) == Some(slot)
+                    }
+                    _ => false,
+                };
+                if let Some(parent) = stack.last_mut() {
+                    parent.had_child = true;
+                }
+                let label_owner = label_owner(inner, stack);
+                if let Some(owner) = label_owner {
+                    ancestry.label_scopes.entry(owner).or_insert(location);
+                }
                 stack.push(Open {
                     location,
                     floats: in_floats,
                     par,
                     is_artifact: inner.elem() == ArtifactElem::ELEM,
-                    is_container: is_emitted_container(inner.elem()),
-                    list_scope: list_scope(inner),
+                    slot,
+                    bracket: bracket == Some(admonition::Marker::Start),
+                    title_of: label_owner.filter(|_| admonition::is_title(inner)),
+                    absorbs: absorbs(inner),
+                    owns_items: owns_items(inner),
+                    owns_cells: owns_cells(inner),
+                    footer_start: footer_start(inner),
+                    is_body_cell,
+                    is_grid: inner.elem() == GridElem::ELEM,
+                    is_placed: is_placed(inner),
+                    range: is_placed(inner)
+                        .then(|| source_range(engine, inner.span()))
+                        .flatten(),
+                    body_range: inner
+                        .to_packed::<FigureElem>()
+                        .and_then(|figure| source_range(engine, figure.body.span())),
+                    figure_par,
+                    cell_owner,
+                    cell_position: cell_position(inner),
+                    had_child: false,
                     glyphs_in_artifact: 0,
                     glyphs_outside_artifact: 0,
                     is_text_node: is_par || is_text_node(inner),
+                    counts_locale: is_par || is_text_node(inner) || label_owner.is_some(),
                 });
             }
             FrameItem::Tag(Tag::End(location, ..)) => {
                 // Pop to the matching frame. Tags are balanced in practice;
                 // popping by search rather than blindly keeps a stray end tag
                 // from unwinding unrelated ancestors.
-                if let Some(index) =
-                    stack.iter().rposition(|open| open.location == *location)
+                // A bracket is closed by its end marker, not by the end tag
+                // of its start marker, which shares its location.
+                if let Some(index) = stack
+                    .iter()
+                    .rposition(|open| open.location == *location && !open.bracket)
                 {
                     for open in stack.drain(index..) {
+                        // A cell holding only untagged content (a `rect`, a
+                        // line) counts as holding nothing here: what follows
+                        // in its table is still a broken row's content.
+                        if let (Some(slot), Some(owner), Some((_, row))) =
+                            (open.slot, open.cell_owner, open.cell_position)
+                            && !open.had_child
+                            && open.is_body_cell
+                        {
+                            let (last_row, cells) =
+                                ancestry.fragment_cells.entry(owner).or_default();
+                            if *last_row != row {
+                                *last_row = row;
+                                cells.clear();
+                            }
+                            cells.push((slot, open.location));
+                        }
+                        if let Some(figure) = open.figure_par {
+                            if open.glyphs_outside_artifact > 0 {
+                                ancestry.figures_with_nodes.insert(figure);
+                            } else if open.glyphs_in_artifact > 0 {
+                                ancestry.figures_with_artifacts.insert(figure);
+                            }
+                        }
                         if open.is_text_node
                             && open.glyphs_outside_artifact == 0
                             && open.glyphs_in_artifact > 0
@@ -804,19 +1619,110 @@ fn walk(
                     }
                 }
             }
-            FrameItem::Text(_) => {
+            FrameItem::Text(text) => {
                 let in_artifact = scope.in_artifact(stack);
-                for open in stack.iter_mut().filter(|open| open.is_text_node) {
-                    if in_artifact {
-                        open.glyphs_in_artifact += 1;
-                    } else {
-                        open.glyphs_outside_artifact += 1;
+                let locale = Locale::new(text.lang, text.region);
+                for open in stack.iter_mut() {
+                    if open.is_text_node {
+                        if in_artifact {
+                            open.glyphs_in_artifact += 1;
+                        } else {
+                            open.glyphs_outside_artifact += 1;
+                        }
+                    }
+                    if in_artifact || !open.counts_locale {
+                        continue;
+                    }
+                    let counts = ancestry.locales.entry(open.location).or_default();
+                    match counts.iter_mut().find(|(known, _)| *known == locale) {
+                        Some((_, count)) => *count += text.glyphs.len(),
+                        None => counts.push((locale, text.glyphs.len())),
                     }
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Close the innermost open admonition bracket, if any, and return its start
+/// marker: an end marker with no bracket open closes nothing.
+fn close_bracket(stack: &mut Vec<Open>) -> Option<Location> {
+    let index = stack.iter().rposition(|open| open.bracket)?;
+    Some(stack.remove(index).location)
+}
+
+/// Whether the open paragraph `par` holds the tags of the element at
+/// `location` in its own content, realized: then its text leaves that
+/// element out when it is an excluded scope.
+fn holds_tag_of(stack: &[Open], par: Location, location: Location) -> bool {
+    let Some(content) = stack
+        .iter()
+        .rev()
+        .find(|open| open.location == par)
+        .and_then(|open| open.par.as_ref())
+        .map(|par| &par.content)
+    else {
+        return false;
+    };
+    content
+        .traverse(&mut |element: Content| match element
+            .to_packed::<typst_library::introspection::TagElem>(
+        ) {
+            Some(tag) if tag.tag.location() == location => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        })
+        .is_break()
+}
+
+/// The innermost slot enclosing an element held by `held_by` (see
+/// [`Floats::holding`]): the innermost open slot that encloses it (see
+/// [`Open::encloses`]) or, for a float's body, the slot open where the float
+/// is written. A float's body can be drawn before that slot opens — on an
+/// earlier page, while its list is already open — and then only the
+/// float's own record says where it belongs.
+///
+/// An element laid out in a table or a grid with no cell open around it is
+/// the content of a row laid out across pages, whose cells' tags closed
+/// before it (see the module docs): `InTable` names that table or grid.
+///
+/// A slot that `own`, the element itself, opens is never its slot. A figure
+/// with a `placement` floats through a `place` that its own show rule
+/// writes inside it: that float is written in the figure's body, and the
+/// figure is held by it, since they share their span.
+fn innermost_slot(
+    stack: &[Open],
+    floats: &Floats,
+    held_by: &[usize],
+    own: Location,
+) -> Option<Found> {
+    let written_in = held_by
+        .iter()
+        .filter_map(|index| floats.all[*index].slot)
+        .find(|slot| slot.location() != own);
+    for open in stack.iter().rev().filter(|open| open.encloses(floats, held_by)) {
+        if open.owns_cells {
+            return Some(Found::InTable(open.location));
+        }
+        let Some(slot) = open.slot else { continue };
+        // A slot inside the float's body is the element's own. One the
+        // float is written in may have a deeper one that is not open yet.
+        let in_body =
+            held_by.is_empty() || held_by.iter().any(|index| open.floats.contains(index));
+        return Some(Found::Slot(if in_body {
+            slot
+        } else {
+            written_in.unwrap_or(slot)
+        }));
+    }
+    written_in.map(Found::Slot)
+}
+
+/// What [`innermost_slot`] finds.
+enum Found {
+    Slot(SlotKey),
+    /// Laid out directly in this table or grid, outside any cell.
+    InTable(Location),
 }
 
 /// A half-open byte range in one source file.
@@ -862,6 +1768,37 @@ fn content_range(engine: &Engine, content: &Content) -> Option<SourceRange> {
         ControlFlow::<()>::Continue(())
     });
     range
+}
+
+/// An element laid out as (part of) a paragraph, as [`covering_par`] tests
+/// it: its source range, and the floats that may hold it.
+fn open_par(engine: &Engine, floats: &Floats, inner: &Content) -> OpenPar {
+    let mut par = OpenPar {
+        range: content_range(engine, inner),
+        content: inner.clone(),
+        text: OnceCell::new(),
+        floats: Vec::new(),
+        floats_by_source: Vec::new(),
+        body_of: Vec::new(),
+    };
+    for index in floats.candidates(&par) {
+        let float = &floats.all[index];
+        let by_range = float.holds_by_range(&par);
+        let by_text = float.holds_by_text(&par);
+        if by_range || by_text {
+            par.floats.push(index);
+        }
+        let sure = by_range || (by_text && par.range.is_none());
+        if sure {
+            par.floats_by_source.push(index);
+        }
+        // Traversing the paragraph is the costly test, and
+        // rarely needed: last.
+        if sure && by_text && (par.range.is_none() || float.holds_in_body(&par)) {
+            par.body_of.push(index);
+        }
+    }
+    par
 }
 
 /// The paragraph `par` is part of, if any.

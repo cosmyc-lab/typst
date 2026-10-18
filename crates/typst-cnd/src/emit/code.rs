@@ -14,18 +14,17 @@ pub fn convert(
     raw: &Packed<RawElem>,
     styles: StyleChain,
 ) -> typst_library::diag::SourceResult<(CodeNode, NodeRecord)> {
-    let block = raw.block.get(styles);
     let text = extract_text(&raw.clone().pack());
     let lang = raw.lang.get_cloned(styles).map(Into::into);
 
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = raw.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed, &[])?;
+    // A code block carries no edges (spec §4: only texts hold them).
+    let (record, _) = convert::make_record(engine, introspector, &packed, &[])?;
 
     let mut node = CodeNode::new(id, text.into(), location);
     node.lang = lang;
-    node.block = block;
 
     Ok((node, record))
 }

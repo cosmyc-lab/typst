@@ -4,42 +4,52 @@ use typst_library::foundations::{Packed, StyleChain};
 use typst_library::introspection::Introspector;
 use typst_library::model::HeadingElem;
 
-use crate::emit::convert::{self, HeadingFrame, NodeRecord};
-use crate::emit::extract::extract_with_markers;
+use crate::emit::convert::{self, NodeRecord};
+use crate::emit::extract::{label_text, source_text};
 use crate::location::placeholder_location;
 use crate::model::HeadingNode;
 
-/// Convert a realized heading element into a CND heading node.
+/// Convert a realized heading element into a CND heading node. `lang` is
+/// its language when it differs from the document's.
+///
+/// Its `heading_path` holds its own segment only: the path of the section
+/// it sits in is prepended where it is placed (`convert::assemble`).
 pub fn convert(
     engine: &mut Engine,
     introspector: &dyn Introspector,
     heading: &Packed<HeadingElem>,
     styles: StyleChain,
-    stack: &[HeadingFrame],
+    lang: Option<EcoString>,
 ) -> typst_library::diag::SourceResult<(HeadingNode, NodeRecord)> {
     let level = heading.resolve_level(styles).get() as i32;
     // Typst yields an empty string for an unnumbered heading; the format has
-    // no such third state — `number` is a resolved value or absent.
+    // no such third state — `numbering` is a resolved value or absent.
     let numbering: EcoString = heading.numbers.clone().unwrap_or_default();
-    let number = (!numbering.is_empty()).then(|| numbering.to_string());
-    let (text, markers) = extract_with_markers(&heading.body);
+    // A heading's body is met as authored: a label text.
+    let (mut text, edges) = label_text(&heading.body, &|span| source_text(engine, span));
+    text.lang = lang.map(Into::into);
     let segment = if numbering.is_empty() {
-        text.clone()
+        text.value.clone()
     } else {
-        ecow::eco_format!("{numbering} {text}")
+        format!("{numbering} {}", text.value)
     };
 
-    let mut heading_path: Vec<String> = stack
-        .iter()
-        .map(|frame| frame.path.last().cloned().unwrap_or_default())
-        .collect();
-    heading_path.push(segment.into());
+    let heading_path = vec![segment];
 
     let id = uuid::Uuid::new_v4();
     let location = placeholder_location();
     let packed = heading.clone().pack();
-    let record = convert::make_record(engine, introspector, &packed, &markers)?;
+    // The heading's own record; its text's edges are the label text's.
+    let (mut record, _) = convert::make_record(engine, introspector, &packed, &[])?;
+    record.add_text(edges);
 
-    let node = HeadingNode::new(id, level, number, text.into(), heading_path, location);
+    let node = HeadingNode::new(
+        id,
+        level,
+        convert::numbering(Some(numbering), None::<String>),
+        text,
+        heading_path,
+        location,
+    );
     Ok((node, record))
 }
