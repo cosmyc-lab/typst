@@ -4,6 +4,7 @@ use typst_library::introspection::Introspector;
 use typst_library::loading::DataSource;
 use typst_library::model::{FigureElem, FigureKind};
 use typst_library::visualize::ImageElem;
+use typst_syntax::VirtualRoot;
 use uuid::Uuid;
 
 use crate::emit::convert::{self, NodeRecord};
@@ -107,12 +108,19 @@ pub(crate) fn figure_kind(
     }
 }
 
+/// The image's path, relative to the root it resolved in. A package image
+/// is prefixed with its package (`@namespace/name:version/file`), since a
+/// bare path would read as a project file of the same name.
 fn image_path(image: &Packed<ImageElem>) -> Option<String> {
     match &image.source.source {
-        DataSource::Path(path) => path
-            .resolve_if_some(image.span().id())
-            .ok()
-            .map(|resolved| resolved.vpath().get_without_slash().to_string()),
+        DataSource::Path(path) => {
+            let resolved = path.resolve_if_some(image.span().id()).ok()?;
+            let file = resolved.vpath().get_without_slash();
+            Some(match resolved.root() {
+                VirtualRoot::Project => file.to_string(),
+                VirtualRoot::Package(spec) => format!("{spec}/{file}"),
+            })
+        }
         DataSource::Bytes(_) => None,
     }
 }

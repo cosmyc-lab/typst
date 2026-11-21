@@ -1106,6 +1106,25 @@ fn bare_image_emits_a_standalone_image_node() {
 }
 
 #[test]
+fn a_package_image_path_names_its_package() {
+    // A path alone is relative to the root it resolved in: `logo.svg` from a
+    // package and `logo.svg` from the project are different files. The
+    // package image's path names its package, the project image's does not.
+    let cnd = cnd_for_example("package_image.typ");
+    let paths: Vec<&str> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter_map(|n| match n {
+            CndNode::Image(i) => i.path.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        ["@local/pkgimg:0.1.0/logo.svg", "newsletter/newsletter-cover.png"]
+    );
+}
+
+#[test]
 fn figure_wrapped_image_is_not_also_emitted_bare() {
     // The bare-image collection must not double-emit an image that a
     // figure already carries as its child.

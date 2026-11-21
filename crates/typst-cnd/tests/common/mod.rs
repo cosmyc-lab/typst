@@ -7,13 +7,21 @@
 #![allow(dead_code)]
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use typst::diag::FileResult;
+use typst::foundations::{Bytes, Datetime, Duration};
+use typst::syntax::{FileId, Source, VirtualRoot};
+use typst::text::{Font, FontBook};
+use typst::utils::LazyHash;
+use typst::{Library, World};
 use typst_cnd::{
     Cnd, CndDocument, CndNode, ListItem, ListNode, RichText, cnd_from_document,
     cnd_to_json, walk,
     world::{CndWorld, built_at_now, source_info},
 };
+use typst_kit::files::{FileLoader, FileStore};
+use typst_kit::packages::FsPackages;
 
 /// Node counts over the whole tree: every slot of every container (a list
 /// item's paragraph, a nested list, a cell's paragraph) is counted.
@@ -53,11 +61,94 @@ pub fn example_path(name: &str) -> PathBuf {
     examples_dir().join(name)
 }
 
+/// The package directory the test world serves first, laid out like a
+/// Typst data directory (`{namespace}/{name}/{version}/`).
+pub fn fixture_packages_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/packages")
+}
+
+/// A [`CndWorld`] whose package lookups try [`fixture_packages_dir`] first,
+/// so an example can import a package that ships with the tests (no network,
+/// nothing read from the machine's own package directories). Any package the
+/// fixture directory does not hold falls through to the wrapped world.
+pub struct ExampleWorld {
+    inner: CndWorld,
+    fixtures: FileStore<FixturePackages>,
+}
+
+struct FixturePackages(FsPackages);
+
+impl FileLoader for FixturePackages {
+    fn load(&self, id: FileId) -> FileResult<Bytes> {
+        let VirtualRoot::Package(spec) = id.root() else {
+            unreachable!("only package files are routed to the fixtures")
+        };
+        let root = self.0.obtain(spec).expect("routed only when the fixture holds it");
+        root.load(id.vpath())
+    }
+}
+
+impl ExampleWorld {
+    pub fn new(path: &Path) -> Self {
+        let inner = CndWorld::new(path).unwrap_or_else(|err| {
+            panic!("failed to initialize world for {}: {err:?}", path.display())
+        });
+        let packages = FsPackages::new(fixture_packages_dir());
+        Self {
+            inner,
+            fixtures: FileStore::new(FixturePackages(packages)),
+        }
+    }
+
+    fn served_by_fixtures(&self, id: FileId) -> bool {
+        match id.root() {
+            VirtualRoot::Package(spec) => self.fixtures.loader().0.obtain(spec).is_some(),
+            VirtualRoot::Project => false,
+        }
+    }
+}
+
+impl World for ExampleWorld {
+    fn library(&self) -> &LazyHash<Library> {
+        self.inner.library()
+    }
+
+    fn book(&self) -> &LazyHash<FontBook> {
+        self.inner.book()
+    }
+
+    fn main(&self) -> FileId {
+        self.inner.main()
+    }
+
+    fn source(&self, id: FileId) -> FileResult<Source> {
+        if self.served_by_fixtures(id) {
+            self.fixtures.source(id)
+        } else {
+            self.inner.source(id)
+        }
+    }
+
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        if self.served_by_fixtures(id) {
+            self.fixtures.file(id)
+        } else {
+            self.inner.file(id)
+        }
+    }
+
+    fn font(&self, index: usize) -> Option<Font> {
+        self.inner.font(index)
+    }
+
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
+        self.inner.today(offset)
+    }
+}
+
 pub fn compile_example(name: &str) -> CndDocument {
     let path = example_path(name);
-    let world = CndWorld::new(&path).unwrap_or_else(|err| {
-        panic!("failed to initialize world for {}: {err:?}", path.display())
-    });
+    let world = ExampleWorld::new(&path);
     let warned = typst::compile::<CndDocument>(&world);
     for warning in &warned.warnings {
         eprintln!("warning: {warning:?}");
@@ -69,7 +160,7 @@ pub fn compile_example(name: &str) -> CndDocument {
 
 pub fn cnd_for_example(name: &str) -> Cnd {
     let path = example_path(name);
-    let world = CndWorld::new(&path).expect("world");
+    let world = ExampleWorld::new(&path);
     let doc = compile_example(name);
     cnd_from_document(&doc, source_info(&world), built_at_now())
 }
