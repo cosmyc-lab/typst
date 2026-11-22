@@ -508,9 +508,7 @@ fn cnd_pdf_options(config: &CompileConfig) -> PdfOptions {
 fn cnd_preview_options(config: &CompileConfig) -> RenderOptions {
     RenderOptions {
         render_bleed: false,
-        format: PngFormatOptions {
-            pixel_per_pt: Some(Scalar::new(config.cnd_preview_ppi / 72.0)),
-        },
+        format: PngFormatOptions { ppi: Some(Scalar::new(config.cnd_preview_ppi)) },
     }
 }
 

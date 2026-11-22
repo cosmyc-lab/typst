@@ -924,7 +924,7 @@ pub fn label_text(
         if !record.ref_targets.contains(&reference.target) {
             record.ref_targets.push(reference.target);
         }
-        let supplement = match reference.supplement.get_ref(materialized) {
+        let supplement = match &reference.supplement.get_ref(materialized).v {
             Smart::Custom(Some(Supplement::Content(content))) => {
                 Some(extract_text(content).into())
             }
