@@ -1,5 +1,6 @@
 use std::cell::OnceCell;
 
+use ecow::EcoString;
 use krilla::geom as kg;
 use krilla::tagging::{BBox, Identifier, Node, TagKind};
 use typst_library::layout::{Abs, Point, Rect};
@@ -11,26 +12,22 @@ use crate::tags::context::table::build_table;
 use crate::tags::groups::GroupKind;
 use crate::tags::tree::ResolvedTextAttrs;
 use crate::tags::tree::Tree;
-use crate::tags::util::{Id, IdVec};
-use crate::util::AbsExt;
+use crate::tags::util::{Id, IdVec, PropertyOptRef};
 
 pub use crate::tags::context::figure::FigureCtx;
 pub use crate::tags::context::grid::GridCtx;
 pub use crate::tags::context::list::ListCtx;
-pub use crate::tags::context::outline::OutlineCtx;
 pub use crate::tags::context::table::TableCtx;
 
 mod figure;
 mod grid;
 mod list;
-mod outline;
 mod table;
 
 pub type TableId = Id<TableCtx>;
 pub type GridId = Id<GridCtx>;
 pub type FigureId = Id<FigureCtx>;
 pub type ListId = Id<ListCtx>;
-pub type OutlineId = Id<OutlineCtx>;
 pub type BBoxId = Id<BBoxCtx>;
 pub type TagId = Id<TagKind>;
 pub type AnnotationId = Id<krilla::annotation::Annotation>;
@@ -67,7 +64,6 @@ pub struct Ctx {
     pub grids: IdVec<GridCtx>,
     pub figures: IdVec<FigureCtx>,
     pub lists: IdVec<ListCtx>,
-    pub outlines: IdVec<OutlineCtx>,
     pub bboxes: IdVec<BBoxCtx>,
 }
 
@@ -78,7 +74,6 @@ impl Ctx {
             grids: IdVec::new(),
             figures: IdVec::new(),
             lists: IdVec::new(),
-            outlines: IdVec::new(),
             bboxes: IdVec::new(),
         }
     }
@@ -89,6 +84,15 @@ impl Ctx {
 
     pub fn bbox(&self, kind: &GroupKind) -> Option<&BBoxCtx> {
         Some(self.bboxes.get(kind.bbox()?))
+    }
+
+    pub fn alt<'a>(&'a self, kind: &'a GroupKind) -> Option<&'a EcoString> {
+        match kind {
+            &GroupKind::Figure(id, ..) => self.figures.get(id).elem.alt.opt_ref(),
+            GroupKind::Formula(formula, ..) => formula.alt.opt_ref(),
+            GroupKind::Image(image, ..) => image.alt.opt_ref(),
+            _ => None,
+        }
     }
 }
 
@@ -190,10 +194,10 @@ impl BBoxCtx {
     pub fn to_krilla(&self) -> Option<BBox> {
         let (page_idx, rect) = self.rect?;
         let rect = kg::Rect::from_ltrb(
-            rect.min.x.to_f32(),
-            rect.min.y.to_f32(),
-            rect.max.x.to_f32(),
-            rect.max.y.to_f32(),
+            rect.min.x.to_pt_f32(),
+            rect.min.y.to_pt_f32(),
+            rect.max.x.to_pt_f32(),
+            rect.max.y.to_pt_f32(),
         )
         .unwrap();
         Some(BBox::new(page_idx, rect))

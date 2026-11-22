@@ -2,12 +2,13 @@ use krilla::geom::{Path, PathBuilder, Rect};
 use krilla::surface::Surface;
 use krilla::tagging::ArtifactType;
 use typst_library::diag::SourceResult;
+use typst_library::foundations::Smart;
 use typst_library::visualize::{Geometry, Shape};
 use typst_syntax::Span;
 use typst_utils::defer;
 
 use crate::convert::{FrameContext, GlobalContext};
-use crate::util::{AbsExt, TransformExt, convert_path};
+use crate::util::{TransformExt, convert_path};
 use crate::{paint, tags};
 
 #[typst_macros::time(name = "handle shape")]
@@ -17,7 +18,7 @@ pub(crate) fn handle_shape(
     surface: &mut Surface,
     gc: &mut GlobalContext,
     span: Span,
-    artifact_type: ArtifactType,
+    artifact_type: Smart<ArtifactType>,
 ) -> SourceResult<()> {
     let mut handle = tags::shape(gc, fc, surface, shape, artifact_type);
     let surface = handle.surface();
@@ -44,10 +45,9 @@ pub(crate) fn handle_shape(
             None
         };
 
-        let stroke =
-            shape.stroke.as_ref().filter(|stroke| stroke.thickness.to_f32() > 0.0);
-
-        let stroke = if let Some(stroke) = &stroke {
+        let stroke = if let Some(stroke) = &shape.stroke
+            && stroke.thickness.to_pt_f32() > 0.0
+        {
             let stroke = paint::convert_stroke(
                 gc,
                 stroke,
@@ -79,11 +79,11 @@ fn convert_geometry(geometry: &Geometry) -> Option<Path> {
     match geometry {
         Geometry::Line(l) => {
             path_builder.move_to(0.0, 0.0);
-            path_builder.line_to(l.x.to_f32(), l.y.to_f32());
+            path_builder.line_to(l.x.to_pt_f32(), l.y.to_pt_f32());
         }
         Geometry::Rect(size) => {
-            let w = size.x.to_f32();
-            let h = size.y.to_f32();
+            let w = size.x.to_pt_f32();
+            let h = size.y.to_pt_f32();
             let rect = if w < 0.0 || h < 0.0 {
                 // krilla doesn't normally allow for negative dimensions, but
                 // Typst supports them, so we apply a transform if needed.
