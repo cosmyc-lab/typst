@@ -5702,3 +5702,29 @@ fn every_05_node_type_and_mark_kind_is_emitted() {
     let note = cnd.footnotes.iter().map(|n| edges(&n.children)).collect::<Vec<_>>();
     assert!(note.contains(&(true, true, false, true)), "footnote: {note:?}");
 }
+
+#[test]
+fn a_restarted_footnote_counter_keeps_labels_unique() {
+    let cnd = cnd_for_example("footnote_counter_restart.typ");
+    let labels: Vec<&str> =
+        cnd.footnotes.iter().map(|note| note.label.as_str()).collect();
+    assert_eq!(labels, ["1", "2", "1~2"]);
+    assert_labels_globally_unique(&cnd);
+    assert_pool_refs_resolve(&cnd);
+    // Each marker points at its own note, whatever number it shows.
+    let note_of = |label: &str| {
+        let note = cnd.footnotes.iter().find(|note| note.label == label).unwrap();
+        footnote_text(note)
+    };
+    let first = paragraph_text(&cnd, "First");
+    let first_notes: Vec<String> =
+        first.footnotes.iter().map(|edge| note_of(&edge.label)).collect();
+    assert_eq!(first_notes, ["Note A1", "Note A2"]);
+    let second = paragraph_text(&cnd, "Second");
+    let second_notes: Vec<String> =
+        second.footnotes.iter().map(|edge| note_of(&edge.label)).collect();
+    assert_eq!(second_notes, ["Note B1"]);
+    // The marker's span still covers the number the document shows.
+    let span = second.footnotes[0].text_span.as_ref().expect("a span");
+    assert_eq!(codepoint_slice(&second.value, span), "1");
+}
