@@ -7,6 +7,7 @@ use typst_library::model::Refable;
 
 use crate::emit::convert::{self, NodeRecord};
 use crate::emit::extract::extract_text;
+use crate::emit::linear::math_linear;
 use crate::location::placeholder_location;
 use crate::model::{MathNode, RawSource};
 
@@ -19,7 +20,7 @@ pub fn convert(
     let mut equation = equation.clone();
     equation.synthesize(engine, styles)?;
 
-    let text = extract_text(&equation.body);
+    let text = math_linear(&equation.body);
     let numbering: Option<EcoString> = equation.numbering().and_then(|numbering| {
         let location = equation.location()?;
         equation
@@ -35,7 +36,7 @@ pub fn convert(
     // An equation carries no edges (spec §4: only texts hold them).
     let (record, _) = convert::make_record(engine, introspector, &packed, &[])?;
 
-    let mut node = MathNode::new(id, text.into(), location);
+    let mut node = MathNode::new(id, text, location);
     node.numbering = convert::numbering(numbering, None::<String>);
     node.raw = convert::source_text(engine, equation.span()).map(RawSource::typst);
 

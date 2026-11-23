@@ -1491,6 +1491,7 @@ fn example_files_exist() {
         "figure_description.typ",
         "ref_exact_targets.typ",
         "math_refs.typ",
+        "math_linear.typ",
         "doc_metadata.typ",
         "doc_metadata_markers.typ",
         "admonitions.typ",
@@ -4631,10 +4632,63 @@ fn math_from_a_function_is_this_instance() {
 fn math_with_inserted_content_keeps_its_source() {
     let cnd = cnd_for_example("marks.typ");
     let text = paragraph_text(&cnd, "Inserted");
+    assert_eq!(math_marks(text), [("x + 1".to_string(), Some("#[x] + 1".to_string()))]);
+}
+
+/// The text and source of the block equation labelled `label`.
+fn math_node(cnd: &typst_cnd::Cnd, label: &str) -> (String, Option<String>) {
+    match find_by_label(&cnd.nodes, label) {
+        Some(CndNode::Math(math)) => {
+            (math.text.clone(), math.raw.as_ref().map(|raw| raw.value.clone()))
+        }
+        other => panic!("no math node labelled {label:?}: {other:?}"),
+    }
+}
+
+/// A block equation's text is the linear form of what Typst renders, its
+/// `raw` the source (spec §6.6).
+#[test]
+fn block_math_text_is_a_linear_form() {
+    let cnd = cnd_for_example("math_linear.typ");
     assert_eq!(
-        math_marks(text),
-        [("#[x] + 1".to_string(), Some("#[x] + 1".to_string()))]
+        math_node(&cnd, "eq-integral"),
+        (
+            "∫_0^1 x^2 dx = 1/3".to_string(),
+            Some("$ integral_0^1 x^2 dif x = 1/3 $".to_string())
+        )
     );
+    assert_eq!(math_node(&cnd, "eq-matrix").0, "[[1, 2], [3, 4]] (x, y) = (5, 6)");
+    assert_eq!(math_node(&cnd, "eq-cases").0, "f(x) = {x if x > 0; 0 otherwise}");
+    // An equation built in code: the text of the formula, not its `alt`.
+    assert_eq!(math_node(&cnd, "eq-alt").0, "a^2 + b^2");
+}
+
+/// An inline equation's value is its linear form, and its `math` mark keeps
+/// the source as `raw` (spec §4.1).
+#[test]
+fn inline_math_value_is_a_linear_form() {
+    let cnd = cnd_for_example("math_linear.typ");
+    let greek = paragraph_text(&cnd, "Greek");
+    assert_eq!(greek.value, "Greek: α β ≤ γ in a paragraph.");
+    assert_eq!(
+        math_marks(greek),
+        [("α β ≤ γ".to_string(), Some("alpha beta <= gamma".to_string()))]
+    );
+    let root = paragraph_text(&cnd, "A root");
+    assert_eq!(
+        math_marks(root),
+        [("sqrt(x^2 + 1)/2".to_string(), Some("sqrt(x^2 + 1)/2".to_string()))]
+    );
+}
+
+/// An inline equation built with `math.equation(alt: …, $x^2$)`: its mark
+/// carries the source of the formula it was given.
+#[test]
+fn inline_math_built_in_code_keeps_its_formula_source() {
+    let cnd = cnd_for_example("math_linear.typ");
+    let text = paragraph_text(&cnd, "With alt");
+    assert_eq!(text.value, "With alt: x^2 here.");
+    assert_eq!(math_marks(text), [("x^2".to_string(), Some("x^2".to_string()))]);
 }
 
 #[test]

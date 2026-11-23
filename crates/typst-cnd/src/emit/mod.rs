@@ -5,6 +5,7 @@ pub mod convert;
 pub mod extract;
 pub mod figure;
 pub mod heading;
+pub mod linear;
 pub mod list;
 pub mod math;
 pub mod paragraph;
