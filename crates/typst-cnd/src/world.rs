@@ -24,6 +24,7 @@ pub struct CndWorld {
     fonts: LazyLock<FontStore, Box<dyn Fn() -> FontStore + Send + Sync>>,
     files: FileStore<CndFiles>,
     now: Time,
+    inputs: Dict,
 }
 
 /// Builds the standard library a CND compilation needs: `inputs` as
@@ -87,7 +88,7 @@ impl CndWorld {
 
         Ok(Self {
             main,
-            library: LazyHash::new(cnd_library(inputs, [])),
+            library: LazyHash::new(cnd_library(inputs.clone(), [])),
             fonts: LazyLock::new(Box::new(move || {
                 let mut store = FontStore::new();
                 store.extend(fonts::embedded());
@@ -105,7 +106,16 @@ impl CndWorld {
                 ),
             }),
             now: Time::system(),
+            inputs,
         })
+    }
+
+    /// Enables in-development `features` (for instance
+    /// [`Feature::A11yExtras`], which `pdf.header-cell` needs). A world
+    /// enables none by default.
+    pub fn with_features(mut self, features: impl IntoIterator<Item = Feature>) -> Self {
+        self.library = LazyHash::new(cnd_library(self.inputs.clone(), features));
+        self
     }
 
     pub fn reset(&mut self) {
