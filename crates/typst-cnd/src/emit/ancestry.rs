@@ -222,6 +222,10 @@ pub struct Ancestry {
     /// For each element made of text (see [`is_text_node`]), the locales
     /// its glyphs are set in, with how many glyphs each, in the order met.
     locales: FxHashMap<Location, Vec<(Locale, usize)>>,
+    /// The locales of every glyph laid out outside an artifact, counted once
+    /// per glyph run, with how many glyphs each, in the order met (see
+    /// [`Ancestry::majority_lang`]).
+    doc_locales: Vec<(Locale, usize)>,
     /// The scope a label text is laid out in, by the container that owns
     /// it: a figure's caption by the figure, a term by its description's
     /// slot (see [`Ancestry::label_lang_of`]).
@@ -459,13 +463,21 @@ impl Ancestry {
     /// foreign word take that word's language. The tie-break keeps the
     /// result deterministic.
     pub fn lang_of(&self, location: Location) -> Option<EcoString> {
-        let mut best: Option<(Locale, usize)> = None;
-        for &(locale, count) in self.locales.get(&location)? {
-            if best.is_none_or(|(_, most)| count > most) {
-                best = Some((locale, count));
-            }
-        }
-        best.map(|(locale, _)| locale.rfc_3066())
+        majority(self.locales.get(&location)?)
+    }
+
+    /// The language most of the document's glyphs are set in, page
+    /// furniture and other artifacts left out, the first one met on a tie
+    /// (as in [`Ancestry::lang_of`]). `None` when the document lays out no
+    /// glyph.
+    pub fn majority_lang(&self) -> Option<EcoString> {
+        majority(&self.doc_locales)
+    }
+
+    /// The locale of the document's first glyph laid out outside an
+    /// artifact, in frame order. `None` when the document lays out no glyph.
+    pub fn first_locale(&self) -> Option<Locale> {
+        self.doc_locales.first().map(|(locale, _)| *locale)
     }
 
     /// The language of the label text owned by `owner` (see
@@ -489,6 +501,17 @@ impl Ancestry {
             || (!self.figures_with_nodes.contains(&figure)
                 && !self.figures_with_artifacts.contains(&figure))
     }
+}
+
+/// The locale counted most often in `counts`, the first one met on a tie.
+fn majority(counts: &[(Locale, usize)]) -> Option<EcoString> {
+    let mut best: Option<(Locale, usize)> = None;
+    for &(locale, count) in counts {
+        if best.is_none_or(|(_, most)| count > most) {
+            best = Some((locale, count));
+        }
+    }
+    best.map(|(locale, _)| locale.rfc_3066())
 }
 
 /// Whether a paragraph laid out inside `inner` is absorbed (see
@@ -1622,6 +1645,13 @@ fn walk(
             FrameItem::Text(text) => {
                 let in_artifact = scope.in_artifact(stack);
                 let locale = Locale::new(text.lang, text.region);
+                if !in_artifact {
+                    let counts = &mut ancestry.doc_locales;
+                    match counts.iter_mut().find(|(known, _)| *known == locale) {
+                        Some((_, count)) => *count += text.glyphs.len(),
+                        None => counts.push((locale, text.glyphs.len())),
+                    }
+                }
                 for open in stack.iter_mut() {
                     if open.is_text_node {
                         if in_artifact {

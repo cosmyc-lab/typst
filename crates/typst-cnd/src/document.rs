@@ -7,11 +7,14 @@ use typst_library::diag::{SourceResult, error};
 use typst_library::engine::Engine;
 use typst_library::format::DocumentFormatOptions;
 use typst_library::foundations::{
-    Content, Datetime, Label, Output, Selector, Smart, StyleChain, Target, Value,
+    Content, Datetime, Label, Output, Selector, SequenceElem, Smart, StyleChain,
+    StyledElem, Target, Value,
 };
-use typst_library::introspection::Introspector;
-use typst_library::model::{Document, DocumentInfo};
-use typst_library::text::Locale;
+use typst_library::introspection::{
+    CounterUpdateElem, Introspector, MetadataElem, StateUpdateElem,
+};
+use typst_library::model::{Document, DocumentInfo, ParbreakElem};
+use typst_library::text::{Locale, SpaceElem, TextElem};
 use typst_syntax::Span;
 use typst_utils::PicoStr;
 
@@ -99,13 +102,13 @@ impl Output for CndDocument {
         let paged = layout_document(engine, content, styles)?;
         let introspector = paged.introspector().clone();
         let info = paged.info().clone();
-        let lang = doc_lang(&info, styles);
         let options = paged.options().clone();
 
         // Containment is read off the laid-out frames: `Introspector::query`
         // returns a flat list, but the emit pipeline must know which located
         // elements sit inside a paragraph or inside page furniture.
         let ancestry = Ancestry::from_document(&paged, engine);
+        let lang = doc_lang(&info, content, styles, &ancestry);
 
         let mut ctx = realize_and_convert(
             engine,
@@ -179,15 +182,76 @@ fn realize_and_convert(
     Ok(ctx)
 }
 
-/// The document's language: the locale the author set for it (Typst reads
-/// it from the text language set before any content), or else the text
-/// locale at the document's root, which is Typst's default (`en`) when
-/// nothing sets one. Every text inherits it (spec §4.1).
-fn doc_lang(info: &DocumentInfo, styles: StyleChain) -> EcoString {
-    match info.locale {
-        Smart::Custom(locale) => locale.rfc_3066(),
-        Smart::Auto => Locale::get_in(styles).rfc_3066(),
+/// The document's language, which every text inherits (spec §4.1): the
+/// locale the author set for the whole document (see [`author_locale`]),
+/// else the language most of its glyphs are set in (see
+/// `Ancestry::majority_lang`), else the text locale at the document's root,
+/// Typst's default (`en`).
+fn doc_lang(
+    info: &DocumentInfo,
+    content: &Content,
+    styles: StyleChain,
+    ancestry: &Ancestry,
+) -> EcoString {
+    author_locale(info, content, styles, ancestry)
+        .map(|locale| locale.rfc_3066())
+        .or_else(|| ancestry.majority_lang())
+        .unwrap_or_else(|| Locale::get_in(styles).rfc_3066())
+}
+
+/// The locale the author set for the whole document, before any content.
+///
+/// Typst's `DocumentInfo::locale` is the first text language set at the
+/// top level, but that may as well be an inline `text(lang:)` on a single
+/// foreign word in the middle of the document. It is the author's when the
+/// set rules at the top of the document set it (see [`leading_locale`]), or
+/// when the document's first glyph is set in it: a template applied with
+/// `show:` sets it before the content it lays out, inside a function the
+/// walk of the authored content cannot look into.
+fn author_locale(
+    info: &DocumentInfo,
+    content: &Content,
+    styles: StyleChain,
+    ancestry: &Ancestry,
+) -> Option<Locale> {
+    leading_locale(content, styles).or_else(|| match info.locale {
+        Smart::Custom(locale) if ancestry.first_locale() == Some(locale) => Some(locale),
+        _ => None,
+    })
+}
+
+/// The text language the outer styles set, or that set rules set before
+/// any content.
+///
+/// A set rule styles everything after it in its scope, so at the top of a
+/// document it is a styled element that is the only visible part of its
+/// sequence; an inline `text(lang:)` styles its body alone, which has
+/// siblings. The walk descends through such sole children, gathering their
+/// styles, and stops at the first content: the text language set by then,
+/// if any, is the author's. A show rule is not applied here: what a
+/// template sets is not found.
+fn leading_locale(content: &Content, styles: StyleChain) -> Option<Locale> {
+    if let Some(styled) = content.to_packed::<StyledElem>() {
+        return leading_locale(&styled.child, styles.chain(&styled.styles));
     }
+    if let Some(sequence) = content.to_packed::<SequenceElem>() {
+        let mut visible = sequence.children.iter().filter(|child| !is_invisible(child));
+        if let (Some(only), None) = (visible.next(), visible.next()) {
+            return leading_locale(only, styles);
+        }
+    }
+    styles.has(TextElem::lang).then(|| Locale::get_in(styles))
+}
+
+/// Whether `content` lays out nothing that reads as document content:
+/// white space between set rules, or an element that only records
+/// something (metadata, a counter or state update).
+fn is_invisible(content: &Content) -> bool {
+    content.is::<SpaceElem>()
+        || content.is::<ParbreakElem>()
+        || content.is::<MetadataElem>()
+        || content.is::<CounterUpdateElem>()
+        || content.is::<StateUpdateElem>()
 }
 
 /// Produce a CND document from content (used internally by `Output::create`).

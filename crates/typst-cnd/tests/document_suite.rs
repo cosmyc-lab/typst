@@ -5728,3 +5728,74 @@ fn a_restarted_footnote_counter_keeps_labels_unique() {
     let span = second.footnotes[0].text_span.as_ref().expect("a span");
     assert_eq!(codepoint_slice(&second.value, span), "1");
 }
+
+/// The value and `lang` of every text, in reading order.
+fn text_langs(cnd: &typst_cnd::Cnd) -> Vec<(String, Option<String>)> {
+    all_nodes_full(cnd)
+        .into_iter()
+        .flat_map(|node| node.texts())
+        .map(|text| (text.value.clone(), text.lang.clone()))
+        .collect()
+}
+
+#[test]
+fn an_inline_foreign_phrase_does_not_make_the_document_language() {
+    let cnd = cnd_for_example("lang_inline_foreign.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("en"));
+    for (value, lang) in text_langs(&cnd) {
+        assert_eq!(lang, None, "{value:?} inherits the document's language");
+    }
+}
+
+#[test]
+fn the_document_language_is_the_majority_one_when_none_is_set() {
+    let cnd = cnd_for_example("lang_majority.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("fr"));
+    assert_eq!(
+        text_langs(&cnd),
+        [
+            ("An English opening with one Wort.".into(), Some("en".into())),
+            (
+                "Un long paragraphe en français, avec bien plus de mots que l'ouverture."
+                    .into(),
+                None
+            ),
+            ("Un second paragraphe en français, lui aussi assez long.".into(), None),
+        ]
+    );
+}
+
+#[test]
+fn a_language_set_before_any_content_is_the_document_language() {
+    let cnd = cnd_for_example("lang_set_before_content.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("fr"));
+    assert_eq!(
+        text_langs(&cnd),
+        [
+            ("Titre".into(), None),
+            (
+                "A long English paragraph, with many more words than the French heading."
+                    .into(),
+                Some("en".into())
+            ),
+            ("A second English paragraph, quite long as well.".into(), Some("en".into())),
+        ]
+    );
+}
+
+#[test]
+fn a_language_a_template_sets_first_is_the_document_language() {
+    let cnd = cnd_for_example("lang_template.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("de"));
+    assert_eq!(
+        text_langs(&cnd),
+        [
+            ("Ein kurzer Satz.".into(), None),
+            (
+                "A long English paragraph, with many more words than the German one."
+                    .into(),
+                Some("en".into())
+            ),
+        ]
+    );
+}
