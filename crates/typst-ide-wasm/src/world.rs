@@ -81,7 +81,7 @@ impl BrowserWorld {
     /// Does nothing if `path` is malformed.
     pub fn add_source(&mut self, path: &str, text: &str) {
         let Some(id) = file_id(path) else { return };
-        self.sources.insert(id, Source::new(id, text.into()));
+        self.sources.insert(id, Source::new(id, text));
     }
 
     /// Adds or replaces a non-source file.

@@ -20,7 +20,7 @@ use typst_library::diag::{
     At, ExpectInternal, SourceDiagnostic, SourceResult, bail, error,
 };
 use typst_library::format::Complete;
-use typst_library::foundations::{NativeElement, Repr};
+use typst_library::foundations::{NativeElement, Repr, Smart};
 use typst_library::introspection::{Introspector, Location, PagedPosition, Tag};
 use typst_library::layout::{Abs, Frame, FrameItem, GroupItem, Sides, Size, Transform};
 use typst_library::model::{Document as _, HeadingElem, LateLinkResolver};
@@ -38,8 +38,7 @@ use crate::shape::handle_shape;
 use crate::tags::{self, GroupId, Tags};
 use crate::text::handle_text;
 use crate::util::{
-    AbsExt, SpotColorantFromNameExt, TransformExt, ValidatorsExt, convert_path,
-    display_font,
+    SpotColorantFromNameExt, TransformExt, ValidatorsExt, convert_path, display_font,
 };
 use crate::{PdfFormat, PdfOptions};
 
@@ -109,10 +108,10 @@ fn convert_pages(gc: &mut GlobalContext, document: &mut Document) -> SourceResul
         // some viewers won't handle pages that have zero sized pages.
         let mut settings = PageSettings::from_wh(
             (typst_page.frame.width() + typst_page.bleed.left + typst_page.bleed.right)
-                .to_f32()
+                .to_pt_f32()
                 .max(3.0),
             (typst_page.frame.height() + typst_page.bleed.top + typst_page.bleed.bottom)
-                .to_f32()
+                .to_pt_f32()
                 .max(3.0),
         )
         .expect_internal("invalid page size")
@@ -120,10 +119,10 @@ fn convert_pages(gc: &mut GlobalContext, document: &mut Document) -> SourceResul
 
         if !typst_page.bleed.is_zero() {
             settings = settings.with_trim_box(Rect::from_ltrb(
-                typst_page.bleed.left.to_f32(),
-                typst_page.bleed.top.to_f32(),
-                (typst_page.bleed.left + typst_page.frame.width()).to_f32(),
-                (typst_page.bleed.top + typst_page.frame.height()).to_f32(),
+                typst_page.bleed.left.to_pt_f32(),
+                typst_page.bleed.top.to_pt_f32(),
+                (typst_page.bleed.left + typst_page.frame.width()).to_pt_f32(),
+                (typst_page.bleed.top + typst_page.frame.height()).to_pt_f32(),
             ));
         }
 
@@ -350,7 +349,7 @@ pub(crate) fn handle_frame(
             surface,
             gc,
             Span::detached(),
-            ArtifactType::Background,
+            Smart::Custom(ArtifactType::Background),
         )?;
     }
 
@@ -366,12 +365,12 @@ pub(crate) fn handle_frame(
             FrameItem::Group(g) => handle_group(fc, g, surface, gc)?,
             FrameItem::Text(t) => handle_text(fc, t, surface, gc)?,
             FrameItem::Shape(s, span) => {
-                handle_shape(fc, s, surface, gc, *span, ArtifactType::Layout)?;
+                handle_shape(fc, s, surface, gc, *span, Smart::Auto)?;
             }
             FrameItem::Image(image, size, span) => {
                 handle_image(gc, fc, image, *size, surface, *span)?;
             }
-            FrameItem::Link(dest, size) => handle_link(fc, gc, dest, *size)?,
+            FrameItem::Link(link, size) => handle_link(fc, gc, link, *size)?,
             FrameItem::Tag(Tag::Start(_, flags)) => {
                 if flags.tagged {
                     tags::handle_start(gc, fc, surface);
@@ -724,6 +723,13 @@ fn convert_validation_error(
                 hint: "make sure your images and equations have alt text";
             )
         }
+        ValidationError::MissingFieldAltName(loc) => {
+            let span = to_span(*loc);
+            error!(
+                span, "{prefix} missing alt name";
+                hint: "make sure your form fields have an alt name";
+            )
+        }
         ValidationError::NoDocumentLanguage => error!(
             Span::detached(),
             "{prefix} missing document language";
@@ -755,6 +761,29 @@ fn convert_validation_error(
             "{prefix} missing document date";
             hint: "set the date of the document";
         ),
+        // This should never happen as Typst does not support setting rollover or down appearance
+        ValidationError::AnnotationHasConditionalAppearance(loc) => {
+            let span = to_span(*loc);
+            error!(
+                span, "{prefix} annotation has rollover or down appearance";
+                hint: "please report this as a bug";
+            )
+        }
+        ValidationError::ContainsMutatingAction(loc) => {
+            let span = to_span(*loc);
+            error!(
+                span, "{prefix} document contains an action that may change its visual appearance";
+                hint: "remove the action from the element";
+            )
+        }
+        ValidationError::ContainsAdditionalActions(loc) => {
+            let span = to_span(*loc);
+            error!(
+                span, "{prefix} annotation performs an action when clicked";
+                hint: "actions are not supported in this PDF standard";
+                hint: "remove the action from the element";
+            )
+        }
         ValidationError::EmbeddedPDF(loc) => {
             error!(
                 to_span(*loc),

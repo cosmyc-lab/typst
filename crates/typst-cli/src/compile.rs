@@ -319,10 +319,7 @@ pub fn compile_once(
 
     // Add static warnings (for deprecated CLI flags and such).
     for warning in &config.warnings {
-        warnings.push(
-            SourceDiagnostic::warning(Span::detached(), warning.message())
-                .with_hints(warning.hints().iter().map(Into::into)),
-        );
+        warnings.push(warning.clone().into_warning_at(Span::detached()));
     }
 
     match &output {
@@ -511,9 +508,7 @@ fn cnd_pdf_options(config: &CompileConfig) -> PdfOptions {
 fn cnd_preview_options(config: &CompileConfig) -> RenderOptions {
     RenderOptions {
         render_bleed: false,
-        format: PngFormatOptions {
-            pixel_per_pt: Some(Scalar::new(config.cnd_preview_ppi / 72.0)),
-        },
+        format: PngFormatOptions { ppi: Some(Scalar::new(config.cnd_preview_ppi)) },
     }
 }
 
@@ -821,9 +816,7 @@ fn svg_options(config: &CompileConfig) -> SvgOptions {
 fn png_options(config: &CompileConfig) -> RenderOptions {
     RenderOptions {
         render_bleed: false,
-        format: PngFormatOptions {
-            pixel_per_pt: config.ppi.map(|ppi| Scalar::new(ppi / 72.0)),
-        },
+        format: PngFormatOptions { ppi: config.ppi.map(Scalar::new) },
     }
 }
 

@@ -50,13 +50,19 @@ impl Tree {
         self.progressions[self.prog_cursor]
     }
 
-    /// Find the lowest link ancestor in the tree.
-    pub fn parent_link(&self) -> Option<(GroupId, &Packed<LinkMarker>)> {
-        let mut current = self.current();
+    /// Find a link ancestor in the tree.
+    pub fn parent_link(&self, loc: Location) -> Option<(GroupId, &Packed<LinkMarker>)> {
+        let located = self.groups.by_loc(&loc)?;
 
+        // Links are breakable, thus there can be multiple groups that are
+        // mapped to the same location. So we look for a group that is both an
+        // ancestor *and* in the list of groups associated with the location.
+        let mut current = self.current();
         while current != GroupId::INVALID {
             let group = self.groups.get(current);
-            if let Some(link) = group.kind.as_link() {
+            if let Some(link) = group.kind.as_link()
+                && located.ids().contains(&current)
+            {
                 return Some((current, link));
             }
             current = group.parent;
@@ -75,6 +81,11 @@ impl Tree {
     pub fn parent_bbox(&mut self) -> Option<&mut BBoxCtx> {
         let id = *self.state.bbox_stack.last()?;
         Some(self.ctx.bboxes.get_mut(id))
+    }
+
+    /// Whether an ancestor has an alternative description.
+    pub fn parent_alt(&self) -> Option<GroupId> {
+        self.state.current_alt
     }
 
     pub fn assert_finished_traversal(&self) -> HintedStrResult<()> {
@@ -136,6 +147,8 @@ impl std::ops::DerefMut for TraversalStates {
 struct TraversalState {
     /// The highest artifact ancestor in the tree.
     current_artifact: Option<(GroupId, Artifact)>,
+    /// The highest ancestor that has an alternative description.
+    current_alt: Option<GroupId>,
     /// The stack of ancestors that have a [`GroupKind::bbox`].
     bbox_stack: Vec<BBoxId>,
     /// The stack of text attributes.
@@ -146,6 +159,7 @@ impl TraversalState {
     fn new() -> Self {
         Self {
             current_artifact: None,
+            current_alt: None,
             bbox_stack: Vec::new(),
             text_attrs: TextAttrs::new(),
         }
@@ -156,6 +170,7 @@ impl TraversalState {
         if self.current_artifact.take_if(|(i, _)| *i == id).is_some() {
             surface.end_tagged();
         }
+        self.current_alt.take_if(|i| *i == id);
         if let Some(id) = group.kind.bbox() {
             self.bbox_stack.pop_if(|i| *i == id);
         }
@@ -196,6 +211,7 @@ pub fn step_start_tag(gc: &mut GlobalContext, fc: &FrameContext, surface: &mut S
     } else {
         open_group(
             &gc.tags.tree.groups,
+            &gc.tags.tree.ctx,
             &mut gc.tags.tree.state,
             fc,
             gc.options,
@@ -240,7 +256,14 @@ pub fn enter_logical_child(
         current = group.parent;
         Some((id, group))
     });
-    open_multiple_groups(&mut new_state, fc, gc.options, surface, rev_iter);
+    open_multiple_groups(
+        &gc.tags.tree.ctx,
+        &mut new_state,
+        fc,
+        gc.options,
+        surface,
+        rev_iter,
+    );
 
     gc.tags.tree.state.push(new_state);
 }
@@ -325,6 +348,7 @@ fn step_break(
         Some((id, group))
     });
     open_multiple_groups(
+        &gc.tags.tree.ctx,
         &mut gc.tags.tree.state,
         fc,
         gc.options,
@@ -335,6 +359,7 @@ fn step_break(
 
 fn open_group(
     groups: &Groups,
+    ctx: &Ctx,
     state: &mut TraversalState,
     fc: &FrameContext,
     options: &PdfOptions<Complete>,
@@ -348,6 +373,9 @@ fn open_group(
         state.current_artifact = Some((id, ty));
         surface.start_tagged(ContentTag::Artifact(ty));
     }
+    if state.current_alt.is_none() && ctx.alt(&group.kind).is_some() {
+        state.current_alt = Some(id);
+    }
     if let Some(bbox) = &group.kind.bbox() {
         state.bbox_stack.push(*bbox);
     }
@@ -359,6 +387,7 @@ fn open_group(
 /// Since the groups need to be opened in order, but we can only iterate the
 /// parent hierarchy from bottom to top, this cannot simply call [`open_group`].
 fn open_multiple_groups<'a>(
+    ctx: &Ctx,
     state: &mut TraversalState,
     fc: &FrameContext,
     options: &PdfOptions<Complete>,
@@ -366,12 +395,16 @@ fn open_multiple_groups<'a>(
     rev_iter: impl Iterator<Item = (GroupId, &'a Group)>,
 ) {
     let mut new_artifact = None;
+    let mut new_alt = None;
     let bbox_start = state.bbox_stack.len();
     let text_attr_start = state.text_attrs.len();
 
     for (id, group) in rev_iter {
         if let Some(ty) = group.kind.to_artifact(options, fc.page_size()) {
             new_artifact = Some((id, ty));
+        }
+        if ctx.alt(&group.kind).is_some() {
+            new_alt = Some(id);
         }
         if let Some(bbox) = group.kind.bbox() {
             state.bbox_stack.insert(bbox_start, bbox);
@@ -386,6 +419,9 @@ fn open_multiple_groups<'a>(
     {
         state.current_artifact = new_artifact;
         surface.start_tagged(ContentTag::Artifact(ty));
+    }
+    if state.current_alt.is_none() {
+        state.current_alt = new_alt;
     }
 }
 
@@ -408,7 +444,7 @@ fn close_group(tree: &mut Tree, surface: &mut Surface, id: GroupId) -> GroupId {
             // multiple parent groups with the same location, only insert the
             // children for the first parent group.
             if let Some(located) = tree.groups.by_loc(&loc)
-                && located.id == id
+                && located.id() == id
                 && let Some(children) = tree.logical_children.get(&loc)
             {
                 tree.groups.push_groups(id, children);
@@ -449,19 +485,8 @@ fn close_group(tree: &mut Tree, surface: &mut Surface, id: GroupId) -> GroupId {
                 tree.groups.push_group(direct_parent, id);
             }
         }
-        GroupKind::Outline(..) => {
+        GroupKind::OutlineEntry(_) => {
             tree.groups.push_group(direct_parent, id);
-        }
-        GroupKind::OutlineEntry(entry, _) => {
-            if let GroupKind::Outline(outline, _) = tree.groups.get(semantic_parent).kind
-            {
-                let outline_ctx = tree.ctx.outlines.get_mut(outline);
-                let entry = entry.clone();
-                tree.groups.get_mut(id).parent = semantic_parent;
-                outline_ctx.insert(&mut tree.groups, semantic_parent, entry, id);
-            } else {
-                tree.groups.push_group(direct_parent, id);
-            }
         }
         GroupKind::Table(..) => {
             tree.groups.push_group(direct_parent, id);

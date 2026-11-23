@@ -1531,7 +1531,7 @@ pub fn figure_counter_label(
     // Only meaningful next to a number; an unnumbered figure displays no
     // counter at all, so a label for it would be a word nothing precedes.
     figure.numbering.get_ref(styles).as_ref()?;
-    match figure.supplement.get_ref(styles) {
+    match &figure.supplement.get_ref(styles).v {
         typst_library::foundations::Smart::Custom(Some(Supplement::Content(
             supplement,
         ))) => {
