@@ -226,6 +226,9 @@ pub struct Ancestry {
     /// per glyph run, with how many glyphs each, in the order met (see
     /// [`Ancestry::majority_lang`]).
     doc_locales: Vec<(Locale, usize)>,
+    /// The text element holding the document's first glyph laid out outside
+    /// an artifact, in frame order (see [`Ancestry::first_text_lang`]).
+    first_text: Option<Location>,
     /// The scope a label text is laid out in, by the container that owns
     /// it: a figure's caption by the figure, a term by its description's
     /// slot (see [`Ancestry::label_lang_of`]).
@@ -484,10 +487,12 @@ impl Ancestry {
         majority(&self.doc_locales)
     }
 
-    /// The locale of the document's first glyph laid out outside an
-    /// artifact, in frame order. `None` when the document lays out no glyph.
-    pub fn first_locale(&self) -> Option<Locale> {
-        self.doc_locales.first().map(|(locale, _)| *locale)
+    /// The language of the document's first text (see
+    /// [`Ancestry::lang_of`]): the innermost element whose locales are
+    /// counted around the first glyph laid out outside an artifact, in frame
+    /// order. `None` when there is no such glyph.
+    pub fn first_text_lang(&self) -> Option<EcoString> {
+        self.lang_of(self.first_text?)
     }
 
     /// The language of the label text owned by `owner` (see
@@ -1666,6 +1671,13 @@ fn walk(
                 let in_artifact = scope.in_artifact(stack);
                 let locale = Locale::new(text.lang, text.region);
                 if !in_artifact {
+                    if ancestry.first_text.is_none() {
+                        ancestry.first_text = stack
+                            .iter()
+                            .rev()
+                            .find(|open| open.counts_locale)
+                            .map(|open| open.location);
+                    }
                     let counts = &mut ancestry.doc_locales;
                     match counts.iter_mut().find(|(known, _)| *known == locale) {
                         Some((_, count)) => *count += text.glyphs.len(),

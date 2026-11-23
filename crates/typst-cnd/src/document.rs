@@ -205,9 +205,11 @@ fn doc_lang(
 /// top level, but that may as well be an inline `text(lang:)` on a single
 /// foreign word in the middle of the document. It is the author's when the
 /// set rules at the top of the document set it (see [`leading_locale`]), or
-/// when the document's first glyph is set in it: a template applied with
-/// `show:` sets it before the content it lays out, inside a function the
-/// walk of the authored content cannot look into.
+/// when the document's first text is mostly set in it: a template applied
+/// with `show:` sets it before the content it lays out, inside a function
+/// the walk of the authored content cannot look into. A document opening on
+/// a foreign phrase inside an otherwise English paragraph is not in that
+/// phrase's language.
 fn author_locale(
     info: &DocumentInfo,
     content: &Content,
@@ -215,7 +217,11 @@ fn author_locale(
     ancestry: &Ancestry,
 ) -> Option<Locale> {
     leading_locale(content, styles).or_else(|| match info.locale {
-        Smart::Custom(locale) if ancestry.first_locale() == Some(locale) => Some(locale),
+        Smart::Custom(locale)
+            if ancestry.first_text_lang().as_deref() == Some(&*locale.rfc_3066()) =>
+        {
+            Some(locale)
+        }
         _ => None,
     })
 }

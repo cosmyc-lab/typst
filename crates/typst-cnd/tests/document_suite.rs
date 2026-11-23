@@ -5904,3 +5904,25 @@ fn outline_and_bibliography_headings_keep_the_content_that_follows_them() {
         cnd.bibliography.iter().map(|entry| entry.label.as_str()).collect();
     assert_eq!(keys, ["smith2024"]);
 }
+
+#[test]
+fn an_opening_foreign_phrase_does_not_make_the_document_language() {
+    let cnd = cnd_for_example("lang_opening_phrase.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("en"));
+    for (value, lang) in text_langs(&cnd) {
+        assert_eq!(lang, None, "{value:?} inherits the document's language");
+    }
+}
+
+#[test]
+fn a_footnote_number_a_node_carries_takes_a_suffix() {
+    let cnd = cnd_for_example("footnote_label_clash.typ");
+    assert!(label_exists(&cnd.nodes, "1"), "the heading keeps its label");
+    let labels: Vec<&str> =
+        cnd.footnotes.iter().map(|note| note.label.as_str()).collect();
+    assert_eq!(labels, ["1~2"]);
+    assert_labels_globally_unique(&cnd);
+    let par = paragraph_text(&cnd, "A paragraph with a note");
+    let edges: Vec<&str> = par.footnotes.iter().map(|edge| edge.label.as_str()).collect();
+    assert_eq!(edges, ["1~2"]);
+}

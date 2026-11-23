@@ -815,7 +815,10 @@ fn push_equation(
 /// are separate (`Name:#h(1fr)Value` reads "Name: Value"). Text right after
 /// it drops its leading whitespace, so `A #h(1cm) B` keeps one space, and
 /// one at an end of the text is trimmed. Zero or negative spacing (kerning,
-/// `L#h(-0.1em)A`) joins what it sits between, and writes nothing.
+/// `L#h(-0.1em)A`) joins what it sits between, and writes nothing. A mixed
+/// value (`1em - 2pt`) counts as positive when any of its parts (ratio,
+/// absolute length, em) is: its sign depends on the font size and the
+/// container, which this walk does not know.
 fn push_spacing(amount: &Spacing, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
     let positive = match amount {
         Spacing::Fr(fr) => fr.get() > 0.0,
