@@ -594,8 +594,12 @@ pub fn convert_from_introspector(
         items.push((loc, elem));
     }
 
+    // The heading the outline or the bibliography prints is no node.
     for elem in introspector.query(&HeadingElem::ELEM.select()) {
         let Some(loc) = elem.location() else { continue };
+        if ancestry.is_generated_title(loc) {
+            continue;
+        }
         items.push((loc, elem));
     }
 

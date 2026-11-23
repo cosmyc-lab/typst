@@ -5874,3 +5874,20 @@ fn horizontal_spacing_is_a_space_and_soft_hyphens_are_no_text() {
     let soft = paragraph_text(&cnd, "soft-hyphen");
     assert_eq!(mark_slices(soft, typst_cnd::STRONG), ["bold"]);
 }
+
+#[test]
+fn outline_and_bibliography_headings_are_no_nodes() {
+    let cnd = cnd_for_example("generated_headings.typ");
+    assert_eq!(heading_texts(&cnd.nodes), ["Intro"]);
+    assert_eq!(node_types(&cnd.nodes), ["paragraph", "heading"]);
+    assert_eq!(
+        paragraph_values(&cnd.nodes),
+        ["An opening paragraph before any section."]
+    );
+    let CndNode::Heading(intro) = &cnd.nodes[1] else { unreachable!() };
+    assert_eq!(paragraph_values(&intro.children), ["Text citing [1]."]);
+    // The bibliography stays in its pool.
+    let keys: Vec<&str> =
+        cnd.bibliography.iter().map(|entry| entry.label.as_str()).collect();
+    assert_eq!(keys, ["smith2024"]);
+}

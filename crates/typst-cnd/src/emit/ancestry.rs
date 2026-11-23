@@ -237,6 +237,9 @@ pub struct Ancestry {
     /// The start markers whose printed title an enclosing paragraph
     /// renders.
     covered_titles: FxHashSet<Location>,
+    /// The headings the outline or the bibliography prints as its title
+    /// (see [`Ancestry::is_generated_title`]).
+    generated_titles: FxHashSet<Location>,
 }
 
 impl Ancestry {
@@ -436,6 +439,14 @@ impl Ancestry {
     /// node.
     pub fn is_absorbed(&self, location: Location) -> bool {
         self.absorbed.contains(&location) || self.is_artifact(location)
+    }
+
+    /// Whether the heading at `location` is the title the outline or the
+    /// bibliography prints: it titles nothing the CND holds as nodes (the
+    /// outline's entries are absorbed, the bibliography is its pool), so it
+    /// is no node.
+    pub fn is_generated_title(&self, location: Location) -> bool {
+        self.generated_titles.contains(&location)
     }
 
     /// Note that an element that may become a node is laid out in the body
@@ -1007,6 +1018,9 @@ struct Open {
     title_of: Option<Location>,
     /// Whether a paragraph inside it is absorbed (see [`absorbs`]).
     absorbs: bool,
+    /// Whether it is the outline or the bibliography, whose heading is
+    /// printed by it (see [`Ancestry::is_generated_title`]).
+    prints_title: bool,
     /// Whether it owns item slots (see [`owns_items`]).
     owns_items: bool,
     /// Whether it owns cell slots (see [`owns_cells`]).
@@ -1345,6 +1359,11 @@ fn walk(
             FrameItem::Tag(Tag::Start(inner, flags)) => {
                 let Some(location) = inner.location() else { continue };
                 let is_par = inner.elem() == ParElem::ELEM;
+                if inner.elem() == HeadingElem::ELEM
+                    && stack.iter().any(|open| open.prints_title)
+                {
+                    ancestry.generated_titles.insert(location);
+                }
                 if inner.elem() == GridElem::ELEM
                     && ancestry.grid_locations.insert(location)
                 {
@@ -1577,6 +1596,8 @@ fn walk(
                     bracket: bracket == Some(admonition::Marker::Start),
                     title_of: label_owner.filter(|_| admonition::is_title(inner)),
                     absorbs: absorbs(inner),
+                    prints_title: inner.elem() == OutlineElem::ELEM
+                        || inner.elem() == BibliographyElem::ELEM,
                     owns_items: owns_items(inner),
                     owns_cells: owns_cells(inner),
                     footer_start: footer_start(inner),
