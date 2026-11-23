@@ -115,6 +115,76 @@ fn root_flag_resolves_absolute_imports_from_a_nested_main() {
     );
 }
 
+/// Writes a project whose main file reads an included file, an image, a
+/// data file and a bibliography, and returns the main file.
+fn write_multi_file_project(dir: &Path) -> PathBuf {
+    write(dir, "chapter.typ", "== Chapter\n\nIncluded text.\n");
+    write(
+        dir,
+        "pic.svg",
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#,
+    );
+    write(dir, "data.json", r#"{"value": "one"}"#);
+    write(
+        dir,
+        "refs.bib",
+        "@book{key,\n  title = {A Title},\n  author = {Doe, Jane},\n  year = {2020},\n}\n",
+    );
+    write(
+        dir,
+        "main.typ",
+        "#set document(title: \"Hash Probe\", author: \"Test\")\n= Probe\n\n\
+         #include \"chapter.typ\"\n\n#image(\"pic.svg\", alt: \"A square\")\n\n\
+         Value: #json(\"data.json\").at(\"value\")\n\nSee @key.\n\n\
+         #bibliography(\"refs.bib\")\n",
+    )
+}
+
+fn cli_source_hash(main: &Path, out: &Path) -> String {
+    run_ok(exec().arg("compile").arg(main).arg(out));
+    read_cnd(out).source.expect("source").hash
+}
+
+/// `source.hash` covers every file the compilation read, and the CLI
+/// computes it exactly as the typst-cnd library entry point does.
+#[test]
+fn cnd_source_hash_covers_every_input_file_and_matches_the_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = write_multi_file_project(dir.path());
+    let out = dir.path().join("out.cnd");
+
+    let cli = cli_source_hash(&main, &out);
+
+    let mut world = typst_cnd::world::CndWorld::new_with_inputs(
+        &main,
+        typst::foundations::Dict::default(),
+    )
+    .unwrap();
+    typst::compile::<typst_cnd::CndDocument>(&world).output.unwrap();
+    let read = world.input_files();
+    assert_eq!(cli, typst_cnd::world::source_info(&world, read).hash);
+
+    let mut previous = cli;
+    for (file, contents) in [
+        ("chapter.typ", "== Chapter\n\nEdited text.\n"),
+        (
+            "pic.svg",
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="blue"/></svg>"#,
+        ),
+        ("data.json", r#"{"value": "two"}"#),
+        (
+            "refs.bib",
+            "@book{key,\n  title = {A Title},\n  author = {Doe, Jane},\n  year = {2021},\n}\n",
+        ),
+    ] {
+        write(dir.path(), file, contents);
+        let next = cli_source_hash(&main, &out);
+        assert_ne!(previous, next, "editing {file} left source.hash unchanged");
+        previous = next;
+    }
+    assert_eq!(previous, cli_source_hash(&main, &out), "no edit, same hash");
+}
+
 /// Every example of the CND suite compiles to the same CND through
 /// `typst compile --format cnd` as through the typst-cnd library entry point
 /// the standalone binary uses. System fonts are off on both sides: the two
@@ -134,7 +204,7 @@ fn cnd_format_matches_the_standalone_exporter_on_every_example() {
 
     let out_dir = tempfile::tempdir().unwrap();
     for path in files {
-        let world = typst_cnd::world::CndWorld::new_with_options(
+        let mut world = typst_cnd::world::CndWorld::new_with_options(
             &path,
             typst::foundations::Dict::default(),
             false,
@@ -143,9 +213,10 @@ fn cnd_format_matches_the_standalone_exporter_on_every_example() {
         let document = typst::compile::<typst_cnd::CndDocument>(&world)
             .output
             .unwrap_or_else(|errors| panic!("{}: {errors:?}", path.display()));
+        let read = world.input_files();
         let expected = typst_cnd::cnd_to_json(&typst_cnd::cnd_from_document(
             &document,
-            typst_cnd::world::source_info(&world),
+            typst_cnd::world::source_info(&world, read),
             "1970-01-01T00:00:00Z".into(),
         ))
         .unwrap();

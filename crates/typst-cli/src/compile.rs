@@ -414,20 +414,22 @@ fn export_html(document: &HtmlDocument, config: &CompileConfig) -> SourceResult<
 }
 
 /// Export to CND.
+///
+/// Takes the world mutably to read which files the compilation read: the
+/// CND's `source.hash` covers all of them, exactly as the standalone
+/// `typst-cnd` binary computes it.
 fn export_cnd(
     document: &typst_cnd::CndDocument,
-    world: &SystemWorld,
+    world: &mut SystemWorld,
     config: &CompileConfig,
 ) -> SourceResult<()> {
     let built_at = match config.creation_timestamp {
         Some(timestamp) => timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         None => typst_cnd::world::built_at_now(),
     };
-    let cnd = typst_cnd::cnd_from_document(
-        document,
-        typst_cnd::world::source_info(world),
-        built_at,
-    );
+    let read = world.input_files();
+    let source = typst_cnd::world::source_info(&*world, read);
+    let cnd = typst_cnd::cnd_from_document(document, source, built_at);
     let json = typst_cnd::cnd_to_json(&cnd)?;
     config
         .output

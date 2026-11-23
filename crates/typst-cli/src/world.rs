@@ -125,6 +125,15 @@ impl SystemWorld {
         deps.filter_map(|id| loader.resolve(id).ok())
     }
 
+    /// Every file the last compilation read, as file ids rather than
+    /// resolved paths, in no particular order. A CND's `source.hash` is
+    /// computed from these, so that it does not depend on where the project
+    /// lives on disk.
+    pub fn input_files(&mut self) -> Vec<FileId> {
+        let (_, files) = self.files.dependencies();
+        files.collect()
+    }
+
     /// Reset the compilation state in preparation of a new compilation.
     pub fn reset(&mut self) {
         self.files.reset();
