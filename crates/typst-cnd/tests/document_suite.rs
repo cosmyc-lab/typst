@@ -5848,3 +5848,29 @@ fn every_reference_marker_is_an_edge_of_its_own() {
     assert_eq!(ref_occurrences(heading), [("a".to_string(), None)]);
     assert_eq!(incoming_count(&cnd.nodes, "a"), 3, "three texts reference it");
 }
+
+#[test]
+fn horizontal_spacing_is_a_space_and_soft_hyphens_are_no_text() {
+    let cnd = cnd_for_example("spacing_and_soft_hyphen.typ");
+    assert_eq!(heading_texts(&cnd.nodes), ["Name: Heading"]);
+    let values: Vec<&str> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Paragraph(p) => Some(p.text.value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        values,
+        [
+            "Name: Value.",
+            "Left right.",
+            "Kerned LA word and glued.",
+            "Trailing",
+            "A soft-hyphen and an Example with bold after.",
+        ]
+    );
+    // Marks still index the value.
+    let soft = paragraph_text(&cnd, "soft-hyphen");
+    assert_eq!(mark_slices(soft, typst_cnd::STRONG), ["bold"]);
+}
