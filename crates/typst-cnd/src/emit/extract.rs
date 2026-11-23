@@ -7,7 +7,7 @@ use typst_library::foundations::{
     Content, Label, NativeElement, Packed, PlainText, Smart, StyleChain, Value,
 };
 use typst_library::introspection::{Location, Tag, TagElem};
-use typst_library::math::{AttachElem, EquationElem, FracElem, RootElem};
+use typst_library::math::EquationElem;
 use typst_library::model::{
     ArtifactElem, CitationForm, CiteElem, Destination, EmphElem, EnumElem, FigureElem,
     FootnoteElem, HeadingElem, LinkElem, LinkMarker, LinkTarget, ListElem, PdfMarkerTag,
@@ -19,6 +19,7 @@ use typst_library::text::{
 use typst_library::visualize::ImageElem;
 use typst_syntax::{FileId, Span};
 
+use crate::emit::linear::math_linear;
 use crate::rich_text::{
     CODE, EMPH, HIGHLIGHT, MATH, Mark, RawSource, STRIKE, STRONG, SUB, SUP, UNDERLINE,
     canonical_marks, trim_rebase,
@@ -32,8 +33,7 @@ use crate::rich_text::{
 /// once from the synthesized `RawLine`, once from the `TextElem` inside
 /// `RawLine.body`).
 ///
-/// With no source at hand, an inline equation contributes its linear form
-/// ([`math_linear`]).
+/// An inline equation contributes its linear form ([`math_linear`]).
 pub fn extract_text(content: &Content) -> EcoString {
     extract_rich(content, &no_source).value.into()
 }
@@ -99,104 +99,32 @@ fn instance_source(
     foreign.is_continue().then_some(inner)
 }
 
-/// The text an inline equation contributes to a text and the `raw` of its
-/// `math` mark: its source when that source is this instance's
-/// ([`instance_source`]), its linear form ([`math_linear`]) with no `raw`
-/// otherwise. The formula never vanishes.
+/// The text an inline equation contributes to a text, its linear form
+/// ([`math_linear`]), and the `raw` of its `math` mark, its source
+/// ([`equation_source`]) when there is one. The formula never vanishes.
 fn equation_text(
     equation: &Content,
     body: &Content,
     lookup: Option<SourceLookup<'_>>,
 ) -> (String, Option<RawSource>) {
-    match lookup.and_then(|lookup| instance_source(equation, body, lookup)) {
-        Some(text) => (text.clone(), Some(RawSource::typst(text))),
-        None => (math_linear(body), None),
-    }
+    let raw = lookup
+        .and_then(|lookup| equation_source(equation, body, lookup))
+        .map(RawSource::typst);
+    (math_linear(body), raw)
 }
 
-/// A linear, readable form of an unrealized equation body, for an equation
-/// whose source is not this instance's: its text and symbols in order, an
-/// attachment as `base_b^t`, a fraction as `num/denom` and a root as
-/// `√x`, any part longer than one character in parentheses (`y^2`,
-/// `(a+b)/2`). It is not Typst source, so a mark over it carries no `raw`.
-pub fn math_linear(body: &Content) -> String {
-    let mut out = String::new();
-    linearize(body, &mut out);
-    out.trim().to_owned()
-}
-
-fn linearize(content: &Content, out: &mut String) {
-    let materialized = StyleChain::default();
-    if let Some(attach) = content.to_packed::<AttachElem>() {
-        let part = |field: Option<Content>| field.as_ref().map(linear_part);
-        let tl = part(attach.tl.get_cloned(materialized));
-        let bl = part(attach.bl.get_cloned(materialized));
-        let t = part(
-            attach
-                .t
-                .get_cloned(materialized)
-                .or(attach.tr.get_cloned(materialized)),
-        );
-        let b = part(
-            attach
-                .b
-                .get_cloned(materialized)
-                .or(attach.br.get_cloned(materialized)),
-        );
-        for (mark, part) in [('_', bl), ('^', tl)] {
-            if let Some(part) = part {
-                out.push(mark);
-                out.push_str(&part);
-            }
-        }
-        linearize(&attach.base, out);
-        for (mark, part) in [('_', b), ('^', t)] {
-            if let Some(part) = part {
-                out.push(mark);
-                out.push_str(&part);
-            }
-        }
-        return;
-    }
-    if let Some(frac) = content.to_packed::<FracElem>() {
-        out.push_str(&linear_part(&frac.num));
-        out.push('/');
-        out.push_str(&linear_part(&frac.denom));
-        return;
-    }
-    if let Some(root) = content.to_packed::<RootElem>() {
-        out.push('√');
-        out.push_str(&linear_part(&root.radicand));
-        return;
-    }
-    if let Some(textable) = content.with::<dyn PlainText>() {
-        let mut text = EcoString::new();
-        textable.plain_text(&mut text);
-        out.push_str(&text);
-        return;
-    }
-    for (_, value) in content.fields() {
-        linearize_value(value, out);
-    }
-}
-
-fn linearize_value(value: Value, out: &mut String) {
-    match value {
-        Value::Content(c) => linearize(&c, out),
-        Value::Array(arr) => {
-            for v in arr {
-                linearize_value(v, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// One operand of an attachment, fraction or root, in parentheses when it
-/// is longer than one character.
-fn linear_part(content: &Content) -> String {
-    let text = math_linear(content);
-    if text.chars().count() > 1 { format!("({text})") } else { text }
+/// The source of an inline equation: this instance's own
+/// ([`instance_source`]), or, for an equation built in code around a
+/// formula (`#math.equation(alt: "…", $x^2$)`), that formula's.
+fn equation_source(
+    equation: &Content,
+    body: &Content,
+    lookup: SourceLookup<'_>,
+) -> Option<String> {
+    instance_source(equation, body, lookup).or_else(|| {
+        let formula = body.to_packed::<EquationElem>()?;
+        instance_source(body, &formula.body, lookup)
+    })
 }
 
 /// Whether the text realized inside `content` was all excluded — every word
@@ -206,7 +134,7 @@ fn linear_part(content: &Content) -> String {
 /// Content that was empty to begin with is not "emptied": with no exclusion
 /// at all this is `false`, so a paragraph that never held text keeps
 /// whatever handling it had before exclusion existed. An inline equation
-/// counts as text: its source, read through `source`.
+/// counts as text: its linear form ([`math_linear`]).
 pub fn is_emptied_by_exclusion(content: &Content, source: SourceLookup<'_>) -> bool {
     let mut out = EcoString::new();
     let mut ctx = MarkerCtx { source: Some(source), ..MarkerCtx::default() };
@@ -404,9 +332,9 @@ pub(crate) fn link_dest(target: &LinkTarget) -> Option<LinkDest> {
 ///
 /// Marks come from the same tags: the elements [`mark_kind`] names open a
 /// mark at their `Tag::Start` and close it at their `Tag::End`. An inline
-/// equation's text is its Typst source, read through `source`, with the
-/// realized formula suppressed; its mark carries that source as `raw`
-/// (spec §4.1). Marks and spans come back canonical.
+/// equation's text is its linear form ([`math_linear`]), with the realized
+/// formula suppressed; its mark carries its Typst source, read through
+/// `source`, as `raw` (spec §4.1). Marks and spans come back canonical.
 pub fn extract_rich(content: &Content, source: SourceLookup<'_>) -> Extracted {
     let mut out = EcoString::new();
     let mut ctx = MarkerCtx { source: Some(source), ..MarkerCtx::default() };
@@ -498,7 +426,7 @@ pub fn extract_rich(content: &Content, source: SourceLookup<'_>) -> Extracted {
 
 #[derive(Default)]
 struct MarkerCtx<'a> {
-    /// Where an inline equation's source is read from.
+    /// Where an inline equation's source, its mark's `raw`, is read from.
     source: Option<SourceLookup<'a>>,
     /// Code-point position in `out` so far.
     pos: i64,
@@ -506,8 +434,8 @@ struct MarkerCtx<'a> {
     open_marks: Vec<MarkFrame>,
     /// Closed marks, in closing order.
     marks: Vec<Mark>,
-    /// Open inline equations whose source stands in for their realized
-    /// text, which is suppressed.
+    /// Open inline equations whose linear form stands in for their
+    /// realized text, which is suppressed.
     math: Vec<Location>,
     /// Open cite/footnote frames — those tags bracket their own rendered
     /// marker text — keyed by the marker element's own location.
@@ -661,8 +589,8 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
         return;
     }
 
-    // Inside an excluded scope, or an inline equation whose source stands in
-    // for it: emit no text, but keep walking so that the tags nested in it
+    // Inside an excluded scope, or an inline equation whose linear form
+    // stands in for it: emit no text, but keep walking so that the tags nested in it
     // still balance.
     if !ctx.excluded.is_empty() || !ctx.math.is_empty() {
         if content.with::<dyn PlainText>().is_some()
@@ -719,7 +647,7 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
 /// citation or footnote marker is open: the superscript Typst puts on a
 /// footnote number is presentation, not the author's (a link's body is the
 /// author's, and keeps its marks). An inline equation also writes its
-/// source here, and suppresses its realized text until it closes.
+/// linear form here, and suppresses its realized text until it closes.
 fn open_mark(inner: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
     let Some(kind) = mark_kind(inner) else { return };
     let Some(loc) = inner.location() else { return };
@@ -825,7 +753,7 @@ fn push_plain(textable: &dyn PlainText, out: &mut EcoString, ctx: &mut MarkerCtx
 ///   span.
 /// - A link is an edge whose span covers its body.
 /// - An element of the mark table ([`mark_kind`]) is a mark over its body;
-///   an inline equation's text is its source, as in realized text.
+///   an inline equation's text is its linear form, as in realized text.
 fn walk_bare(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) -> bool {
     // What is dropped leaves the spaces around it: the next text drops its
     // leading one, so `Intro @a and` reads "Intro and".
@@ -876,8 +804,8 @@ fn walk_bare(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) ->
 /// wrote, which realization has not touched.
 ///
 /// Its marks come from the elements of the mark table ([`mark_kind`]),
-/// inline math as its source. Its edges come back in a `TextRecord` (slot
-/// `Text`, for the caller to set):
+/// inline math as its linear form with its source as `raw`. Its edges come
+/// back in a `TextRecord` (slot `Text`, for the caller to set):
 ///
 /// - a link gives a `links` or `refs` edge whose span covers its body;
 /// - a reference gives a `refs` edge, and a citation a `cites` edge, both
