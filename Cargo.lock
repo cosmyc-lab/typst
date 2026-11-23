@@ -3401,6 +3401,7 @@ name = "typst-cnd"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "codex",
  "comemo",
  "ecow",
  "hex",

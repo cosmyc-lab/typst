@@ -6,13 +6,15 @@
 //! It is read from Typst's math elements, not from the source text, so a
 //! symbol is the Unicode character Typst renders (`alpha` is `α`, `<=` is
 //! `≤`, `-` is `−`) and an argument a function filled in is the text it was
-//! filled with. Letters keep their plain form: no italic, bold or
-//! double-struck code point (`bb(R)` is `R`). The same body always gives the
-//! same text.
+//! filled with. A letter variant that changes what a letter means is the
+//! letter Typst renders (`bb(R)` is `ℝ`, `cal(L)` is `ℒ`, `frak(g)` is `𝔤`,
+//! `sans` and `mono` likewise); bold, italic and upright letters stay plain,
+//! so `x` is never `𝑥`. The same body always gives the same text.
 //!
 //! | Construct | Typst | Linear form |
 //! |---|---|---|
 //! | symbol, letter, number, text | `alpha <= x "if" 3.14` | `α ≤ x if 3.14` |
+//! | letter variant | `bb(R)`, `cal(L)`, `frak(g)`, `bold(x)` | `ℝ`, `ℒ`, `𝔤`, `x` |
 //! | spacing (source space, `quad`, `thin`…) | `a   b`, `x quad y` | `a b`, `x y` |
 //! | attachment | `x^2`, `x_1^2`, `sum_(i=1)^n` | `x^2`, `x_1^2`, `∑_(i=1)^n` |
 //! | primes | `f''(x)`, `f'^2` | `f″(x)`, `f′^2` |
@@ -45,7 +47,12 @@
 //!   closing one.
 //! - **Calls** separate their arguments with `, `, cases and line breaks
 //!   separate rows with `; `.
+//!
+//! Limits: the body is read as evaluated, before realization. A show rule
+//! on a math element does not change the text, and a `context` expression
+//! in a formula, whose content only exists once realized, adds none.
 
+use codex::styling::{MathStyle, MathVariant, to_style};
 use typst_library::foundations::{
     Content, PlainText, SequenceElem, StyleChain, StyledElem, SymbolElem, Value,
 };
@@ -63,8 +70,13 @@ use unicode_math_class::MathClass;
 
 /// The linear form of an equation body (see the module documentation).
 pub fn math_linear(body: &Content) -> String {
+    linear(body, StyleChain::default())
+}
+
+/// The linear form of `content` under `styles`.
+fn linear(content: &Content, styles: StyleChain) -> String {
     let mut line = Line::default();
-    line.content(body);
+    line.content(content, styles);
     line.out
 }
 
@@ -113,16 +125,15 @@ impl Line {
         self.gap = self.gap.max(gap);
     }
 
-    fn content(&mut self, content: &Content) {
-        let styles = StyleChain::default();
+    fn content(&mut self, content: &Content, styles: StyleChain) {
         if let Some(sequence) = content.to_packed::<SequenceElem>() {
             for child in &sequence.children {
-                self.content(child);
+                self.content(child, styles);
             }
         } else if let Some(styled) = content.to_packed::<StyledElem>() {
-            self.content(&styled.child);
+            self.content(&styled.child, styles.chain(&styled.styles));
         } else if let Some(equation) = content.to_packed::<EquationElem>() {
-            self.content(&equation.body);
+            self.content(&equation.body, styles);
         } else if content.is::<SpaceElem>() {
             self.gap(Gap::Space);
         } else if let Some(h) = content.to_packed::<HElem>() {
@@ -134,59 +145,67 @@ impl Line {
         } else if content.is::<AlignPointElem>() {
             // An alignment point places the text; it adds none.
         } else if let Some(symbol) = content.to_packed::<SymbolElem>() {
-            self.token(&symbol.text);
+            self.token(&styled_text(&symbol.text, styles));
         } else if let Some(text) = content.to_packed::<TextElem>() {
-            self.token(text.text.trim());
+            self.token(&styled_text(text.text.trim(), styles));
         } else if let Some(class) = content.to_packed::<ClassElem>() {
-            self.content(&class.body);
+            self.content(&class.body, styles);
             if class.class == MathClass::Unary {
                 self.glued = true;
             }
         } else if let Some(lr) = content.to_packed::<LrElem>() {
-            self.delimited(&lr.body);
+            self.delimited(&lr.body, styles);
         } else if let Some(attach) = content.to_packed::<AttachElem>() {
             self.token(&attach_text(attach, styles));
         } else if let Some(primes) = content.to_packed::<PrimesElem>() {
             self.token(&primes_text(primes.count));
         } else if let Some(frac) = content.to_packed::<FracElem>() {
-            self.token(&format!("{}/{}", part(&frac.num), part(&frac.denom)));
+            self.token(&format!(
+                "{}/{}",
+                part(&frac.num, styles),
+                part(&frac.denom, styles)
+            ));
         } else if let Some(root) = content.to_packed::<RootElem>() {
-            let radicand = math_linear(&root.radicand);
+            let radicand = linear(&root.radicand, styles);
             self.token(&match root.index.get_cloned(styles) {
-                Some(index) => format!("root({}, {radicand})", math_linear(&index)),
+                Some(index) => format!("root({}, {radicand})", linear(&index, styles)),
                 None => format!("sqrt({radicand})"),
             });
         } else if let Some(binom) = content.to_packed::<BinomElem>() {
             let args = std::iter::once(&binom.upper).chain(&binom.lower);
-            self.token(&format!("binom({})", joined(args, ", ")));
+            self.token(&format!("binom({})", joined(args, ", ", styles)));
         } else if let Some(mat) = content.to_packed::<MatElem>() {
             let rows: Vec<_> = mat
                 .rows
                 .iter()
-                .map(|row| format!("[{}]", joined(row, ", ")))
+                .map(|row| format!("[{}]", joined(row, ", ", styles)))
                 .collect();
             self.token(&format!("[{}]", rows.join(", ")));
         } else if let Some(vec) = content.to_packed::<VecElem>() {
-            self.token(&format!("({})", joined(&vec.children, ", ")));
+            self.token(&format!("({})", joined(&vec.children, ", ", styles)));
         } else if let Some(cases) = content.to_packed::<CasesElem>() {
-            self.token(&format!("{{{}}}", joined(&cases.children, "; ")));
+            self.token(&format!("{{{}}}", joined(&cases.children, "; ", styles)));
         } else if let Some(op) = content.to_packed::<OpElem>() {
-            self.content(&op.text);
+            self.content(&op.text, styles);
         } else if let Some(accent) = content.to_packed::<AccentElem>() {
-            self.token(&format!("{}{}", part(&accent.base), accent.accent.0));
+            self.token(&format!("{}{}", part(&accent.base, styles), accent.accent.0));
         } else if let Some(line) = content.to_packed::<OverlineElem>() {
-            self.token(&format!("{}\u{305}", part(&line.body)));
+            self.token(&format!("{}\u{305}", part(&line.body, styles)));
         } else if let Some(line) = content.to_packed::<UnderlineElem>() {
-            self.token(&format!("{}\u{332}", part(&line.body)));
+            self.token(&format!("{}\u{332}", part(&line.body, styles)));
         } else if let Some((body, annotation, mark)) = annotated(content, styles) {
             match annotation {
                 Some(annotation) => {
-                    self.token(&format!("{}{mark}{}", part(body), part(&annotation)));
+                    self.token(&format!(
+                        "{}{mark}{}",
+                        part(body, styles),
+                        part(&annotation, styles)
+                    ));
                 }
-                None => self.content(body),
+                None => self.content(body, styles),
             }
         } else if let Some(body) = transparent_body(content) {
-            self.content(body);
+            self.content(body, styles);
         } else if let Some(reference) = content.to_packed::<RefElem>() {
             self.token(&format!("@{}", reference.target.resolve().as_str()));
         } else if let Some(cite) = content.to_packed::<CiteElem>() {
@@ -197,17 +216,17 @@ impl Line {
             self.token(text.trim());
         } else {
             for (_, value) in content.fields() {
-                self.value(value);
+                self.value(value, styles);
             }
         }
     }
 
-    fn value(&mut self, value: Value) {
+    fn value(&mut self, value: Value, styles: StyleChain) {
         match value {
-            Value::Content(content) => self.content(&content),
+            Value::Content(content) => self.content(&content, styles),
             Value::Array(array) => {
                 for value in array {
-                    self.value(value);
+                    self.value(value, styles);
                 }
             }
             _ => {}
@@ -216,7 +235,7 @@ impl Line {
 
     /// A delimited group: no space after its opening delimiter, none before
     /// its closing one.
-    fn delimited(&mut self, body: &Content) {
+    fn delimited(&mut self, body: &Content, styles: StyleChain) {
         let children =
             body.to_packed::<SequenceElem>().map(|seq| seq.children.as_slice());
         if let Some([open, middle @ .., close]) = children
@@ -226,12 +245,12 @@ impl Line {
             self.token(&open.text);
             self.glued = true;
             for child in middle {
-                self.content(child);
+                self.content(child, styles);
             }
             self.gap = Gap::None;
             self.token(&close.text);
         } else {
-            self.content(body);
+            self.content(body, styles);
         }
     }
 }
@@ -240,7 +259,7 @@ impl Line {
 fn attach_text(attach: &AttachElem, styles: StyleChain) -> String {
     let script = |field: Option<Content>, mark: char| {
         field
-            .map(|content| format!("{mark}{}", part(&content)))
+            .map(|content| format!("{mark}{}", part(&content, styles)))
             .unwrap_or_default()
     };
     let (primes, tr) = match attach.tr.get_cloned(styles) {
@@ -253,7 +272,7 @@ fn attach_text(attach: &AttachElem, styles: StyleChain) -> String {
     [
         script(attach.bl.get_cloned(styles), '_'),
         script(attach.tl.get_cloned(styles), '^'),
-        part(&attach.base),
+        part(&attach.base, styles),
         primes,
         script(attach.b.get_cloned(styles), '_'),
         script(attach.t.get_cloned(styles), '^'),
@@ -261,6 +280,23 @@ fn attach_text(attach: &AttachElem, styles: StyleChain) -> String {
         script(tr, '^'),
     ]
     .concat()
+}
+
+/// `text` in the letter variant the styles select, as Typst renders it:
+/// double-struck (`bb`), script (`cal`, `scr`), fraktur (`frak`),
+/// sans-serif (`sans`) and monospace (`mono`). Bold, italic and serif
+/// letters stay plain. The variation selector that tells a calligraphic
+/// script letter from a roundhand one is left out: both read as the same
+/// script letter.
+fn styled_text(text: &str, styles: StyleChain) -> String {
+    let variant = styles.get(EquationElem::variant);
+    if matches!(variant, None | Some(MathVariant::Plain)) {
+        return text.to_owned();
+    }
+    text.chars()
+        .flat_map(|c| to_style(c, MathStyle::select(c, variant, false, Some(false))))
+        .filter(|c| !matches!(c, '\u{fe00}' | '\u{fe01}'))
+        .collect()
 }
 
 /// Primes as Typst renders them: ′ ″ ‴ ⁗, then repeated ′.
@@ -275,8 +311,16 @@ fn primes_text(count: usize) -> String {
 }
 
 /// The linear forms of `items`, joined by `separator`.
-fn joined<'a>(items: impl IntoIterator<Item = &'a Content>, separator: &str) -> String {
-    items.into_iter().map(math_linear).collect::<Vec<_>>().join(separator)
+fn joined<'a>(
+    items: impl IntoIterator<Item = &'a Content>,
+    separator: &str,
+    styles: StyleChain,
+) -> String {
+    items
+        .into_iter()
+        .map(|item| linear(item, styles))
+        .collect::<Vec<_>>()
+        .join(separator)
 }
 
 /// A brace, bracket, parenthesis or shell over or under a body: the body,
@@ -325,8 +369,8 @@ fn transparent_body(content: &Content) -> Option<&Content> {
 
 /// One operand of an attachment, fraction, accent or annotation: its linear
 /// form, in parentheses unless it is atomic ([`is_atomic`]).
-fn part(content: &Content) -> String {
-    let text = math_linear(content);
+fn part(content: &Content, styles: StyleChain) -> String {
+    let text = linear(content, styles);
     if text.is_empty() || text.chars().count() == 1 || is_atomic(content) {
         text
     } else {
@@ -542,8 +586,28 @@ mod tests {
     }
 
     #[test]
-    fn styles_leave_the_letters_plain() {
-        assert_linear(&[("upright(d)", "d"), ("bold(x) + italic(y)", "x + y")]);
+    fn bold_italic_and_upright_leave_the_letters_plain() {
+        assert_linear(&[
+            ("upright(d)", "d"),
+            ("bold(x) + italic(y)", "x + y"),
+            ("serif(x)", "x"),
+        ]);
+    }
+
+    #[test]
+    fn letter_variants_are_the_letters_typst_renders() {
+        assert_linear(&[
+            ("bb(R)", "\u{211d}"),
+            ("cal(L)", "\u{2112}"),
+            ("scr(L)", "\u{2112}"),
+            ("frak(g)", "\u{1d524}"),
+            ("sans(A)", "\u{1d5a0}"),
+            ("mono(x)", "\u{1d6a1}"),
+            ("bold(bb(R))", "\u{211d}"),
+            ("bb(N)^2", "\u{2115}^2"),
+            ("bb(x_1)", "\u{1d569}_\u{1d7d9}"),
+            ("bb(Z) + x", "\u{2124} + x"),
+        ]);
     }
 
     #[test]

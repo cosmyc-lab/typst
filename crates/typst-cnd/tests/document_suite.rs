@@ -4659,8 +4659,12 @@ fn block_math_text_is_a_linear_form() {
     );
     assert_eq!(math_node(&cnd, "eq-matrix").0, "[[1, 2], [3, 4]] (x, y) = (5, 6)");
     assert_eq!(math_node(&cnd, "eq-cases").0, "f(x) = {x if x > 0; 0 otherwise}");
-    // An equation built in code: the text of the formula, not its `alt`.
-    assert_eq!(math_node(&cnd, "eq-alt").0, "a^2 + b^2");
+    // An equation built in code: the text of the formula, not its `alt`, and
+    // the source of the formula, as for inline math.
+    assert_eq!(
+        math_node(&cnd, "eq-alt"),
+        ("a^2 + b^2".to_string(), Some("$ a^2 + b^2 $".to_string()))
+    );
 }
 
 /// An inline equation's value is its linear form, and its `math` mark keeps

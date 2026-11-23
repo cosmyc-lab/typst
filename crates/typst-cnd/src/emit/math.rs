@@ -38,7 +38,14 @@ pub fn convert(
 
     let mut node = MathNode::new(id, text, location);
     node.numbering = convert::numbering(numbering, None::<String>);
-    node.raw = convert::source_text(engine, equation.span()).map(RawSource::typst);
+    // An equation built in code around a formula (`#math.equation(block:
+    // true, alt: "…", $ x^2 $)`) has that formula's source, as inline math.
+    let source = if equation.body.is::<EquationElem>() {
+        equation.body.span()
+    } else {
+        equation.span()
+    };
+    node.raw = convert::source_text(engine, source).map(RawSource::typst);
 
     Ok((node, record))
 }

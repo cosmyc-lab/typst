@@ -23,6 +23,7 @@ typst-pdf = { workspace = true }
 typst-syntax = { workspace = true }
 typst-timing = { workspace = true }
 typst-utils = { workspace = true }
+codex = { workspace = true }
 comemo = { workspace = true }
 ecow = { workspace = true }
 rustc-hash = { workspace = true }
