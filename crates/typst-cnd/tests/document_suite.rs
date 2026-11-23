@@ -5876,17 +5876,30 @@ fn horizontal_spacing_is_a_space_and_soft_hyphens_are_no_text() {
 }
 
 #[test]
-fn outline_and_bibliography_headings_are_no_nodes() {
+fn outline_and_bibliography_headings_with_nothing_after_are_no_nodes() {
     let cnd = cnd_for_example("generated_headings.typ");
     assert_eq!(heading_texts(&cnd.nodes), ["Intro"]);
-    assert_eq!(node_types(&cnd.nodes), ["paragraph", "heading"]);
-    assert_eq!(
-        paragraph_values(&cnd.nodes),
-        ["An opening paragraph before any section."]
-    );
-    let CndNode::Heading(intro) = &cnd.nodes[1] else { unreachable!() };
+    assert_eq!(node_types(&cnd.nodes), ["heading"]);
+    let CndNode::Heading(intro) = &cnd.nodes[0] else { unreachable!() };
     assert_eq!(paragraph_values(&intro.children), ["Text citing [1]."]);
     // The bibliography stays in its pool.
+    let keys: Vec<&str> =
+        cnd.bibliography.iter().map(|entry| entry.label.as_str()).collect();
+    assert_eq!(keys, ["smith2024"]);
+}
+
+#[test]
+fn outline_and_bibliography_headings_keep_the_content_that_follows_them() {
+    let cnd = cnd_for_example("generated_headings_followed.typ");
+    assert_eq!(heading_texts(&cnd.nodes), ["Contents", "Intro", "Bibliography"]);
+    assert_eq!(node_types(&cnd.nodes), ["heading", "heading", "heading"]);
+    let children = |index: usize| match &cnd.nodes[index] {
+        CndNode::Heading(heading) => paragraph_values(&heading.children),
+        _ => unreachable!(),
+    };
+    assert_eq!(children(0), ["A paragraph after the outline."]);
+    assert_eq!(children(1), ["Text citing [1]."]);
+    assert_eq!(children(2), ["An appendix note after the bibliography."]);
     let keys: Vec<&str> =
         cnd.bibliography.iter().map(|entry| entry.label.as_str()).collect();
     assert_eq!(keys, ["smith2024"]);

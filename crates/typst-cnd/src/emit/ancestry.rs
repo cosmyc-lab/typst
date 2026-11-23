@@ -442,9 +442,8 @@ impl Ancestry {
     }
 
     /// Whether the heading at `location` is the title the outline or the
-    /// bibliography prints: it titles nothing the CND holds as nodes (the
-    /// outline's entries are absorbed, the bibliography is its pool), so it
-    /// is no node.
+    /// bibliography prints: it is no node unless body content follows it in
+    /// its section (see `convert::drop_empty_generated_titles`).
     pub fn is_generated_title(&self, location: Location) -> bool {
         self.generated_titles.contains(&location)
     }
