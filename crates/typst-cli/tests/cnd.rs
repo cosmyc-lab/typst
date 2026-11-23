@@ -185,6 +185,34 @@ fn cnd_source_hash_covers_every_input_file_and_matches_the_library() {
     assert_eq!(previous, cli_source_hash(&main, &out), "no edit, same hash");
 }
 
+/// `sys.inputs` is part of `source.hash`: the CLI hashes it exactly as the
+/// typst-cnd library entry point does, whatever order the inputs come in.
+#[test]
+fn cnd_source_hash_covers_sys_inputs_and_matches_the_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = write_multi_file_project(dir.path());
+    let out = dir.path().join("out.cnd");
+    let hash = |args: &[&str]| {
+        run_ok(exec().arg("compile").arg(&main).arg(&out).args(args));
+        read_cnd(&out).source.expect("source").hash
+    };
+
+    let forward = hash(&["--input", "a=1", "--input", "b=2"]);
+    let backward = hash(&["--input", "b=2", "--input", "a=1"]);
+    assert_eq!(forward, backward, "input order must not matter");
+    assert_ne!(forward, hash(&["--input", "a=1", "--input", "b=3"]));
+    assert_ne!(forward, hash(&[]));
+
+    let inputs: typst::foundations::Dict = [("b", "2"), ("a", "1")]
+        .into_iter()
+        .map(|(k, v)| (k.into(), typst::foundations::IntoValue::into_value(v)))
+        .collect();
+    let mut world = typst_cnd::world::CndWorld::new_with_inputs(&main, inputs).unwrap();
+    typst::compile::<typst_cnd::CndDocument>(&world).output.unwrap();
+    let read = world.input_files();
+    assert_eq!(forward, typst_cnd::world::source_info(&world, read).hash);
+}
+
 /// Every example of the CND suite compiles to the same CND through
 /// `typst compile --format cnd` as through the typst-cnd library entry point
 /// the standalone binary uses. System fonts are off on both sides: the two

@@ -143,3 +143,104 @@ fn the_library_path_matches_the_binary() {
 
     assert_eq!(library, binary_hash(dir.path()));
 }
+
+/// Like [`binary_hash`], with extra command-line arguments.
+fn binary_hash_with(dir: &Path, args: &[&str]) -> String {
+    let output = dir.join("out.cnd");
+    let result = Command::new(env!("CARGO_BIN_EXE_typst-cnd"))
+        .arg("compile")
+        .arg(dir.join("main.typ"))
+        .arg("--output")
+        .arg(&output)
+        .args(args)
+        .output()
+        .expect("run typst-cnd");
+    assert!(
+        result.status.success(),
+        "typst-cnd compile failed (args {args:?}):\nstderr: {}",
+        String::from_utf8_lossy(&result.stderr),
+    );
+    let cnd: Cnd = serde_json::from_str(&fs::read_to_string(&output).unwrap()).unwrap();
+    cnd.source.expect("source").hash
+}
+
+#[test]
+fn different_inputs_give_different_hashes() {
+    let dir = tempfile::tempdir().unwrap();
+    write_project(dir.path());
+    let none = binary_hash_with(dir.path(), &[]);
+    let a = binary_hash_with(dir.path(), &["--input", "k=a"]);
+    let b = binary_hash_with(dir.path(), &["--input", "k=b"]);
+    assert_ne!(none, a);
+    assert_ne!(a, b);
+    // Where the key ends and the value starts is part of the hash.
+    let split1 = binary_hash_with(dir.path(), &["--input", "ab=c"]);
+    let split2 = binary_hash_with(dir.path(), &["--input", "a=bc"]);
+    assert_ne!(split1, split2);
+}
+
+#[test]
+fn the_same_inputs_in_another_order_give_the_same_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    write_project(dir.path());
+    let forward = binary_hash_with(dir.path(), &["--input", "a=1", "--input", "b=2"]);
+    let backward = binary_hash_with(dir.path(), &["--input", "b=2", "--input", "a=1"]);
+    assert_eq!(forward, backward);
+
+    // The same inputs through `--inputs-file` hash the same, too.
+    let file = dir.path().join("inputs.json");
+    fs::write(&file, r#"{"b": "2", "a": "1"}"#).unwrap();
+    let from_file =
+        binary_hash_with(dir.path(), &["--inputs-file", file.to_str().unwrap()]);
+    assert_eq!(forward, from_file);
+}
+
+#[test]
+fn no_inputs_and_an_empty_inputs_file_hash_the_same() {
+    let dir = tempfile::tempdir().unwrap();
+    write_project(dir.path());
+    let file = dir.path().join("inputs.json");
+    fs::write(&file, "{}").unwrap();
+    assert_eq!(
+        binary_hash_with(dir.path(), &[]),
+        binary_hash_with(dir.path(), &["--inputs-file", file.to_str().unwrap()]),
+    );
+}
+
+/// Recomputes the hash from the framing documented on `source_info`, for a
+/// one-file project, without and with inputs. This pins the framing: a
+/// change to it must be deliberate, and without inputs the hash has no
+/// inputs section at all.
+#[test]
+fn the_hash_follows_the_documented_framing() {
+    use sha2::{Digest, Sha256};
+
+    fn field(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let main = "= Only file\n";
+    fs::write(dir.path().join("main.typ"), main).unwrap();
+
+    let mut files = Sha256::new();
+    field(&mut files, b"typst-cnd-source-hash/1");
+    field(&mut files, b"/main.typ");
+    field(&mut files, b"/main.typ");
+    field(&mut files, &[0]);
+    field(&mut files, main.as_bytes());
+
+    let without = format!("sha256:{}", hex::encode(files.clone().finalize()));
+    assert_eq!(binary_hash_with(dir.path(), &[]), without);
+
+    let mut with = files;
+    field(&mut with, b"sys.inputs");
+    for (key, value) in [("a", "1"), ("b", "2")] {
+        field(&mut with, key.as_bytes());
+        field(&mut with, b"str");
+        field(&mut with, value.as_bytes());
+    }
+    let with = format!("sha256:{}", hex::encode(with.finalize()));
+    assert_eq!(binary_hash_with(dir.path(), &["--input", "b=2", "--input", "a=1"]), with);
+}

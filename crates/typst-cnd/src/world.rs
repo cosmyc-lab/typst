@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime, Dict, Duration};
+use typst::foundations::{
+    Bytes, Datetime, Dict, Duration, Repr, SilentBindingGuard, Value,
+};
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
@@ -192,7 +194,18 @@ impl FileLoader for CndFiles {
 /// 3. for each file, in ascending byte order of its key: the key, a status
 ///    of one byte, and, if the status is `0` (read), the file's bytes.
 ///    Status `1` marks a file the compilation asked for but could not read:
-///    its absence is part of the input too.
+///    its absence is part of the input too;
+/// 4. only if `sys.inputs` is not empty: the section name `sys.inputs`
+///    (which cannot be a file key: those start with `/` or `@`), then for
+///    each input, in ascending byte order of its key: the key, the value's
+///    type name, and the value — a string's UTF-8 bytes, any other value's
+///    `repr`. The command line only ever gives strings (type `str`).
+///
+/// Without inputs nothing is added, so a document compiled without inputs
+/// hashes exactly as it did before inputs were covered. `sys.inputs` is
+/// read back from the world's library, so it is what the document saw,
+/// however the inputs were given (`--input`, `--inputs-file`, or both, in
+/// any order).
 ///
 /// A file's key is its path within its root:
 /// `/dir/file.typ` for a project file, `@namespace/name:version/dir/file.typ`
@@ -204,8 +217,8 @@ impl FileLoader for CndFiles {
 ///
 /// Fonts are not part of the hash. They are served by the font store, never
 /// read as files, and are the environment a document is laid out in rather
-/// than an input of it, like the compiler version. `sys.inputs` and the
-/// current date are not files either and are not covered.
+/// than an input of it, like the compiler version. The current date is not
+/// covered either.
 ///
 /// The hash is comparable strictly between two runs of *this* producer over
 /// the same source — exactly the contract the format states for
@@ -246,10 +259,41 @@ pub fn source_info(
         }
     }
 
+    let inputs = sys_inputs(world);
+    if !inputs.is_empty() {
+        field(b"sys.inputs");
+        let sorted: BTreeMap<&str, &Value> =
+            inputs.iter().map(|(key, value)| (key.as_str(), value)).collect();
+        for (key, value) in sorted {
+            field(key.as_bytes());
+            field(value.ty().short_name().as_bytes());
+            match value {
+                Value::Str(text) => field(text.as_bytes()),
+                other => field(other.repr().as_bytes()),
+            }
+        }
+    }
+
     SourceInfo {
         type_: "typst".into(),
         hash: format!("sha256:{}", hex::encode(hasher.finalize())),
         uri: Some(main.vpath().get_without_slash().to_string()),
+    }
+}
+
+/// The `sys.inputs` the world's library defines: what the document sees.
+/// Empty if the library has none.
+fn sys_inputs(world: &dyn World) -> Dict {
+    let library = world.library();
+    let guard = SilentBindingGuard::new(library.features.clone());
+    let Some(Ok(Value::Module(sys))) =
+        library.global.scope().get("sys").map(|binding| binding.read(&guard))
+    else {
+        return Dict::new();
+    };
+    match sys.scope().get("inputs").map(|binding| binding.read(&guard)) {
+        Some(Ok(Value::Dict(inputs))) => inputs.clone(),
+        _ => Dict::new(),
     }
 }
 
