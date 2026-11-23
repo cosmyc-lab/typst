@@ -4967,12 +4967,14 @@ fn table_kind_hint_never_leaks() {
 #[test]
 fn ref_never_lands_on_an_unlabelled_target() {
     // Over every example: an edge names a label a node carries, and no
-    // heading holds an edge, since no example but `math_refs.typ` writes a
-    // reference in a heading's own text (that one is pinned in
-    // `refs_written_in_a_heading_or_caption_sit_there`).
+    // heading holds an edge, since no example but `math_refs.typ` and
+    // `refs_per_occurrence.typ` writes a reference in a heading's own text
+    // (pinned in `refs_written_in_a_heading_or_caption_sit_there` and
+    // `every_reference_marker_is_an_edge_of_its_own`).
     for path in all_example_files() {
         let name = path.file_name().and_then(|n| n.to_str()).expect("name");
-        let refs_in_headings = name == "math_refs.typ";
+        let refs_in_headings =
+            matches!(name, "math_refs.typ" | "refs_per_occurrence.typ");
         let cnd = cnd_for_example(name);
         let nodes = all_nodes_full(&cnd);
         let carries = |label: &str| {
@@ -5798,4 +5800,51 @@ fn a_language_a_template_sets_first_is_the_document_language() {
             ),
         ]
     );
+}
+
+/// Each `refs` edge of `text` as `(label, the text its span covers)`, in
+/// span order; a span-less edge covers `None`.
+fn ref_occurrences(text: &RichText) -> Vec<(String, Option<String>)> {
+    let mut refs: Vec<_> = text.refs.iter().collect();
+    refs.sort_by_key(|edge| edge.text_span.clone());
+    refs.into_iter()
+        .map(|edge| {
+            let covered =
+                edge.text_span.as_ref().map(|span| codepoint_slice(&text.value, span));
+            (edge.label.clone(), covered)
+        })
+        .collect()
+}
+
+#[test]
+fn every_reference_marker_is_an_edge_of_its_own() {
+    let cnd = cnd_for_example("refs_per_occurrence.typ");
+    assert_refs_resolve(&cnd.nodes);
+    let some =
+        |label: &str, covered: &str| (label.to_string(), Some(covered.to_string()));
+    let par = paragraph_text(&cnd, "See the target");
+    assert_eq!(
+        ref_occurrences(par),
+        [
+            some("a", "the target"),
+            some("a", "Section\u{a0}1"),
+            some("a", "Section\u{a0}1")
+        ]
+    );
+    let item = paragraph_text(&cnd, "An item");
+    assert_eq!(
+        ref_occurrences(item),
+        [some("a", "label link"), some("a", "Section\u{a0}1")]
+    );
+    // A heading's references are read as authored, with no span: two
+    // markers of one target are the same span-less edge, kept once.
+    let heading = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Heading(h) if h.text.value.starts_with("Back to") => Some(&h.text),
+            _ => None,
+        })
+        .expect("the second heading");
+    assert_eq!(ref_occurrences(heading), [("a".to_string(), None)]);
+    assert_eq!(incoming_count(&cnd.nodes, "a"), 3, "three texts reference it");
 }

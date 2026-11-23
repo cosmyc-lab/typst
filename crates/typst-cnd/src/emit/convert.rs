@@ -50,6 +50,9 @@ pub struct CiteMarker {
 #[derive(Debug, Clone)]
 pub struct TextRecord {
     pub slot: TextSlot,
+    /// The labels the references in this text's content name, found by a
+    /// traverse of it, with no span: an edge only for a label no marker of
+    /// `ref_markers` names (see `refs::set_refs`).
     pub ref_targets: Vec<Label>,
     /// Footnote markers occurring in this text: each marker's own location
     /// (resolved to a footnote-pool id in `pools::resolve_footnotes`) paired
@@ -59,8 +62,7 @@ pub struct TextRecord {
     /// in `pools::resolve_cite_edges`.
     pub cite_markers: Vec<CiteMarker>,
     /// Cross-reference markers with their text spans — only from flat-text
-    /// nodes. Consulted in `refs::resolve_refs` to attach a span to the
-    /// edge already created from `ref_targets` (never a separate edge).
+    /// nodes. Each one is an edge of its own in `refs::resolve_refs`.
     /// The span is `None` when it reached partway into a `code` or `math`
     /// mark.
     pub ref_markers: Vec<(Label, Option<(i64, i64)>)>,
