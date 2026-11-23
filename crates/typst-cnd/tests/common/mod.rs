@@ -54,6 +54,12 @@ pub fn example_path(name: &str) -> PathBuf {
 }
 
 pub fn compile_example(name: &str) -> CndDocument {
+    compile_example_in(name).0
+}
+
+/// Compiles an example and also returns the world it was compiled in, which
+/// knows the files the compilation read.
+fn compile_example_in(name: &str) -> (CndDocument, CndWorld) {
     let path = example_path(name);
     let world = CndWorld::new(&path).unwrap_or_else(|err| {
         panic!("failed to initialize world for {}: {err:?}", path.display())
@@ -62,16 +68,16 @@ pub fn compile_example(name: &str) -> CndDocument {
     for warning in &warned.warnings {
         eprintln!("warning: {warning:?}");
     }
-    warned.output.unwrap_or_else(|errors| {
+    let document = warned.output.unwrap_or_else(|errors| {
         panic!("compile failed for {}: {errors:?}", path.display())
-    })
+    });
+    (document, world)
 }
 
 pub fn cnd_for_example(name: &str) -> Cnd {
-    let path = example_path(name);
-    let world = CndWorld::new(&path).expect("world");
-    let doc = compile_example(name);
-    cnd_from_document(&doc, source_info(&world), built_at_now())
+    let (doc, mut world) = compile_example_in(name);
+    let read = world.input_files();
+    cnd_from_document(&doc, source_info(&world, read), built_at_now())
 }
 
 /// Every node of the tree in reading order, every slot entered.

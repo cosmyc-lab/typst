@@ -76,7 +76,7 @@ fn run() -> SourceResult<()> {
 }
 
 fn compile_file(input: &Path, output: &Path, inputs: Dict) -> SourceResult<()> {
-    let world = world::CndWorld::new_with_inputs(input, inputs).map_err(|err| {
+    let mut world = world::CndWorld::new_with_inputs(input, inputs).map_err(|err| {
         eco_vec![error!(Span::detached(), "failed to initialize world: {err}")]
     })?;
 
@@ -86,8 +86,9 @@ fn compile_file(input: &Path, output: &Path, inputs: Dict) -> SourceResult<()> {
     }
 
     let document = warned.output?;
-    let cnd =
-        cnd_from_document(&document, world::source_info(&world), world::built_at_now());
+    let read = world.input_files();
+    let source = world::source_info(&world, read);
+    let cnd = cnd_from_document(&document, source, world::built_at_now());
     let json = cnd_to_json(&cnd)?;
     std::fs::write(output, json).map_err(|err| {
         eco_vec![error!(Span::detached(), "failed to write output file: {err}")]
