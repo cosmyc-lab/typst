@@ -222,6 +222,13 @@ pub struct Ancestry {
     /// For each element made of text (see [`is_text_node`]), the locales
     /// its glyphs are set in, with how many glyphs each, in the order met.
     locales: FxHashMap<Location, Vec<(Locale, usize)>>,
+    /// The locales of every glyph laid out outside an artifact, counted once
+    /// per glyph run, with how many glyphs each, in the order met (see
+    /// [`Ancestry::majority_lang`]).
+    doc_locales: Vec<(Locale, usize)>,
+    /// The text element holding the document's first glyph laid out outside
+    /// an artifact, in frame order (see [`Ancestry::first_text_lang`]).
+    first_text: Option<Location>,
     /// The scope a label text is laid out in, by the container that owns
     /// it: a figure's caption by the figure, a term by its description's
     /// slot (see [`Ancestry::label_lang_of`]).
@@ -233,6 +240,9 @@ pub struct Ancestry {
     /// The start markers whose printed title an enclosing paragraph
     /// renders.
     covered_titles: FxHashSet<Location>,
+    /// The headings the outline or the bibliography prints as its title
+    /// (see [`Ancestry::is_generated_title`]).
+    generated_titles: FxHashSet<Location>,
 }
 
 impl Ancestry {
@@ -434,6 +444,13 @@ impl Ancestry {
         self.absorbed.contains(&location) || self.is_artifact(location)
     }
 
+    /// Whether the heading at `location` is the title the outline or the
+    /// bibliography prints: it is no node unless body content follows it in
+    /// its section (see `convert::drop_empty_generated_titles`).
+    pub fn is_generated_title(&self, location: Location) -> bool {
+        self.generated_titles.contains(&location)
+    }
+
     /// Note that an element that may become a node is laid out in the body
     /// of the figure at `figure`, inside a `place` that does not float,
     /// written in the body, when `placed`.
@@ -459,13 +476,23 @@ impl Ancestry {
     /// foreign word take that word's language. The tie-break keeps the
     /// result deterministic.
     pub fn lang_of(&self, location: Location) -> Option<EcoString> {
-        let mut best: Option<(Locale, usize)> = None;
-        for &(locale, count) in self.locales.get(&location)? {
-            if best.is_none_or(|(_, most)| count > most) {
-                best = Some((locale, count));
-            }
-        }
-        best.map(|(locale, _)| locale.rfc_3066())
+        majority(self.locales.get(&location)?)
+    }
+
+    /// The language most of the document's glyphs are set in, page
+    /// furniture and other artifacts left out, the first one met on a tie
+    /// (as in [`Ancestry::lang_of`]). `None` when the document lays out no
+    /// glyph.
+    pub fn majority_lang(&self) -> Option<EcoString> {
+        majority(&self.doc_locales)
+    }
+
+    /// The language of the document's first text (see
+    /// [`Ancestry::lang_of`]): the innermost element whose locales are
+    /// counted around the first glyph laid out outside an artifact, in frame
+    /// order. `None` when there is no such glyph.
+    pub fn first_text_lang(&self) -> Option<EcoString> {
+        self.lang_of(self.first_text?)
     }
 
     /// The language of the label text owned by `owner` (see
@@ -489,6 +516,17 @@ impl Ancestry {
             || (!self.figures_with_nodes.contains(&figure)
                 && !self.figures_with_artifacts.contains(&figure))
     }
+}
+
+/// The locale counted most often in `counts`, the first one met on a tie.
+fn majority(counts: &[(Locale, usize)]) -> Option<EcoString> {
+    let mut best: Option<(Locale, usize)> = None;
+    for &(locale, count) in counts {
+        if best.is_none_or(|(_, most)| count > most) {
+            best = Some((locale, count));
+        }
+    }
+    best.map(|(locale, _)| locale.rfc_3066())
 }
 
 /// Whether a paragraph laid out inside `inner` is absorbed (see
@@ -984,6 +1022,9 @@ struct Open {
     title_of: Option<Location>,
     /// Whether a paragraph inside it is absorbed (see [`absorbs`]).
     absorbs: bool,
+    /// Whether it is the outline or the bibliography, whose heading is
+    /// printed by it (see [`Ancestry::is_generated_title`]).
+    prints_title: bool,
     /// Whether it owns item slots (see [`owns_items`]).
     owns_items: bool,
     /// Whether it owns cell slots (see [`owns_cells`]).
@@ -1322,6 +1363,11 @@ fn walk(
             FrameItem::Tag(Tag::Start(inner, flags)) => {
                 let Some(location) = inner.location() else { continue };
                 let is_par = inner.elem() == ParElem::ELEM;
+                if inner.elem() == HeadingElem::ELEM
+                    && stack.iter().any(|open| open.prints_title)
+                {
+                    ancestry.generated_titles.insert(location);
+                }
                 if inner.elem() == GridElem::ELEM
                     && ancestry.grid_locations.insert(location)
                 {
@@ -1554,6 +1600,8 @@ fn walk(
                     bracket: bracket == Some(admonition::Marker::Start),
                     title_of: label_owner.filter(|_| admonition::is_title(inner)),
                     absorbs: absorbs(inner),
+                    prints_title: inner.elem() == OutlineElem::ELEM
+                        || inner.elem() == BibliographyElem::ELEM,
                     owns_items: owns_items(inner),
                     owns_cells: owns_cells(inner),
                     footer_start: footer_start(inner),
@@ -1622,6 +1670,20 @@ fn walk(
             FrameItem::Text(text) => {
                 let in_artifact = scope.in_artifact(stack);
                 let locale = Locale::new(text.lang, text.region);
+                if !in_artifact {
+                    if ancestry.first_text.is_none() {
+                        ancestry.first_text = stack
+                            .iter()
+                            .rev()
+                            .find(|open| open.counts_locale)
+                            .map(|open| open.location);
+                    }
+                    let counts = &mut ancestry.doc_locales;
+                    match counts.iter_mut().find(|(known, _)| *known == locale) {
+                        Some((_, count)) => *count += text.glyphs.len(),
+                        None => counts.push((locale, text.glyphs.len())),
+                    }
+                }
                 for open in stack.iter_mut() {
                     if open.is_text_node {
                         if in_artifact {

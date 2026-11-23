@@ -6,12 +6,22 @@ use crate::emit::convert::ConvertContext;
 use crate::emit::extract::LinkDest;
 use crate::model::{LinkRef, NodeRef, TextSlot};
 
-/// `(source node, source text, target node, the label the marker names —
-/// none for a location destination —, the marker's text span)`.
-type RefEdge = (Uuid, TextSlot, Uuid, Option<String>, Option<(i64, i64)>);
+/// A `refs` edge before it reaches its source text.
+struct RefEdge {
+    source: Uuid,
+    slot: TextSlot,
+    target: Uuid,
+    /// The label the marker names; none for a location destination.
+    marker_label: Option<String>,
+    /// The marker's text span.
+    span: Option<(i64, i64)>,
+    /// Whether the edge comes from a marker the text walk met, one per
+    /// occurrence, rather than from a target a traverse of the content
+    /// found, which may be such a marker met again (see [`set_refs`]).
+    occurrence: bool,
+}
 /// A `links` edge before it reaches the node: (node id, text, href, span).
-/// Sibling of `RefEdge` above — same reason, and clippy's `type_complexity`
-/// is denied by CI's `-Dwarnings`.
+/// An alias, since clippy's `type_complexity` is denied by `-Dwarnings`.
 type LinkEdge = (Uuid, TextSlot, String, Option<(i64, i64)>);
 
 /// Resolve cross-references and populate the forward-only `refs` list on
@@ -27,26 +37,27 @@ pub fn resolve_refs(ctx: &mut ConvertContext, introspector: &dyn Introspector) {
     let mut edges: Vec<RefEdge> = Vec::new();
     for (source_id, record) in ctx.records_sorted() {
         for text in &record.texts {
-            // `ref_markers` first: these carry spans, and `set_ref` dedups
-            // first-wins per target, so the spanned edge must be pushed
-            // before a span-less `ref_targets` edge for the same target.
-            let spanned = text.ref_markers.iter().map(|(label, span)| (*label, *span));
-            let spanless = text.ref_targets.iter().map(|label| (*label, None));
-            for (label, span) in spanned.chain(spanless) {
+            // `ref_markers` first: a `ref_targets` edge is kept only for a
+            // target no marker of the text names (see `set_refs`).
+            let markers =
+                text.ref_markers.iter().map(|(label, span)| (*label, *span, true));
+            let targets = text.ref_targets.iter().map(|label| (*label, None, false));
+            for (label, span, occurrence) in markers.chain(targets) {
                 // A `@key` citation is a RefElem too, but resolves in the
                 // bibliography pool, not the node tree: keep it out of
                 // `refs`.
                 if ctx.bib_key_to_id.contains_key(&label) {
                     continue;
                 }
-                if let Some(target_id) = resolve_label(label, ctx, introspector) {
-                    edges.push((
-                        source_id,
-                        text.slot,
-                        target_id,
-                        Some(label.resolve().as_str().into()),
+                if let Some(target) = resolve_label(label, ctx, introspector) {
+                    edges.push(RefEdge {
+                        source: source_id,
+                        slot: text.slot,
+                        target,
+                        marker_label: Some(label.resolve().as_str().into()),
                         span,
-                    ));
+                        occurrence,
+                    });
                 }
             }
         }
@@ -59,25 +70,37 @@ pub fn resolve_refs(ctx: &mut ConvertContext, introspector: &dyn Introspector) {
 /// the label the marker names. One from a location destination names the
 /// target by the label it carries, and is dropped when it carries none:
 /// there is nothing to name it by.
+///
+/// A text holds one edge per marker written in it, each with its own span,
+/// so a target named twice is two edges. A marker counted twice gives the
+/// same edge twice, kept once. A target found by a traverse of the content
+/// rather than by the text walk carries no span and may be a marker the
+/// walk already met: it is kept only when no edge of the text names that
+/// target yet.
 fn set_refs(ctx: &mut ConvertContext, edges: Vec<RefEdge>) {
     let labels = ctx.node_labels();
-    let refs: Vec<(Uuid, TextSlot, NodeRef)> = edges
+    let refs: Vec<(Uuid, TextSlot, (NodeRef, bool))> = edges
         .into_iter()
-        .filter_map(|(source, slot, target, marker_label, span)| {
-            let label = labels.get(&target)?.clone();
-            if marker_label.is_some_and(|marker| marker != label) {
+        .filter_map(|edge| {
+            let label = labels.get(&edge.target)?.clone();
+            if edge.marker_label.is_some_and(|marker| marker != label) {
                 return None;
             }
-            let text_span = span.map(|(s, e)| vec![s, e]);
-            Some((source, slot, NodeRef { label, text_span }))
+            let text_span = edge.span.map(|(s, e)| vec![s, e]);
+            Some((
+                edge.source,
+                edge.slot,
+                (NodeRef { label, text_span }, edge.occurrence),
+            ))
         })
         .collect();
-    ctx.edit_texts(refs, |text, reference| {
-        // Dedup by target label (one edge per target per node); the first
-        // occurrence — the primary, span-carrying path — wins. Labels are
-        // globally unique (ADR 0017), so this is the same dedup the target
-        // id used to give.
-        if !text.refs.iter().any(|known| known.label == reference.label) {
+    ctx.edit_texts(refs, |text, (reference, occurrence)| {
+        let known = if occurrence {
+            text.refs.contains(&reference)
+        } else {
+            text.refs.iter().any(|known| known.label == reference.label)
+        };
+        if !known {
             text.refs.push(reference);
         }
     });
@@ -87,9 +110,9 @@ fn set_refs(ctx: &mut ConvertContext, edges: Vec<RefEdge>) {
 /// edges: a URL destination becomes a `links` edge — `href` has no
 /// resolution domain, so it is pushed directly, never dropped. A
 /// label/location destination *is* a cross-reference (with a custom body)
-/// and is folded into the same `set_ref` dedup-by-label machinery as
-/// `resolve_refs`, so a node naming the same target both ways (`@fig-1`
-/// and `#link(<fig-1>)[...]`) still yields one `refs` edge.
+/// and goes through the same `set_refs` as `resolve_refs`: a text naming
+/// one target both ways (`@fig-1` and `#link(<fig-1>)[...]`) holds one
+/// `refs` edge per marker.
 ///
 /// Call after `resolve_refs`: label/location resolution needs
 /// `ctx.label_to_id`/`ctx.location_to_id`, already built by
@@ -97,8 +120,7 @@ fn set_refs(ctx: &mut ConvertContext, edges: Vec<RefEdge>) {
 pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) {
     // (source, href, span) for a `links` edge.
     let mut links: Vec<LinkEdge> = Vec::new();
-    // Same shape as `RefEdge` in `resolve_refs`, resolved through the same
-    // `set_ref` dedup below.
+    // Resolved through the same `set_refs` as in `resolve_refs`.
     let mut ref_edges: Vec<RefEdge> = Vec::new();
 
     for (source_id, record) in ctx.records_sorted() {
@@ -110,7 +132,7 @@ pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) 
                     introspector,
                     source,
                     dest,
-                    *span,
+                    (*span, true),
                     &mut links,
                     &mut ref_edges,
                 );
@@ -121,7 +143,7 @@ pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) 
                     introspector,
                     source,
                     dest,
-                    None,
+                    (None, false),
                     &mut links,
                     &mut ref_edges,
                 );
@@ -140,17 +162,19 @@ pub fn resolve_links(ctx: &mut ConvertContext, introspector: &dyn Introspector) 
     set_refs(ctx, ref_edges);
 }
 
+/// Collect the edge of one link destination: `span` is the marker's, and
+/// `occurrence` whether the text walk met it (see [`RefEdge::occurrence`]).
 fn collect_link_edge(
     ctx: &ConvertContext,
     introspector: &dyn Introspector,
-    (source_id, slot): (Uuid, TextSlot),
+    (source, slot): (Uuid, TextSlot),
     dest: &LinkDest,
-    span: Option<(i64, i64)>,
+    (span, occurrence): (Option<(i64, i64)>, bool),
     links: &mut Vec<LinkEdge>,
     ref_edges: &mut Vec<RefEdge>,
 ) {
     match dest {
-        LinkDest::Url(href) => links.push((source_id, slot, href.to_string(), span)),
+        LinkDest::Url(href) => links.push((source, slot, href.to_string(), span)),
         LinkDest::Label(label) => {
             // Mirrors `resolve_refs`'s bib-key guard: a `@key` citation is a
             // `RefElem` that resolves in the bibliography pool, not the node
@@ -163,19 +187,27 @@ fn collect_link_edge(
             if ctx.bib_key_to_id.contains_key(label) {
                 return;
             }
-            if let Some(target_id) = resolve_label(*label, ctx, introspector) {
-                ref_edges.push((
-                    source_id,
+            if let Some(target) = resolve_label(*label, ctx, introspector) {
+                ref_edges.push(RefEdge {
+                    source,
                     slot,
-                    target_id,
-                    Some(label.resolve().as_str().into()),
+                    target,
+                    marker_label: Some(label.resolve().as_str().into()),
                     span,
-                ));
+                    occurrence,
+                });
             }
         }
         LinkDest::Location(loc) => {
-            if let Some(target_id) = ctx.location_to_id.get(loc).copied() {
-                ref_edges.push((source_id, slot, target_id, None, span));
+            if let Some(target) = ctx.location_to_id.get(loc).copied() {
+                ref_edges.push(RefEdge {
+                    source,
+                    slot,
+                    target,
+                    marker_label: None,
+                    span,
+                    occurrence,
+                });
             }
         }
     }

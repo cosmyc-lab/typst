@@ -50,6 +50,9 @@ pub struct CiteMarker {
 #[derive(Debug, Clone)]
 pub struct TextRecord {
     pub slot: TextSlot,
+    /// The labels the references in this text's content name, found by a
+    /// traverse of it, with no span: an edge only for a label no marker of
+    /// `ref_markers` names (see `refs::set_refs`).
     pub ref_targets: Vec<Label>,
     /// Footnote markers occurring in this text: each marker's own location
     /// (resolved to a footnote-pool id in `pools::resolve_footnotes`) paired
@@ -59,8 +62,7 @@ pub struct TextRecord {
     /// in `pools::resolve_cite_edges`.
     pub cite_markers: Vec<CiteMarker>,
     /// Cross-reference markers with their text spans — only from flat-text
-    /// nodes. Consulted in `refs::resolve_refs` to attach a span to the
-    /// edge already created from `ref_targets` (never a separate edge).
+    /// nodes. Each one is an edge of its own in `refs::resolve_refs`.
     /// The span is `None` when it reached partway into a `code` or `math`
     /// mark.
     pub ref_markers: Vec<(Label, Option<(i64, i64)>)>,
@@ -783,6 +785,7 @@ pub fn convert_from_introspector(
         &mut ctx.footnotes,
         &ctx.footnote_entry_to_pool,
     );
+    drop_empty_generated_titles(ctx, ancestry);
     forget_dropped_nodes(ctx);
     absorb_covered_paragraphs(ctx, &absorbed);
     attach_attributions(ctx, &attributions);
@@ -870,6 +873,36 @@ fn realized_edges(content: &Content) -> TextRecord {
         }
     }
     text
+}
+
+/// Drop each heading the outline or the bibliography prints (see
+/// `Ancestry::is_generated_title`) that gathered no children: it titles
+/// nothing the CND holds as nodes, since the outline's entries are absorbed
+/// and the bibliography is its pool. One that body content follows before
+/// the next heading of its level or above keeps that content in its
+/// section, as the built document shows it, and stays.
+fn drop_empty_generated_titles(ctx: &mut ConvertContext, ancestry: &Ancestry) {
+    let generated: rustc_hash::FxHashSet<Uuid> = ctx
+        .location_to_id
+        .iter()
+        .filter(|(location, _)| ancestry.is_generated_title(**location))
+        .map(|(_, id)| *id)
+        .collect();
+    if !generated.is_empty() {
+        retain_titled(&mut ctx.roots, &generated);
+    }
+}
+
+/// Remove from `nodes`, and from the sections they hold, every heading of
+/// `generated` with no children.
+fn retain_titled(nodes: &mut Vec<CndNode>, generated: &rustc_hash::FxHashSet<Uuid>) {
+    nodes.retain_mut(|node| match node {
+        CndNode::Heading(heading) => {
+            retain_titled(&mut heading.children, generated);
+            !heading.children.is_empty() || !generated.contains(&heading.base.id)
+        }
+        _ => true,
+    });
 }
 
 /// Forget the records of the nodes `assemble` dropped, so that no label,

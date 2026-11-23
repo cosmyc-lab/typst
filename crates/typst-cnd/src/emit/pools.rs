@@ -36,7 +36,8 @@ use crate::model::{
 ///
 /// Only declaration footnotes become pool entries. Pool order is the
 /// introspector's document order; each entry's `label` is the rendered
-/// footnote ordinal. Its `children` are the blocks laid out in its printed
+/// footnote ordinal, made unique later (see
+/// [`disambiguate_footnote_labels`]). Its `children` are the blocks laid out in its printed
 /// entry, which `convert::assemble` routes there, on the page where the
 /// entry is printed. Until then, and for good if no entry was printed for
 /// it, it holds one paragraph built from the note's body, on the page of
@@ -137,8 +138,51 @@ pub fn resolve_footnotes(
         }
     }
 
+    disambiguate_footnote_labels(ctx);
     resolve_footnote_edges(ctx);
     Ok(())
+}
+
+/// The separator between a footnote's shown label and the occurrence
+/// number that makes it unique (see [`disambiguate_footnote_labels`]).
+/// Label markup (`<...>`) cannot write it, so a suffixed label is unlikely
+/// to be a node's; a clash is skipped anyway.
+const LABEL_SUFFIX: char = '~';
+
+/// Make every footnote label unique across the CND (cnd-sdk spec §2).
+///
+/// A footnote's label is the number the built document shows for it, and
+/// that number repeats when the author restarts the footnote counter. In
+/// pool (document) order, the first footnote showing a number keeps it as
+/// is; each later one showing the same number takes it with `~n` appended,
+/// `n` counting the notes that show it from 2 on: three notes all showing
+/// `1` are labelled `1`, `1~2` and `1~3`. A label some node or bibliography
+/// entry already carries counts as shown before, and a candidate already
+/// taken moves on to the next `n`. Edges find their entry by its id (see
+/// [`resolve_footnote_edges`]), so each marker keeps naming its own note.
+fn disambiguate_footnote_labels(ctx: &mut ConvertContext) {
+    let mut taken: rustc_hash::FxHashSet<String> =
+        ctx.node_labels().into_values().collect();
+    taken.extend(ctx.bibliography.iter().map(|entry| entry.label.clone()));
+    let mut shown: rustc_hash::FxHashMap<String, usize> =
+        rustc_hash::FxHashMap::default();
+    for note in &mut ctx.footnotes {
+        let count = shown.entry(note.label.clone()).or_insert(0);
+        *count += 1;
+        if *count == 1 && taken.insert(note.label.clone()) {
+            continue;
+        }
+        let mut n = (*count).max(2);
+        let label = loop {
+            let candidate = format!("{}{LABEL_SUFFIX}{n}", note.label);
+            if taken.insert(candidate.clone()) {
+                break candidate;
+            }
+            n += 1;
+        };
+        *count = n;
+        note.label = label;
+    }
 }
 
 /// Build the bibliography pool into `ctx.bibliography` and the `@key` →

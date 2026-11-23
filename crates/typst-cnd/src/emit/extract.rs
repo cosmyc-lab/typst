@@ -7,6 +7,7 @@ use typst_library::foundations::{
     Content, Label, NativeElement, Packed, PlainText, Smart, StyleChain, Value,
 };
 use typst_library::introspection::{Location, Tag, TagElem};
+use typst_library::layout::{HElem, Spacing};
 use typst_library::math::{AttachElem, EquationElem, FracElem, RootElem};
 use typst_library::model::{
     ArtifactElem, CitationForm, CiteElem, Destination, EmphElem, EnumElem, FigureElem,
@@ -453,6 +454,7 @@ pub fn extract_rich(content: &Content, source: SourceLookup<'_>) -> Extracted {
         pos,
         suppressed,
         excluded_any,
+        spaced_any,
         ..
     } = ctx;
     for frame in open {
@@ -476,8 +478,9 @@ pub fn extract_rich(content: &Content, source: SourceLookup<'_>) -> Extracted {
     let mut spans: Vec<&mut Option<(i64, i64)>> =
         done.iter_mut().map(|marker| &mut marker.span).collect();
     // An element left out at either end of the text leaves the space that
-    // separated it from the rest: trim it, re-basing marks and spans.
-    let (value, marks, len) = if excluded_any {
+    // separated it from the rest, and so does spacing at either end: trim
+    // it, re-basing marks and spans.
+    let (value, marks, len) = if excluded_any || spaced_any {
         let wide: Vec<bool> =
             spans.iter().map(|span| span.is_some_and(|(s, e)| s < e)).collect();
         let (value, marks) = trim_rebase(&out, marks, &mut spans);
@@ -547,9 +550,13 @@ struct MarkerCtx<'a> {
     bare_cites: Vec<Packed<CiteElem>>,
     /// Whether any text scope was excluded during this walk.
     excluded_any: bool,
-    /// An excluded scope just closed: the next text drops its leading
-    /// whitespace if `out` already ends with some (or is still empty), so
-    /// that `Before #pdf.artifact[x] after.` reads "Before after.".
+    /// Whether horizontal spacing wrote a space during this walk (see
+    /// [`push_spacing`]).
+    spaced_any: bool,
+    /// An excluded scope just closed, or spacing wrote a space: the next
+    /// text drops its leading whitespace if `out` already ends with some (or
+    /// is still empty), so that `Before #pdf.artifact[x] after.` reads
+    /// "Before after.".
     collapse_space: bool,
 }
 
@@ -703,6 +710,11 @@ fn walk(content: &Content, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
         return;
     }
 
+    if let Some(spacing) = content.to_packed::<HElem>() {
+        push_spacing(&spacing.amount, out, ctx);
+        return;
+    }
+
     if let Some(textable) = content.with::<dyn PlainText>() {
         push_plain(textable, out, ctx);
         return;
@@ -799,11 +811,46 @@ fn push_equation(
     raw
 }
 
+/// Write horizontal spacing (`h`) as one space: the words on either side
+/// are separate (`Name:#h(1fr)Value` reads "Name: Value"). Text right after
+/// it drops its leading whitespace, so `A #h(1cm) B` keeps one space, and
+/// one at an end of the text is trimmed. Zero or negative spacing (kerning,
+/// `L#h(-0.1em)A`) joins what it sits between, and writes nothing. A mixed
+/// value (`1em - 2pt`) counts as positive when any of its parts (ratio,
+/// absolute length, em) is: its sign depends on the font size and the
+/// container, which this walk does not know.
+fn push_spacing(amount: &Spacing, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
+    let positive = match amount {
+        Spacing::Fr(fr) => fr.get() > 0.0,
+        Spacing::Rel(rel) => {
+            rel.rel.get() > 0.0 || rel.abs.abs.to_raw() > 0.0 || rel.abs.em.get() > 0.0
+        }
+    };
+    if !positive {
+        return;
+    }
+    if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+        out.push(' ');
+        ctx.pos += 1;
+    }
+    ctx.spaced_any = true;
+    ctx.collapse_space = true;
+}
+
+/// The soft hyphen a `-?` shorthand writes.
+const SOFT_HYPHEN: char = '\u{ad}';
+
 /// Append an element's plain text, dropping its leading whitespace after an
-/// excluded scope (see [`MarkerCtx::collapse_space`]).
+/// excluded scope or spacing (see [`MarkerCtx::collapse_space`]). A soft
+/// hyphen (U+00AD) only marks where the word may break, and is dropped.
 fn push_plain(textable: &dyn PlainText, out: &mut EcoString, ctx: &mut MarkerCtx<'_>) {
     let before = out.len();
     textable.plain_text(out);
+    if out[before..].contains(SOFT_HYPHEN) {
+        let added: String = out[before..].chars().filter(|c| *c != SOFT_HYPHEN).collect();
+        out.truncate(before);
+        out.push_str(&added);
+    }
     if ctx.collapse_space && out.len() > before {
         if out[..before].chars().next_back().is_none_or(char::is_whitespace) {
             let added = out[before..].trim_start().to_string();

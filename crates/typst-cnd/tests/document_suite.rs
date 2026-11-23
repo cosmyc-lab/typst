@@ -4967,12 +4967,14 @@ fn table_kind_hint_never_leaks() {
 #[test]
 fn ref_never_lands_on_an_unlabelled_target() {
     // Over every example: an edge names a label a node carries, and no
-    // heading holds an edge, since no example but `math_refs.typ` writes a
-    // reference in a heading's own text (that one is pinned in
-    // `refs_written_in_a_heading_or_caption_sit_there`).
+    // heading holds an edge, since no example but `math_refs.typ` and
+    // `refs_per_occurrence.typ` writes a reference in a heading's own text
+    // (pinned in `refs_written_in_a_heading_or_caption_sit_there` and
+    // `every_reference_marker_is_an_edge_of_its_own`).
     for path in all_example_files() {
         let name = path.file_name().and_then(|n| n.to_str()).expect("name");
-        let refs_in_headings = name == "math_refs.typ";
+        let refs_in_headings =
+            matches!(name, "math_refs.typ" | "refs_per_occurrence.typ");
         let cnd = cnd_for_example(name);
         let nodes = all_nodes_full(&cnd);
         let carries = |label: &str| {
@@ -5701,4 +5703,226 @@ fn every_05_node_type_and_mark_kind_is_emitted() {
     assert_eq!(cell, Some((true, true, true, true)), "table cell");
     let note = cnd.footnotes.iter().map(|n| edges(&n.children)).collect::<Vec<_>>();
     assert!(note.contains(&(true, true, false, true)), "footnote: {note:?}");
+}
+
+#[test]
+fn a_restarted_footnote_counter_keeps_labels_unique() {
+    let cnd = cnd_for_example("footnote_counter_restart.typ");
+    let labels: Vec<&str> =
+        cnd.footnotes.iter().map(|note| note.label.as_str()).collect();
+    assert_eq!(labels, ["1", "2", "1~2"]);
+    assert_labels_globally_unique(&cnd);
+    assert_pool_refs_resolve(&cnd);
+    // Each marker points at its own note, whatever number it shows.
+    let note_of = |label: &str| {
+        let note = cnd.footnotes.iter().find(|note| note.label == label).unwrap();
+        footnote_text(note)
+    };
+    let first = paragraph_text(&cnd, "First");
+    let first_notes: Vec<String> =
+        first.footnotes.iter().map(|edge| note_of(&edge.label)).collect();
+    assert_eq!(first_notes, ["Note A1", "Note A2"]);
+    let second = paragraph_text(&cnd, "Second");
+    let second_notes: Vec<String> =
+        second.footnotes.iter().map(|edge| note_of(&edge.label)).collect();
+    assert_eq!(second_notes, ["Note B1"]);
+    // The marker's span still covers the number the document shows.
+    let span = second.footnotes[0].text_span.as_ref().expect("a span");
+    assert_eq!(codepoint_slice(&second.value, span), "1");
+}
+
+/// The value and `lang` of every text, in reading order.
+fn text_langs(cnd: &typst_cnd::Cnd) -> Vec<(String, Option<String>)> {
+    all_nodes_full(cnd)
+        .into_iter()
+        .flat_map(|node| node.texts())
+        .map(|text| (text.value.clone(), text.lang.clone()))
+        .collect()
+}
+
+#[test]
+fn an_inline_foreign_phrase_does_not_make_the_document_language() {
+    let cnd = cnd_for_example("lang_inline_foreign.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("en"));
+    for (value, lang) in text_langs(&cnd) {
+        assert_eq!(lang, None, "{value:?} inherits the document's language");
+    }
+}
+
+#[test]
+fn the_document_language_is_the_majority_one_when_none_is_set() {
+    let cnd = cnd_for_example("lang_majority.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("fr"));
+    assert_eq!(
+        text_langs(&cnd),
+        [
+            ("An English opening with one Wort.".into(), Some("en".into())),
+            (
+                "Un long paragraphe en français, avec bien plus de mots que l'ouverture."
+                    .into(),
+                None
+            ),
+            ("Un second paragraphe en français, lui aussi assez long.".into(), None),
+        ]
+    );
+}
+
+#[test]
+fn a_language_set_before_any_content_is_the_document_language() {
+    let cnd = cnd_for_example("lang_set_before_content.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("fr"));
+    assert_eq!(
+        text_langs(&cnd),
+        [
+            ("Titre".into(), None),
+            (
+                "A long English paragraph, with many more words than the French heading."
+                    .into(),
+                Some("en".into())
+            ),
+            ("A second English paragraph, quite long as well.".into(), Some("en".into())),
+        ]
+    );
+}
+
+#[test]
+fn a_language_a_template_sets_first_is_the_document_language() {
+    let cnd = cnd_for_example("lang_template.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("de"));
+    assert_eq!(
+        text_langs(&cnd),
+        [
+            ("Ein kurzer Satz.".into(), None),
+            (
+                "A long English paragraph, with many more words than the German one."
+                    .into(),
+                Some("en".into())
+            ),
+        ]
+    );
+}
+
+/// Each `refs` edge of `text` as `(label, the text its span covers)`, in
+/// span order; a span-less edge covers `None`.
+fn ref_occurrences(text: &RichText) -> Vec<(String, Option<String>)> {
+    let mut refs: Vec<_> = text.refs.iter().collect();
+    refs.sort_by_key(|edge| edge.text_span.clone());
+    refs.into_iter()
+        .map(|edge| {
+            let covered =
+                edge.text_span.as_ref().map(|span| codepoint_slice(&text.value, span));
+            (edge.label.clone(), covered)
+        })
+        .collect()
+}
+
+#[test]
+fn every_reference_marker_is_an_edge_of_its_own() {
+    let cnd = cnd_for_example("refs_per_occurrence.typ");
+    assert_refs_resolve(&cnd.nodes);
+    let some =
+        |label: &str, covered: &str| (label.to_string(), Some(covered.to_string()));
+    let par = paragraph_text(&cnd, "See the target");
+    assert_eq!(
+        ref_occurrences(par),
+        [
+            some("a", "the target"),
+            some("a", "Section\u{a0}1"),
+            some("a", "Section\u{a0}1")
+        ]
+    );
+    let item = paragraph_text(&cnd, "An item");
+    assert_eq!(
+        ref_occurrences(item),
+        [some("a", "label link"), some("a", "Section\u{a0}1")]
+    );
+    // A heading's references are read as authored, with no span: two
+    // markers of one target are the same span-less edge, kept once.
+    let heading = all_nodes(&cnd.nodes)
+        .into_iter()
+        .find_map(|node| match node {
+            CndNode::Heading(h) if h.text.value.starts_with("Back to") => Some(&h.text),
+            _ => None,
+        })
+        .expect("the second heading");
+    assert_eq!(ref_occurrences(heading), [("a".to_string(), None)]);
+    assert_eq!(incoming_count(&cnd.nodes, "a"), 3, "three texts reference it");
+}
+
+#[test]
+fn horizontal_spacing_is_a_space_and_soft_hyphens_are_no_text() {
+    let cnd = cnd_for_example("spacing_and_soft_hyphen.typ");
+    assert_eq!(heading_texts(&cnd.nodes), ["Name: Heading"]);
+    let values: Vec<&str> = all_nodes(&cnd.nodes)
+        .into_iter()
+        .filter_map(|node| match node {
+            CndNode::Paragraph(p) => Some(p.text.value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        values,
+        [
+            "Name: Value.",
+            "Left right.",
+            "Kerned LA word and glued.",
+            "Trailing",
+            "A soft-hyphen and an Example with bold after.",
+        ]
+    );
+    // Marks still index the value.
+    let soft = paragraph_text(&cnd, "soft-hyphen");
+    assert_eq!(mark_slices(soft, typst_cnd::STRONG), ["bold"]);
+}
+
+#[test]
+fn outline_and_bibliography_headings_with_nothing_after_are_no_nodes() {
+    let cnd = cnd_for_example("generated_headings.typ");
+    assert_eq!(heading_texts(&cnd.nodes), ["Intro"]);
+    assert_eq!(node_types(&cnd.nodes), ["heading"]);
+    let CndNode::Heading(intro) = &cnd.nodes[0] else { unreachable!() };
+    assert_eq!(paragraph_values(&intro.children), ["Text citing [1]."]);
+    // The bibliography stays in its pool.
+    let keys: Vec<&str> =
+        cnd.bibliography.iter().map(|entry| entry.label.as_str()).collect();
+    assert_eq!(keys, ["smith2024"]);
+}
+
+#[test]
+fn outline_and_bibliography_headings_keep_the_content_that_follows_them() {
+    let cnd = cnd_for_example("generated_headings_followed.typ");
+    assert_eq!(heading_texts(&cnd.nodes), ["Contents", "Intro", "Bibliography"]);
+    assert_eq!(node_types(&cnd.nodes), ["heading", "heading", "heading"]);
+    let children = |index: usize| match &cnd.nodes[index] {
+        CndNode::Heading(heading) => paragraph_values(&heading.children),
+        _ => unreachable!(),
+    };
+    assert_eq!(children(0), ["A paragraph after the outline."]);
+    assert_eq!(children(1), ["Text citing [1]."]);
+    assert_eq!(children(2), ["An appendix note after the bibliography."]);
+    let keys: Vec<&str> =
+        cnd.bibliography.iter().map(|entry| entry.label.as_str()).collect();
+    assert_eq!(keys, ["smith2024"]);
+}
+
+#[test]
+fn an_opening_foreign_phrase_does_not_make_the_document_language() {
+    let cnd = cnd_for_example("lang_opening_phrase.typ");
+    assert_eq!(cnd.doc.lang.as_deref(), Some("en"));
+    for (value, lang) in text_langs(&cnd) {
+        assert_eq!(lang, None, "{value:?} inherits the document's language");
+    }
+}
+
+#[test]
+fn a_footnote_number_a_node_carries_takes_a_suffix() {
+    let cnd = cnd_for_example("footnote_label_clash.typ");
+    assert!(label_exists(&cnd.nodes, "1"), "the heading keeps its label");
+    let labels: Vec<&str> =
+        cnd.footnotes.iter().map(|note| note.label.as_str()).collect();
+    assert_eq!(labels, ["1~2"]);
+    assert_labels_globally_unique(&cnd);
+    let par = paragraph_text(&cnd, "A paragraph with a note");
+    let edges: Vec<&str> = par.footnotes.iter().map(|edge| edge.label.as_str()).collect();
+    assert_eq!(edges, ["1~2"]);
 }
